@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- Vinea Arm — URDF Placeholder -->
+<!-- Replace with actual robot description as design is finalized -->
+<robot name="vinea_arm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Base link -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.1 0.1 0.1"/>
+      </geometry>
+    </visual>
+  </link>
+
+</robot>
