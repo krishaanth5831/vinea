@@ -12,11 +12,14 @@ Nothing in this file knows about windows, the mouse, or the terminal.
 import numpy as np
 
 from fr5 import (
+    GRIPPER_CLOSED,
+    GRIPPER_OPEN,
     JOINT_VELOCITY,
     JOINTS,
     MAX_REACH,
     SHOULDER,
     TOOL_SITE,
+    gripper_ctrl,
     reach_fraction,
     reset_home,
 )
@@ -90,7 +93,7 @@ class Reacher:
     """
 
     def __init__(self, model, data, speed=DEFAULT_SPEED, standoff=STANDOFF,
-                 max_reach=MAX_REACH, reached_mm=REACHED_MM):
+                 max_reach=MAX_REACH, reached_mm=REACHED_MM, mocap=0):
         import mink
 
         self.model = model
@@ -99,6 +102,11 @@ class Reacher:
         self.standoff = standoff
         self.max_reach = max_reach
         self.reached_mm = reached_mm
+        # Which mocap body, if any, to park on the goal as a visual marker.
+        # Pass None when the scene has its own mocap bodies doing real work —
+        # a stem holding a tomato, for instance — and does not want the reach
+        # loop dragging one of them around.
+        self.mocap = mocap
 
         # Which slots in ctrl and qpos belong to the arm. Looked up by name
         # rather than assumed to be 0..5, because mounting a gripper adds both
@@ -153,8 +161,8 @@ class Reacher:
         # demos add it because their target is an abstract point and needs
         # drawing; a scene with a real tomato in it does not, and the Reacher
         # should not insist on scenery it only uses for decoration.
-        if self.model.nmocap:
-            self.data.mocap_pos[0] = ball
+        if self.mocap is not None and self.model.nmocap > self.mocap:
+            self.data.mocap_pos[self.mocap] = ball
 
         vel = mink.solve_ik(self.config, self.tasks, CTRL_DT, "daqp", 1e-3,
                             limits=self.limits)
@@ -208,6 +216,47 @@ class Reacher:
 
         return attempt(ball, held >= HOLD_S, ik_err, arm_err, t, direction,
                        self.standoff, self.max_reach)
+
+
+class Gripper:
+    """The one control in this repo that is not a joint angle.
+
+    The 2F85 is commanded on Robotiq's own 0-255 scale — 0 fully open, 255
+    fully closed — through a single actuator pulling a tendon that splits the
+    force between both fingers. Two fingers, one number.
+
+    Commanding it is instant; the fingers travelling there is not, so every
+    command has to be followed by holding the arm still long enough for them
+    to arrive. See hold().
+    """
+
+    def __init__(self, model, data):
+        self.data = data
+        self.index = gripper_ctrl(model)
+        if self.index is None:
+            raise RuntimeError("no gripper in this model — build with gripper=True")
+
+    def set(self, value):
+        self.data.ctrl[self.index] = value
+
+    def open(self):
+        self.set(GRIPPER_OPEN)
+
+    def close(self):
+        self.set(GRIPPER_CLOSED)
+
+
+def hold(reacher, target, seconds, on_tick=None, direction=None):
+    """Keep the arm where it is for a while, still stepping physics.
+
+    The arm has to keep being commanded to its current target — let go of the
+    setpoint and it sags. So "waiting" is an active instruction rather than an
+    absence of one, which is true of the real arm too.
+    """
+    for _ in range(int(seconds / CTRL_DT)):
+        reacher.step(target, direction)
+        if on_tick is not None:
+            on_tick(0)
 
 
 def attempt(ball, reached, ik_err, arm_err, seconds, direction=None,
