@@ -1,0 +1,37 @@
+# Vinea — Python dependencies (direct only; transitives resolved by pip)
+#
+# Target: Python 3.14 on Ubuntu 26.04, alongside ROS 2 Lyrical.
+# The ROS 2 Python packages (rclpy, launch, tf2_*, ...) come from
+# /opt/ros/lyrical and are deliberately NOT pinned here.
+#
+#   python3 -m venv .venv
+#   ./.venv/bin/pip install -r requirements.txt
+#   ./.venv/bin/python scripts/phase0_smoketest.py
+#
+# Verified working 2026-07-30 on an RTX 1000 Ada (6 GB), CUDA 13.0.
+
+# --- Simulation -------------------------------------------------------------
+# MuJoCo replaced Gazebo: see docs / "Physics Engine Comparison" in the vault.
+mujoco>=3.10
+glfw
+PyOpenGL
+
+# --- Motion planning --------------------------------------------------------
+# mink replaces MoveIt 2, which has no binaries for ROS 2 Lyrical.
+# Differential IK; pulls in scipy + qpsolvers (daqp backend).
+mink
+
+# --- Computer vision --------------------------------------------------------
+# torch ships bundled CUDA wheels; no system CUDA toolkit needed.
+torch>=2.13
+torchvision>=0.28
+ultralytics>=8.4
+opencv-python>=5.0
+numpy>=2.5
+
+# --- ROS 2 Python runtime deps ----------------------------------------------
+# Not pulled in automatically by the /opt/ros packages when using a venv.
+empy
+lark
+osrf_pycommon
+typeguard
