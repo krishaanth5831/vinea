@@ -49,15 +49,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fr5 import (  # noqa: E402
     GRIPPER_CLOSED,
-    GRIPPER_OPEN,
     MAX_REACH_GRIPPER,
     TOOL_SITE,
+    add_crate,
     build_fr5_spec,
+    crate_contains,
     exit_without_teardown,
-    gripper_ctrl,
     reach_fraction,
 )
-from reach import CTRL_DT, DEFAULT_SPEED, Reacher, describe  # noqa: E402
+from reach import (  # noqa: E402
+    CTRL_DT,
+    DEFAULT_SPEED,
+    Gripper,
+    Reacher,
+    hold,
+)
 
 # --- the scene ---------------------------------------------------------------
 # Deliberately crude. Week 2 builds the real greenhouse row with hanging trusses
@@ -132,76 +138,13 @@ def add_tomato(spec):
     return body
 
 
-def add_bin(spec):
-    """An open-topped crate: a floor and four walls, all welded to the world."""
-    import mujoco
-
-    body = spec.worldbody.add_body(name="bin", pos=BIN_POS.tolist())
-    grey = [0.30, 0.33, 0.38, 1.0]
-    t = 0.008                                    # wall thickness
-
-    body.add_geom(name="bin_floor", type=mujoco.mjtGeom.mjGEOM_BOX,
-                  size=[BIN_HALF, BIN_HALF, t], pos=[0, 0, t], rgba=grey)
-    for name, pos, size in [
-        ("bin_x+", [BIN_HALF, 0, BIN_WALL / 2], [t, BIN_HALF, BIN_WALL / 2]),
-        ("bin_x-", [-BIN_HALF, 0, BIN_WALL / 2], [t, BIN_HALF, BIN_WALL / 2]),
-        ("bin_y+", [0, BIN_HALF, BIN_WALL / 2], [BIN_HALF, t, BIN_WALL / 2]),
-        ("bin_y-", [0, -BIN_HALF, BIN_WALL / 2], [BIN_HALF, t, BIN_WALL / 2]),
-    ]:
-        body.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_BOX,
-                      size=size, pos=pos, rgba=grey)
-    return body
-
-
 def build_scene():
     """FR5 + 2F85 + a table, a tomato and a crate."""
     spec = build_fr5_spec(gripper=True)
     add_table(spec)
     add_tomato(spec)
-    add_bin(spec)
+    add_crate(spec, name="bin", pos=BIN_POS, half=BIN_HALF, wall=BIN_WALL)
     return spec.compile()
-
-
-# --- driving the gripper -----------------------------------------------------
-
-class Gripper:
-    """The one control in this repo that is not a joint angle.
-
-    The 2f85 is commanded on Robotiq's own 0-255 scale — 0 fully open, 255
-    fully closed — through a single actuator pulling a tendon that splits the
-    force between both fingers. Two fingers, one number.
-
-    Commanding it is instant; the fingers travelling there is not, so every
-    command is followed by holding the arm still long enough for them to arrive.
-    """
-
-    def __init__(self, model, data):
-        self.data = data
-        self.index = gripper_ctrl(model)
-        if self.index is None:
-            raise RuntimeError("no gripper in this model — build with gripper=True")
-
-    def set(self, value):
-        self.data.ctrl[self.index] = value
-
-    def open(self):
-        self.set(GRIPPER_OPEN)
-
-    def close(self):
-        self.set(GRIPPER_CLOSED)
-
-
-def hold(reacher, target, seconds, on_tick=None):
-    """Keep the arm where it is for a while, still stepping physics.
-
-    The arm has to keep being commanded to its current target — let go of the
-    setpoint and it sags. So "waiting" is an active instruction, not an absence
-    of one, which is true of the real arm too.
-    """
-    for _ in range(int(seconds / CTRL_DT)):
-        reacher.step(target)
-        if on_tick is not None:
-            on_tick(0)
 
 
 # --- the pick cycle ----------------------------------------------------------
@@ -265,11 +208,7 @@ def run_pick(reacher, gripper, on_tick=None, verbose=True):
     go("home", home_tool)
     hold(reacher, home_tool, 0.5, on_tick)
 
-    in_bin = bool(
-        abs(tomato.xpos[0] - BIN_POS[0]) < BIN_HALF
-        and abs(tomato.xpos[1] - BIN_POS[1]) < BIN_HALF
-        and tomato.xpos[2] < BIN_POS[2] + BIN_WALL
-    )
+    in_bin = crate_contains(tomato.xpos, BIN_POS, BIN_HALF, BIN_WALL)
     return {"grasped": holding, "in_bin": in_bin,
             "tomato": tomato.xpos.copy()}
 

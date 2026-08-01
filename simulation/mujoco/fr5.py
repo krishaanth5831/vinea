@@ -395,6 +395,43 @@ def panel_normal():
     return np.array([-1.0, 0.0, 0.0])
 
 
+def add_crate(spec, name: str = "crate", pos=(0.30, -0.50, 0.0),
+              half: float = 0.16, wall: float = 0.12, thickness: float = 0.008):
+    """An open-topped crate to drop fruit into: a floor and four walls.
+
+    Welded to the world — no joints — so it is scenery the fruit can land in
+    and the arm can hit. Everything is a box, because a box is the cheapest
+    thing MuJoCo can collide against and this is not the part worth spending
+    solver time on.
+    """
+    import mujoco
+
+    body = spec.worldbody.add_body(name=name, pos=list(pos))
+    grey = [0.30, 0.33, 0.38, 1.0]
+    t = thickness
+
+    body.add_geom(name=f"{name}_floor", type=mujoco.mjtGeom.mjGEOM_BOX,
+                  size=[half, half, t], pos=[0, 0, t], rgba=grey)
+    for tag, p, s in [
+        ("x+", [half, 0, wall / 2], [t, half, wall / 2]),
+        ("x-", [-half, 0, wall / 2], [t, half, wall / 2]),
+        ("y+", [0, half, wall / 2], [half, t, wall / 2]),
+        ("y-", [0, -half, wall / 2], [half, t, wall / 2]),
+    ]:
+        body.add_geom(name=f"{name}_{tag}", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      size=s, pos=p, rgba=grey)
+    return body
+
+
+def crate_contains(pos, crate_pos, half: float, wall: float) -> bool:
+    """Did the fruit actually land in the crate, or just near it?"""
+    pos = np.asarray(pos, dtype=float)
+    crate_pos = np.asarray(crate_pos, dtype=float)
+    return bool(abs(pos[0] - crate_pos[0]) < half
+                and abs(pos[1] - crate_pos[1]) < half
+                and pos[2] < crate_pos[2] + wall)
+
+
 def add_reach_envelope(spec, name: str = "envelope", group: int = 2,
                        max_reach: float = MAX_REACH):
     """A faint shell at the edge of the arm's reach, as a visual aid.
