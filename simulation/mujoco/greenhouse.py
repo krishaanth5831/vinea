@@ -503,11 +503,16 @@ def add_greenhouse(spec, leafy=True):
 
 
 def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
-                bin_wall=None):
+                bin_wall=None, wrist_cam=False):
     """The whole Week 2 scene: FR5 + 2F85 + plant row + crate, in a greenhouse.
 
     This is the one place the scene is assembled, so the planner, the executor,
     the incident recorder and the demos all measure against the same world.
+
+    `wrist_cam` adds Week 3's eye-in-hand sensor camera. It defaults **off** and
+    that is on purpose: a camera changes no dynamics, but Week 1's and Week 2's
+    demos are asserted to produce byte-identical numbers and the cheapest way to
+    keep that true is for their scene to be untouched. Week 3 opts in.
     """
     from mission import BIN_HALF, BIN_POS, BIN_WALL
 
@@ -533,6 +538,10 @@ def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
             geom.solref = [0.02, 1.0]
 
     add_crate(spec, name="bin", pos=bin_pos, half=bin_half, wall=bin_wall)
+
+    if wrist_cam:
+        from camera import add_wrist_camera
+        add_wrist_camera(spec)
 
     if greenhouse:
         add_greenhouse(spec, leafy=leafy)
