@@ -38,6 +38,18 @@ STALL_S = 0.8           # no improvement for this long and it is not going to
 STALL_MM = 0.5          # "improvement" means at least this much closer
 GIVE_UP_S = 25.0        # backstop; the stall check normally fires long before
 
+# The same two numbers for the tool's angle, used only when orientation is on.
+#
+# ⚠️ These exist because Week 2 turned orientation on and every move started
+# reporting failure. The cause was not IK: solved to convergence, mink hits
+# these targets to 1-2 mm and under 0.2°. It was this stall check. Rotating the
+# wrist into the approach angle takes 6-8 s of sim time at DEFAULT_SPEED, and
+# through most of it the *position* error barely moves — so a detector watching
+# position alone sees 0.8 s of no progress and calls a move that is working
+# fine. Progress on either axis now counts as progress.
+REACHED_DEG = 5.0
+STALL_DEG = 0.5
+
 # --- rates ------------------------------------------------------------------
 # Physics runs at 500 Hz; IK runs at 100 Hz and holds its answer in between.
 # Real controllers work this way — nothing solves a QP every 2 ms — and the
@@ -84,6 +96,47 @@ def approach_point(ball, direction=None, standoff=STANDOFF):
     return ball + standoff * (d / np.linalg.norm(d))
 
 
+def approach_rotation(approach, roll=0.0):
+    """A tool orientation whose fingers point along `approach`.
+
+    `tool0`'s local +z is the finger axis — it runs from the wrist out through
+    the pinch point, so pointing it at the fruit is what "coming in straight"
+    means. Measured on the Week 1 table pick, position-only IK left it 47-52°
+    off vertical at every one of the six sweep positions.
+
+    The axis alone does not fix the frame: anything is still free to spin about
+    it, and that spin is the direction the two pads close along. It matters as
+    soon as the fruit hangs on something. Pads closing in a vertical plane will
+    swipe the stem on the way in; closing horizontally, they come around the
+    sides of the fruit and leave the peduncle alone. So the default roll puts
+    the closing axis horizontal, and `roll` rotates away from that if you want
+    it elsewhere.
+
+    Returns a 3x3 rotation matrix, columns [x, y, z] in world coordinates.
+    """
+    a = np.asarray(approach, dtype=float)
+    a = a / np.linalg.norm(a)
+
+    # Any vector not parallel to the approach works as a seed for the cross
+    # product. World up is the natural choice — it makes the first axis
+    # horizontal — but it degenerates for a straight-down approach, which is
+    # the single most common case here, so fall back to world x.
+    ref = np.array([0.0, 0.0, 1.0])
+    if abs(float(a @ ref)) > 0.99:
+        ref = np.array([1.0, 0.0, 0.0])
+
+    x = np.cross(ref, a)
+    x /= np.linalg.norm(x)
+    y = np.cross(a, x)
+
+    R = np.column_stack([x, y, a])
+
+    if roll:
+        c, s = np.cos(roll), np.sin(roll)
+        R = R @ np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return R
+
+
 class Reacher:
     """One arm, one IK solver, one control loop.
 
@@ -93,7 +146,9 @@ class Reacher:
     """
 
     def __init__(self, model, data, speed=DEFAULT_SPEED, standoff=STANDOFF,
-                 max_reach=MAX_REACH, reached_mm=REACHED_MM, mocap=0):
+                 max_reach=MAX_REACH, reached_mm=REACHED_MM, mocap=0,
+                 orientation_cost=0.0, approach=None, roll=0.0,
+                 roll_cost=0.0, reached_deg=REACHED_DEG, reset=True):
         import mink
 
         self.model = model
@@ -102,6 +157,51 @@ class Reacher:
         self.standoff = standoff
         self.max_reach = max_reach
         self.reached_mm = reached_mm
+        self.reached_deg = reached_deg
+
+        # How hard to insist on the tool's angle, against position_cost=1.0.
+        # 0.0 reproduces Week 1 exactly, which is why it is the default: the
+        # reach demos are about whether the arm can put its tool somewhere, and
+        # constraining the wrist as well would change what they measure.
+        #
+        # A picker wants this ON but not equal to position, and the reason is
+        # units: FrameTask sums position error in *metres* against orientation
+        # error in *radians*. The arm starts 52° off, which is 0.91 rad, and at
+        # equal weights that outvalues the 0.3 m of position error it also has
+        # — so the solver straightens the wrist first and swings the arm 685 mm
+        # off course to do it. In this scene that detour goes through the
+        # plants. Weight it well below 1.0 and position leads, with orientation
+        # arriving along the way. See the table in the Week 2 instructions.
+        self.orientation_cost = orientation_cost
+
+        # Cost about the finger axis itself — the roll. Free by default, and
+        # that is not a shortcut: `approach_rotation` has to return some full
+        # frame, but the roll it picks is arbitrary, and charging the solver for
+        # missing an arbitrary target wastes a DOF. Pinned, the QP would rather
+        # sit with the fingers horizontal at the right roll than vertical at the
+        # wrong one — measured, it converged 82-90° off approach at two of six
+        # positions and dropped the sweep to 2/6. Free, the same run is 6/6.
+        #
+        # Raise it when the roll means something: pads closing in a vertical
+        # plane swipe the stem on a hanging truss, which Step 3's row cares
+        # about and a tomato on a table does not.
+        self.roll_cost = roll_cost
+
+        # World direction the fingers should point, e.g. [0, 0, -1] for a
+        # top-down grasp or -panel_normal() for reaching into a row. None means
+        # "derive it from the standoff direction", which is right whenever the
+        # arm should travel in along the same line it backed off on.
+        self.approach = None if approach is None else np.asarray(approach,
+                                                                 dtype=float)
+        self.roll = roll
+
+        # Called after every *physics* step, not every control cycle. Week 2's
+        # breakable stems need it: the check that snaps a peduncle has to run
+        # at the rate the force actually changes. Polled at 100 Hz instead, a
+        # stiff arm pulling on a weld drove the force to 77 N before the 6 N
+        # threshold was noticed — an effective detach force twelve times the
+        # one written down, and that number feeds the kg/hr figure.
+        self.on_substep = None
         # Which mocap body, if any, to park on the goal as a visual marker.
         # Pass None when the scene has its own mocap bodies doing real work —
         # a stem holding a tomato, for instance — and does not want the reach
@@ -122,7 +222,9 @@ class Reacher:
         self.task = mink.FrameTask(
             frame_name=TOOL_SITE, frame_type="site",
             position_cost=1.0,
-            orientation_cost=0.0,   # Week 1: position only. Week 2 adds angle.
+            # Per-axis, in the tool's own frame: x and y tilt the finger axis,
+            # z spins about it. See roll_cost above.
+            orientation_cost=[orientation_cost, orientation_cost, roll_cost],
             lm_damping=1.0,
         )
         # Keeps the solver from wandering into strange joint configurations.
@@ -136,13 +238,97 @@ class Reacher:
         self.limits = [mink.VelocityLimit(
             model, {j: JOINT_VELOCITY[j] * speed for j in JOINTS})]
 
-        self.reset()
+        # ⚠️ Constructing a Reacher *moves the arm*, and that has already cost
+        # this repo one silent bug. `reset()` calls `reset_home`, which calls
+        # `mj_resetData` — so building one after arranging the scene throws the
+        # arrangement away: jittered fruit snap back to their nominal positions
+        # and the arm teleports to HOME, which sits inside the plant row. The
+        # run still prints the jitter figure it was asked for and still looks
+        # like a pass.
+        #
+        # Callers that have already placed the scene pass `reset=False` and get
+        # a solver synced to what is actually there, which is what they meant.
+        if reset:
+            self.reset()
+        else:
+            self.sync()
+
+    def sync(self):
+        """Point the solver at the arm's current posture, moving nothing."""
+        self.config.update(self.data.qpos[: self.model.nq].copy())
+        self.posture.set_target_from_configuration(self.config)
+
+    def set_orientation_cost(self, cost, roll_cost=None):
+        """Change how hard the tool's angle is insisted on, mid-cycle.
+
+        Used to drop the constraint once it stops meaning anything — going
+        home with an empty gripper, for instance, where demanding a particular
+        wrist angle only makes a reachable pose unreachable.
+        """
+        self.orientation_cost = cost
+        if roll_cost is not None:
+            self.roll_cost = roll_cost
+        self.task.set_orientation_cost([cost, cost, self.roll_cost])
+
+    def set_speed(self, speed):
+        """Change the joint speed cap, rebuilding the limit the QP sees.
+
+        Needed because the speed is a *constraint inside the solver*, not a
+        scale factor applied afterwards, so it cannot be changed by assignment.
+
+        Week 2 changes it mid-cycle for one reason: force resolution. The pull
+        that breaks a peduncle is position-controlled, and one control cycle at
+        full speed moves the setpoint 0.0047 rad, which against kp=4000 is
+        ~19 Nm — about 48 N at the tool. A threshold of 6 N cannot be resolved
+        inside a 48 N step: the weld reads 1.18 N, then 48 N, and "snaps at
+        6 N" becomes "snaps the instant you pull", with a recorded peak eight
+        times the number you wrote down. Pulling slower shrinks the step.
+        """
+        import mink
+
+        self.speed = speed
+        self.limits = [mink.VelocityLimit(
+            self.model, {j: JOINT_VELOCITY[j] * speed for j in JOINTS})]
 
     def reset(self):
         """Put the arm at its home posture and sync the solver to it."""
         reset_home(self.model, self.data)
-        self.config.update(self.data.qpos[: self.model.nq].copy())
-        self.posture.set_target_from_configuration(self.config)
+        self.sync()
+
+    def finger_axis(self, ball, direction=None):
+        """Which way the fingers should point on the way in.
+
+        An explicit `approach` always wins. Otherwise the arm should travel in
+        along the same line it stood off on: `approach_point` puts the aim
+        point at `ball + standoff * direction`, so the trip from aim to fruit
+        runs along `-direction`. With no direction at all the standoff is
+        outward from the shoulder, and the approach is back along it.
+        """
+        if self.approach is not None:
+            return self.approach
+        if direction is not None:
+            return -np.asarray(direction, dtype=float)
+
+        out = np.asarray(ball, dtype=float) - SHOULDER
+        n = float(np.linalg.norm(out))
+        return out / n if n > 1e-6 else np.array([0.0, 0.0, -1.0])
+
+    def tool_tilt_deg(self):
+        """Angle between the finger axis and straight down, in degrees.
+
+        The honest read on whether orientation is doing anything: 0° is a
+        gripper pointing at the floor, 90° is horizontal. Week 1 sat at 47-52°
+        at every sweep position without ever being asked to do otherwise.
+        """
+        axis = self.data.site(TOOL_SITE).xmat.reshape(3, 3)[:, 2]
+        return float(np.degrees(np.arccos(np.clip(-axis[2], -1.0, 1.0))))
+
+    def tool_axis_error_deg(self, ball, direction=None):
+        """How far the fingers actually point from where they were told to."""
+        want = np.asarray(self.finger_axis(ball, direction), dtype=float)
+        want = want / np.linalg.norm(want)
+        got = self.data.site(TOOL_SITE).xmat.reshape(3, 3)[:, 2]
+        return float(np.degrees(np.arccos(np.clip(float(want @ got), -1.0, 1.0))))
 
     def step(self, ball, direction=None):
         """One control cycle. Returns (ik_error_m, arm_error_m).
@@ -155,7 +341,15 @@ class Reacher:
         import mujoco
 
         goal = approach_point(ball, direction, self.standoff)
-        self.task.set_target(mink.SE3.from_translation(goal))
+
+        if self.orientation_cost > 0.0:
+            R = approach_rotation(self.finger_axis(ball, direction), self.roll)
+            self.task.set_target(mink.SE3.from_rotation_and_translation(
+                mink.SO3.from_matrix(R), goal))
+        else:
+            # Identity rotation, but orientation_cost is 0 so the solver never
+            # reads it. Building the SE3 without a rotation says that out loud.
+            self.task.set_target(mink.SE3.from_translation(goal))
 
         # Keep the red marker on the goal, if the scene has one. The reach
         # demos add it because their target is an abstract point and needs
@@ -178,6 +372,8 @@ class Reacher:
         self.data.ctrl[self.arm_ctrl] = self.config.q[self.arm_qpos]
         for _ in range(TICKS_PER_CTRL):
             mujoco.mj_step(self.model, self.data)
+            if self.on_substep is not None:
+                self.on_substep()
 
         ik_pos = self.config.get_transform_frame_to_world(
             TOOL_SITE, "site").translation()
@@ -194,8 +390,10 @@ class Reacher:
         not "the clock ran out".
         """
         held = stalled = t = 0.0
-        best = float("inf")
+        best = best_axis = float("inf")
         ik_err = arm_err = float("nan")
+        axis_err = 0.0
+        oriented = self.orientation_cost > 0.0
 
         while t < GIVE_UP_S:
             ik_err, arm_err = self.step(ball, direction)
@@ -203,19 +401,30 @@ class Reacher:
             if on_tick is not None:
                 on_tick(t)
 
-            held = held + CTRL_DT if arm_err * 1000 < self.reached_mm else 0.0
+            # Arriving means both, when orientation is being asked for. A move
+            # that is on the spot but pointing the wrong way has not finished:
+            # that is exactly the state Week 1 shipped, and it cost a grasp.
+            if oriented:
+                axis_err = self.tool_axis_error_deg(ball, direction)
+            arrived = (arm_err * 1000 < self.reached_mm
+                       and (not oriented or axis_err < self.reached_deg))
+            held = held + CTRL_DT if arrived else 0.0
             if held >= HOLD_S:
                 break
 
-            if arm_err < best - STALL_MM / 1000:
-                best, stalled = arm_err, 0.0
+            closer = arm_err < best - STALL_MM / 1000
+            straighter = oriented and axis_err < best_axis - STALL_DEG
+            if closer or straighter:
+                best = min(best, arm_err)
+                best_axis = min(best_axis, axis_err)
+                stalled = 0.0
             else:
                 stalled += CTRL_DT
                 if stalled >= STALL_S:
                     break
 
         return attempt(ball, held >= HOLD_S, ik_err, arm_err, t, direction,
-                       self.standoff, self.max_reach)
+                       self.standoff, self.max_reach, axis_err)
 
 
 class Gripper:
@@ -245,6 +454,31 @@ class Gripper:
     def close(self):
         self.set(GRIPPER_CLOSED)
 
+    def ramp(self, reacher, target, seconds, value=GRIPPER_CLOSED,
+             on_tick=None, direction=None):
+        """Drive the fingers to `value` gradually, holding the arm still.
+
+        ⚠️ `close()` is a step input, and on a fruit that is attached to
+        something that step is an impact. Commanding 0 -> 255 in one control
+        cycle makes the pads accelerate into the tomato and arrive at speed:
+        measured on a hanging fruit, the peduncle went 1.18 N -> 91 N -> 164 N
+        within 10 ms, rang down, and settled at 4.6 N. The settled value is
+        comfortably under SNAP_N; the *impact* is twenty-seven times over it,
+        so every stem snapped on contact and no fruit ever survived to be
+        pulled. On video it looks like a successful harvest.
+
+        Ramping the command over a few tenths of a second is what a real
+        Robotiq does anyway — it has a speed setting — and it keeps the peak
+        near the settled value instead of an order of magnitude above it.
+        """
+        start = float(self.data.ctrl[self.index])
+        steps = max(1, int(seconds / CTRL_DT))
+        for i in range(steps):
+            self.set(start + (value - start) * (i + 1) / steps)
+            reacher.step(target, direction)
+            if on_tick is not None:
+                on_tick(0)
+
 
 def hold(reacher, target, seconds, on_tick=None, direction=None):
     """Keep the arm where it is for a while, still stepping physics.
@@ -260,7 +494,7 @@ def hold(reacher, target, seconds, on_tick=None, direction=None):
 
 
 def attempt(ball, reached, ik_err, arm_err, seconds, direction=None,
-            standoff=STANDOFF, max_reach=MAX_REACH):
+            standoff=STANDOFF, max_reach=MAX_REACH, axis_deg=0.0):
     """What happened on one attempt, in the shape describe() expects.
 
     `ball` is where you put the tomato, and what gets printed. `reach_frac` is
@@ -275,6 +509,7 @@ def attempt(ball, reached, ik_err, arm_err, seconds, direction=None,
         "reached": reached,
         "ik_mm": ik_err * 1000,
         "arm_mm": arm_err * 1000,
+        "axis_deg": axis_deg,
         "seconds": seconds,
         "reach_frac": reach_fraction(aim, max_reach),
     }
