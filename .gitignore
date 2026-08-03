@@ -39,6 +39,13 @@ log/
 # Third-party model zoos (cloned, not vendored) — see simulation/mujoco/week1_reach.py
 third_party/
 
+# Pretrained weights (fetched, not vendored) — same reasoning as third_party/.
+# yolo11n.pt is a stock 5.6 MB Ultralytics COCO checkpoint that nothing in this
+# repo trains or modifies; see simulation/mujoco/detect.py for where it is read.
+#   ./.venv/bin/python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+#   mv yolo11n.pt models/weights/
+models/weights/*.pt
+
 # Weekly demo captures
 *.mp4
 

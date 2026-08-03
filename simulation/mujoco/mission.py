@@ -1016,7 +1016,15 @@ def park_posture(model, iters=600):
 
 
 def reset_park(model, data, q):
-    """Reset the scene with the arm parked outside the canopy, not inside it."""
+    """Reset the scene with the arm parked outside the canopy, not inside it.
+
+    ⚠️ **This resets the *whole world*, not just the arm.** `mj_resetData`
+    restores every free body to its spawn pose and every `eq_active` flag to its
+    model default — so a tomato that was picked and crated reappears on the
+    plant with its stem re-welded. That is exactly right when starting a fresh
+    independent trial, and completely wrong between the fruit of one row.
+    Use `park_arm` for that; see the note there.
+    """
     import mujoco
 
     from fr5 import JOINTS
@@ -1025,6 +1033,47 @@ def reset_park(model, data, q):
     for value, jname in zip(q, JOINTS):
         data.joint(jname).qpos[0] = value
         data.ctrl[model.actuator(f"{jname}_pos").id] = value
+    mujoco.mj_forward(model, data)
+
+
+def park_arm(model, data, q):
+    """Put the arm back at the park posture, leaving the world alone.
+
+    The counterpart to `reset_park`, and the one a **sequence harvest** needs.
+    Harvesting a row means the scene carries state forward: fruit that were
+    picked are in the crate, their stems are broken, and the row empties as the
+    arm works it. `reset_park` destroys all of that — it is a fresh trial, not
+    the next pick.
+
+    What this touches: the six arm joints (position, velocity, and their
+    actuator setpoints) and the gripper command. What it deliberately does not:
+    `qpos` of any free body, `eq_active`, or anything else in `mjData`.
+
+    ⚠️ It is a teleport, not a move. That is acceptable *between* picks, where
+    the arm is empty and already near park, and it is not acceptable at any
+    other time — teleporting with a fruit in the gripper would drag it through
+    the scene with the constraint solver fighting it. Call it only when the
+    gripper is open and holding nothing.
+
+    Why teleport rather than drive back: posture. Week 2's `anchor_posture`
+    found that the same tool point reached from a wound-up posture is a
+    different problem for local differential IK, and a long traverse along the
+    row winds it. Driving back returns the tool to park without necessarily
+    unwinding the joints; setting the joint angles does both.
+    """
+    import mujoco
+
+    from fr5 import GRIPPER_OPEN, JOINTS, gripper_ctrl
+
+    for value, jname in zip(q, JOINTS):
+        joint = data.joint(jname)
+        joint.qpos[0] = value
+        joint.qvel[0] = 0.0
+        data.ctrl[model.actuator(f"{jname}_pos").id] = value
+
+    grip = gripper_ctrl(model)
+    if grip is not None:
+        data.ctrl[grip] = GRIPPER_OPEN
     mujoco.mj_forward(model, data)
 
 
