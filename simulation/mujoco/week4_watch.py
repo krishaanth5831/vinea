@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from week4_place import (Crop, GUARANTEED_HALF_Y, GUARANTEED_Z, MAX_FRUIT,  # noqa: E402
                          MIN_SPACING, PLACE_BOARD, auto_layout, check,
-                         harvest_placed, park_spot, pool_trusses)
+                         harvest_placed, park_spot, pool_trusses, random_seed)
 
 # The four-panel layout from week3_watch.Views.frame():
 #     [ deck | wrist ]
@@ -51,6 +51,11 @@ from week4_place import (Crop, GUARANTEED_HALF_Y, GUARANTEED_Z, MAX_FRUIT,  # no
 # Each tile is TILE_W x TILE_H, so the deck panel — the one you click — is the
 # top-left quadrant.
 DECK_TILE = (0, 0)
+
+# Watching speed. The measurement tools stay at reach.DEFAULT_SPEED (0.15) so
+# their numbers remain comparable with every earlier week; this is for sitting
+# and looking at it, where 30 s a pick is a long time to stare at a screen.
+WATCH_SPEED = 0.4
 
 
 def panel_pixel(x, y, tile_w, tile_h, view):
@@ -157,10 +162,16 @@ class Placer:
                 self.note = "place at least one tomato first"
                 self.note_colour = (110, 110, 250)
         elif k in (ord("a"), ord("A")):
-            for _n, yy, zz in auto_layout(MAX_FRUIT - len(self.crop.placed),
-                                          seed=len(self.crop.placed) + 1):
+            # ⚠️ A fresh random seed on every press. Seeding from the number
+            # already placed gave the identical arrangement each time, which
+            # measures the simulator rather than the robot — the whole point of
+            # pressing it repeatedly is to see a layout the planner has not met.
+            before = len(self.crop.placed)
+            for _n, yy, zz in auto_layout(MAX_FRUIT - before,
+                                          seed=random_seed()):
                 self.crop.place(yy, zz, quiet=True)
-            self.note = f"auto-filled to {len(self.crop.placed)}"
+            self.note = (f"auto-filled {before} -> {len(self.crop.placed)}"
+                         f" (new arrangement)")
             self.note_colour = (140, 250, 150)
         elif k in (ord("c"), ord("C")):
             self.crop.clear()
@@ -194,7 +205,10 @@ def main():
                     help="pre-place N fruit instead of clicking them")
     ap.add_argument("--seen", action="store_true",
                     help="plan from the camera instead of being told")
-    ap.add_argument("--speed", type=float, default=None)
+    ap.add_argument("--speed", type=float, default=WATCH_SPEED,
+                    help=f"fraction of the FR5's rated joint speed "
+                         f"(default {WATCH_SPEED}; measurement tools use "
+                         f"0.15 so their numbers stay comparable)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--wrist-every", type=int, default=4)
@@ -276,13 +290,28 @@ def main():
                                   "detector": args.detector if args.seen
                                   else "told"}) if args.log else None
     rows = []
+    # ⚠️ Decimate the render. `on_tick` fires every control cycle — 100 Hz of
+    # simulated time — and `_pump` renders three 640x480 camera views and
+    # composites four panels each call. Rendering at 100 Hz to show 30 fps is
+    # three times the work for no visible difference, and it is what made this
+    # run far slower than the same harvest in a plain viewer.
+    from reach import CTRL_DT
+
+    every = max(1, int(round((1.0 / args.fps) / CTRL_DT)))
+    ticks = [0]
+
+    def pump(_t=None):
+        ticks[0] += 1
+        if ticks[0] % every == 0:
+            _pump(views, sink)
+
+    print(f"  rendering every {every} control cycles (~{args.fps} fps)")
     try:
         rows = harvest_placed(
             model, data, row, crop, park_q, speed=args.speed,
             sensor=sensor if args.seen else None,
             detector=detector if args.seen else None,
-            log=log, seed=args.seed,
-            on_tick=lambda _t=None: _pump(views, sink))
+            log=log, seed=args.seed, on_tick=pump)
     except KeyboardInterrupt:
         print("\n  stopped early — reporting the picks that finished")
 

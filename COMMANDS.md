@@ -19,6 +19,8 @@ Every command in the repo, Weeks 1–4, with what happens when you run it.
 
 ⚠️ **`--out` and a window are mutually exclusive everywhere.** Recording forces MuJoCo's offscreen renderer (EGL) and a live window needs GLFW. You cannot watch and record in the same run.
 
+⚠️ **Two different default speeds, on purpose.** The Week 4 interactive tools (`week4_place.py`, `week4_watch.py`) run at **0.4** of the FR5's rated joint speed, because watching a pick at 0.15 is 30 seconds of staring. Every *measurement* tool — `week4_run.py`, `week4_snap.py`, `week4_envelope.py`, and all of Weeks 1–3 — stays at **0.15**, because every number in this repo was taken there and changing it would silently break the comparisons. Pass `--speed 0.15` to an interactive tool to match.
+
 ---
 
 ## Start here
@@ -263,14 +265,32 @@ While the window is open:
 | | |
 |---|---|
 | **double-click the board** | place a tomato there |
-| **A** | auto-fill the rest (15 max) |
+| **A** | auto-fill the rest (10 max) — **a different arrangement every press** |
 | **C** | clear them all and start over |
 | **SPACE** | start harvesting what you placed |
 | **Q** or close the window | quit |
 
 Placing and picking happen in **one continuous window** — it does not close and reopen.
 
-The board is not decoration: it is the guaranteed reachable rectangle (y ±0.55 m, z 0.15–0.95 m) measured on Week 1's 31×24 grid, so **anywhere you can click, the arm can work**. Placements closer than 200 mm to another fruit are refused with the reason printed — below that the stems load each other past the detach threshold and a truss snaps itself before the arm moves.
+**The board shows two zones, and both were measured on this scene** by `week4_envelope.py` — 49 cells, one full pick each:
+
+| | |
+|---|---|
+| **bright green core** — y ±0.37, z 0.50–0.70 | every probe picked clean (10/10) |
+| **dim amber surround** — y ±0.55, z 0.42–0.72 | most did (18/21 = 86%) |
+| outside | refused — the arm was measured to fail there |
+
+⚠️ **These numbers were corrected on 2026-08-04 and used to be wrong.** The board previously advertised y ±0.55, z 0.15–0.95, inherited from `week1_mousereach.py` — which measured that against a *different scene*, with the crate out at y=−0.80. Week 2 moved the crate to y=−0.52 and nobody re-measured. Only **21 of 49 cells** in that old region actually picked cleanly, which is why fruit placed high or low kept getting dropped.
+
+Both failing bands have a physical cause in the scene:
+- **above z 0.83** the fruit's stem anchor is at or above the support bar the trusses hang from (`SUPPORT_Z` 0.88 − `STEM_LEN` 0.05), so the arm reaches into the bar
+- **below z 0.32** the fruit is under the substrate gutter (`GUTTER_Z`), where no real truss ever is
+
+The five fixed trusses this repo has always scored 5/5 on sit at z 0.54–0.72 — inside the good band, which is why they always worked.
+
+⚠️ **Ten fruit, not fifteen.** The band the arm can work is 1.10 × 0.30 m, which holds 10 at the 200 mm minimum spacing. Asking for more returns fewer and says so.
+
+Placements closer than 200 mm to another fruit are refused with the reason printed — below that the stems load each other past the detach threshold and a truss snaps itself before the arm moves.
 
 ```bash
 # 🪟 skip the clicking — auto-place 6 and watch it work them
@@ -280,20 +300,23 @@ The board is not decoration: it is the guaranteed reachable rectangle (y ±0.55 
 ./.venv/bin/python simulation/mujoco/week4_place.py --grid 4 --add-at 2 --windowed
 
 # 📝 headless is the default — no flag needed
-./.venv/bin/python simulation/mujoco/week4_place.py --grid 15
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 10
 
 # 📝 save an arrangement so it can be replayed exactly
-./.venv/bin/python simulation/mujoco/week4_place.py --grid 15 --save layouts/dense15.json
-./.venv/bin/python simulation/mujoco/week4_place.py --layout layouts/dense15.json
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --save layouts/dense10.json
+./.venv/bin/python simulation/mujoco/week4_place.py --layout layouts/dense10.json
 
 # 📝 perception in the loop instead of telling the planner where fruit are
-./.venv/bin/python simulation/mujoco/week4_place.py --layout layouts/dense15.json --seen
+./.venv/bin/python simulation/mujoco/week4_place.py --layout layouts/dense10.json --seen
 
 # 📝 log every attempt for later analysis
 ./.venv/bin/python simulation/mujoco/week4_place.py --grid 8 --log runs/mine.jsonl
 
 # 🎬
-./.venv/bin/python simulation/mujoco/week4_place.py --grid 12 --seed 3 --out week4_place.mp4
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --seed 3 --out week4_place.mp4
+
+# 📝 match the measurement runs instead of the faster interactive default
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --speed 0.15
 ```
 
 ### 🪟🖱 `week4_watch.py` — the four-panel view, with clicking
@@ -305,7 +328,7 @@ Week 3's OpenCV window with Week 4's free placement in front of it. **This is th
 ./.venv/bin/python simulation/mujoco/week4_watch.py
 
 # 🪟 pre-place 12 and skip straight to watching
-./.venv/bin/python simulation/mujoco/week4_watch.py --grid 12
+./.venv/bin/python simulation/mujoco/week4_watch.py --grid 10
 
 # 🪟 plan from the camera instead of being told where fruit are
 ./.venv/bin/python simulation/mujoco/week4_watch.py --grid 8 --seen
@@ -315,7 +338,7 @@ Week 3's OpenCV window with Week 4's free placement in front of it. **This is th
 ./.venv/bin/python simulation/mujoco/week4_watch.py --view wrist
 
 # 🎬 record the whole session, placement included
-./.venv/bin/python simulation/mujoco/week4_watch.py --grid 12 --out week4_watch.mp4
+./.venv/bin/python simulation/mujoco/week4_watch.py --grid 10 --out week4_watch.mp4
 ```
 
 ```
@@ -356,6 +379,28 @@ Refusals appear on the stats panel with the reason — off the board, or under t
 ./.venv/bin/python simulation/mujoco/carrytrace.py --timestep 0.001
 ```
 
+### 📝 `week4_envelope.py` — where can the arm actually pick?
+
+```bash
+# 📝 49 cells, one full pick each, prints a map. ~26 min
+./.venv/bin/python simulation/mujoco/week4_envelope.py
+
+# 📝 finer grid
+./.venv/bin/python simulation/mujoco/week4_envelope.py --ny 9 --nz 9
+```
+
+Re-run this **whenever the crate, the gripper, the standoff gaps or the row position move** — all four change the answer, and the last time one did (the crate moving from y=−0.80 to −0.52) nobody re-measured and the placement board was wrong for two weeks. Output looks like:
+
+```
+        -0.55  -0.37  -0.18  +0.00  +0.18  +0.37  +0.55
+z 0.68      O      O      O      O      O      O      g
+z 0.55      O      O      O      O      O      O      O
+z 0.42      O      O      d      O      O      g      O
+z 0.28      X      g      g      u      u      X      g
+```
+
+`O` clean · `d` dropped · `X` ejected · `g` grasp failed · `u` unreachable · `a` guard abort · `r` refused.
+
 ### 📝 The measurement runs — long, no window
 
 ```bash
@@ -386,7 +431,9 @@ Refusals appear on the stats panel with the reason — off the board, or under t
 
 **`EGLError` on exit, or a segfault after the run finishes.** Both are upstream MuJoCo teardown issues on this machine, both happen after the work is done, and neither loses anything. Do not go debugging them.
 
-**The run is slower than real time.** Two MuJoCo processes on one machine halve each other's speed. Check nothing else is still running.
+**The run is slower than real time.** Two MuJoCo processes on one machine halve each other's speed — check nothing else is running. In `week4_watch.py` the four-panel composite is the expensive part; it renders at `--fps` (default 30) rather than at every control cycle, but dropping to `--fps 15` buys real speed if the machine is loaded.
+
+**Fruit appear as odd shapes floating behind the arm.** Fixed — the 24-truss reserve pool used to be drawn while parked. If you see it again, `Crop._show` is not being called.
 
 **A capture got overwritten.** Captures are named after the script that made them, and `*.mp4` is gitignored — so there is no copy. Check what `--out` defaults to before running anything headless.
 
@@ -398,11 +445,13 @@ Useful when deciding whether to sit and watch:
 
 | | |
 |---|---|
-| one pick, default speed | ~28–31 s of simulated time |
-| a 5-fruit row | ~2.5 min |
-| 15 fruit | ~8 min |
+| one pick at 0.15 (measurement tools) | ~28–31 s of simulated time |
+| one pick at 0.4 (interactive tools) | ~19–21 s |
+| a 5-fruit row, interactive | ~2 min |
+| 10 fruit, interactive | ~3.5 min |
 | the full campaign | ~30 min |
 | `week4_snap.py --n 8` | ~20 min |
+| `week4_envelope.py` (49 cells) | ~26 min |
 
 Watching runs at wall-clock speed. Headless runs faster than real time, but only when nothing else is competing for the machine.
 

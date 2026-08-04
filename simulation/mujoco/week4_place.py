@@ -77,34 +77,58 @@ from plant_row import FRUIT_R, ROW_X  # noqa: E402
 
 # --- where fruit may be placed -----------------------------------------------
 #
-# Measured, not derived. week1_mousereach.py drove a 31x24 grid over this plane,
-# each cell taking the arm to the pre-grasp point and then to the fruit with a
-# tomato actually there so it blocked what it would really block:
+# ⚠️ **Re-measured 2026-08-04 against the scene these numbers are actually used
+# in.** The first version imported the envelope from `week1_mousereach.py`,
+# which measured it cell by cell on a 31x24 grid — but against a *different*
+# scene: board at x=0.55 with the crate out at y=-0.80. Week 2 moved the crate
+# in to y=-0.52 and put the row at x=0.60, and nobody re-measured. The result
+# was a board advertising "anywhere here is pickable" over a region where only
+# **21 of 49 cells actually picked cleanly**.
 #
-#     full width out to y = +/-0.75 for z from 0.15 up to 0.80
-#     above 0.80 it closes into a dome, ending near z = 1.15 at |y| < 0.20
-#     below 0.15 the crate is in the way of the approach, not the arm
+# `week4_envelope.py` re-ran the same experiment on the real scene, 7x7 cells,
+# one full pick each:
 #
-# GUARANTEED is the largest rectangle inside that dome with a full grid cell of
-# margin. DOME is the honest outer edge. Placement is allowed in both and refused
-# outside — but which zone a fruit was in is logged, because a pick that fails
-# out at the dome edge is an `unreachable`, and that is a result rather than a
-# bug. It is also Week 1's Step 5 experiment finally happening.
-GUARANTEED_HALF_Y = 0.55
-GUARANTEED_Z = (0.15, 0.95)
-DOME_HALF_Y = 0.75
-DOME_Z = (0.15, 0.80)
-DOME_APEX_Z = 1.15
-DOME_APEX_HALF_Y = 0.20
+#           -0.55  -0.37  -0.18  +0.00  +0.18  +0.37  +0.55
+#   z 0.95      u      O      a      a      a      a      g
+#   z 0.82      O      a      a      a      a      O      g
+#   z 0.68      O      O      O      O      O      O      g
+#   z 0.55      O      O      O      O      O      O      O
+#   z 0.42      O      O      d      O      O      g      O
+#   z 0.28      X      g      g      u      u      X      g
+#   z 0.15      u      u      d      g      u      u      X
+#
+# Both failing bands have a physical cause in the scene rather than in the arm:
+#
+#   * **Above z 0.83** a fruit's stem anchor is at or above the support bar the
+#     trusses hang from (`plant_row.SUPPORT_Z` 0.88 minus `STEM_LEN` 0.05), so
+#     the arm is reaching into the bar. Those cells abort on the guard.
+#   * **Below z 0.32** the fruit is under the substrate gutter
+#     (`greenhouse.GUTTER_Z`), which no real truss ever is.
+#
+# So the pickable band is genuinely narrow, and it is narrow for horticultural
+# reasons rather than arbitrary ones. The five fixed trusses this repo has
+# always scored 5/5 on sit at z 0.54-0.72 — inside it, which is exactly why
+# they always worked and arbitrary placements did not.
+GUARANTEED_HALF_Y = 0.37     # every cell in this box picked clean: 10/10
+GUARANTEED_Z = (0.50, 0.70)
+# The wider band placement is still allowed in, at 18/21 = 86% measured. A
+# placement here is recorded as `marginal` so a failure out at the edge reads as
+# the expected result rather than a surprise.
+MARGINAL_HALF_Y = 0.55
+MARGINAL_Z = (0.42, 0.72)
 
 # ⚠️ Minimum centre-to-centre spacing. plant_row.py records what happens below
 # it: a truss placed 127 mm out hung at 4.76 N instead of 1.18 N and spiked to
 # 9.25 N — over SNAP_N — so it snapped itself before the arm ever moved.
 MIN_SPACING = 0.200
 
-# The current five-fruit row's closest pair is 172 mm (t0-t1), so the row this
-# repo has always measured against is itself inside the limit but not by much.
-MAX_FRUIT = 15
+# ⚠️ **Ten, not fifteen.** The marginal band is 1.10 m x 0.30 m, which holds
+# 5 x 2 = 10 fruit at the pitch `auto_layout` uses (the 200 mm minimum plus
+# twice the jitter, so the jitter cannot push a pair under the minimum).
+# Fifteen was chosen against the old (wrong) envelope and simply does not fit a
+# region the arm can work. Asking for more than this now returns fewer rather
+# than silently placing unpickable fruit.
+MAX_FRUIT = 10
 POOL = 24
 
 # Where unplaced fruit hang: behind the arm, clear of everything, welds live.
@@ -116,6 +140,10 @@ PARK_PITCH = 0.12
 # The clickable board. Named so `board_click_to_yz` and the selection test can
 # find it without threading the id through every call.
 PLACE_BOARD = "place_board"
+
+# Speed for interactive runs. Faster than the 0.15 the measurements use, because
+# watching is the point here — see the --speed help.
+WATCH_SPEED = 0.4
 
 
 def pool_trusses(n=POOL):
@@ -131,19 +159,17 @@ def park_spot(i):
 # --- the placement rules -----------------------------------------------------
 
 def zone(y, z):
-    """'guaranteed', 'dome' or None. None means the arm cannot work there."""
-    if abs(y) <= GUARANTEED_HALF_Y and GUARANTEED_Z[0] <= z <= GUARANTEED_Z[1]:
+    """'guaranteed', 'marginal' or None — measured, not derived.
+
+    See the map above. None means the arm was measured to fail there, so the
+    placement is refused rather than accepted and quietly lost.
+    """
+    if (abs(y) <= GUARANTEED_HALF_Y
+            and GUARANTEED_Z[0] <= z <= GUARANTEED_Z[1]):
         return "guaranteed"
-    if z < DOME_Z[0]:
-        return None
-    if z <= DOME_Z[1]:
-        return "dome" if abs(y) <= DOME_HALF_Y else None
-    # Above 0.80 the reachable width closes linearly to the apex.
-    if z > DOME_APEX_Z:
-        return None
-    f = (z - DOME_Z[1]) / (DOME_APEX_Z - DOME_Z[1])
-    half = DOME_HALF_Y + f * (DOME_APEX_HALF_Y - DOME_HALF_Y)
-    return "dome" if abs(y) <= half else None
+    if abs(y) <= MARGINAL_HALF_Y and MARGINAL_Z[0] <= z <= MARGINAL_Z[1]:
+        return "marginal"
+    return None
 
 
 def check(y, z, placed):
@@ -172,12 +198,26 @@ def auto_layout(n, seed=0, margin=0.02):
     roughly twice the density anything in this repo has been measured against.
     """
     rng = np.random.default_rng(seed)
-    ys = np.arange(-GUARANTEED_HALF_Y, GUARANTEED_HALF_Y + 1e-9, MIN_SPACING)
-    zs = np.arange(GUARANTEED_Z[0], GUARANTEED_Z[1] + 1e-9, MIN_SPACING)
+    # Generated across the marginal band, because the guaranteed core is only
+    # 0.20 m tall and holds a single row. Every slot is still inside a region
+    # that was measured, which the old version could not claim.
+    #
+    # ⚠️ Pitch is MIN_SPACING **plus twice the jitter**, not MIN_SPACING. On a
+    # lattice pitched at exactly the minimum, any jitter at all can push two
+    # neighbours under it — two fruit each nudged 20 mm toward each other sit
+    # 160 mm apart — so the spacing check rejected them and a request for 12
+    # quietly produced 8. Widening the pitch makes the jitter safe by
+    # construction instead of relying on a retry.
+    pitch = MIN_SPACING + 2 * margin
+    ys = np.arange(-MARGINAL_HALF_Y, MARGINAL_HALF_Y + 1e-9, pitch)
+    zs = np.arange(MARGINAL_Z[0], MARGINAL_Z[1] + 1e-9, pitch)
     slots = [(float(y), float(z)) for y in ys for z in zs]
     if n > len(slots):
-        raise SystemExit(f"{n} fruit will not fit — {len(slots)} slots at "
-                         f"{MIN_SPACING * 1000:.0f} mm in the guaranteed band")
+        # Cap rather than raise: asking for more than fits is a reasonable
+        # thing to do interactively, and placing fewer is the honest answer.
+        print(f"  ⚠️ {n} requested but only {len(slots)} slots fit at "
+              f"{MIN_SPACING * 1000:.0f} mm inside the measured band")
+        n = len(slots)
     rng.shuffle(slots)
     out, placed = [], {}
     for y, z in slots:
@@ -197,6 +237,17 @@ def auto_layout(n, seed=0, margin=0.02):
         placed[name] = np.array([ROW_X, y2, z2])
         out.append((name, round(y2, 4), round(z2, 4)))
     return out
+
+
+def random_seed():
+    """A fresh seed from system entropy, for interactive auto-fill.
+
+    Batch runs take an explicit `--seed` and stay reproducible; only the
+    interactive "give me a new arrangement" path uses this.
+    """
+    import secrets
+
+    return secrets.randbelow(2 ** 31)
 
 
 def save_layout(path, layout, meta=None):
@@ -231,7 +282,34 @@ class Crop:
         self.placed = {}        # name -> np.array([x, y, z])
         self.zones = {}
         self.version = 0
+        # Every geom belonging to each truss — the fruit, its stem, and the
+        # hanger drawn from the support bar down to it. Kept so an unplaced
+        # truss can be hidden; see `_show`.
+        self._geoms = {}
+        for n in self.pool:
+            gids = []
+            for gname in (f"{n}_geom", f"stem_{n}_geom", f"stem_{n}_drop"):
+                try:
+                    gids.append(model.geom(gname).id)
+                except KeyError:
+                    pass        # the hanger is skipped when the drop is ~0
+            self._geoms[n] = gids
+        self._rgba0 = {n: [model.geom_rgba[g].copy() for g in gids]
+                       for n, gids in self._geoms.items()}
         self.park_all()
+
+    def _show(self, name, visible):
+        """Hide or reveal a whole truss.
+
+        ⚠️ Alpha only — **nothing about the physics changes.** That matters:
+        the parked pool has to keep its welds active so every member stays in
+        `CropObstacles`' frozen membership and a fruit placed mid-flight is
+        still seen by the running Guard. Deleting or detaching them to tidy the
+        view would silently disarm the safety net. Making them invisible costs
+        nothing and the arm still cannot reach x = -1.5 anyway.
+        """
+        for gid, rgba in zip(self._geoms[name], self._rgba0[name]):
+            self.model.geom_rgba[gid] = rgba if visible else [0, 0, 0, 0]
 
     def park_all(self):
         import mujoco
@@ -241,6 +319,9 @@ class Crop:
             # ⚠️ Weld ON. See the module docstring: this is what keeps a
             # later-placed fruit inside CropObstacles' frozen membership.
             self.data.eq_active[self.row.eq_id[n]] = 1
+            # Parked but not placed: hidden, so the reserve is not 24 tomatoes
+            # and their stems floating in shot behind the arm.
+            self._show(n, n in self.placed)
         mujoco.mj_forward(self.model, self.data)
 
     def free(self):
@@ -269,6 +350,7 @@ class Crop:
         pos = np.array([ROW_X, y, z])
         self.row.place(name, pos)
         self.data.eq_active[self.row.eq_id[name]] = 1
+        self._show(name, True)
         self.row.home[name] = pos.copy()
         self.placed[name] = pos
         self.zones[name] = zn
@@ -522,13 +604,23 @@ def add_place_board(spec):
     """
     import mujoco
 
-    z_lo, z_hi = GUARANTEED_Z
+    # Two boards, because the measurement found two regions and pretending
+    # otherwise is what caused the original bug. The bright green core is where
+    # every probe picked clean; the dim amber surround is where most did.
+    z_lo, z_hi = MARGINAL_Z
     body = spec.worldbody.add_body(name=PLACE_BOARD,
                                    pos=[ROW_X + 0.10, 0.0, (z_lo + z_hi) / 2])
     body.add_geom(
         name=f"{PLACE_BOARD}_face", type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=[0.008, GUARANTEED_HALF_Y, (z_hi - z_lo) / 2],
-        rgba=[0.20, 0.45, 0.25, 0.55], contype=0, conaffinity=0,
+        size=[0.008, MARGINAL_HALF_Y, (z_hi - z_lo) / 2],
+        rgba=[0.55, 0.42, 0.16, 0.40], contype=0, conaffinity=0,
+    )
+    g_lo, g_hi = GUARANTEED_Z
+    body.add_geom(
+        name=f"{PLACE_BOARD}_core", type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=[0.010, GUARANTEED_HALF_Y, (g_hi - g_lo) / 2],
+        pos=[0.0, 0.0, (g_lo + g_hi) / 2 - (z_lo + z_hi) / 2],
+        rgba=[0.20, 0.50, 0.25, 0.60], contype=0, conaffinity=0,
     )
     return body
 
@@ -658,8 +750,12 @@ def place_interactively(crop):
         if line.startswith("auto"):
             bits = line.split()
             n = int(bits[1]) if len(bits) > 1 else MAX_FRUIT
+            # ⚠️ A fresh random seed every time. Deriving it from the number
+            # already placed made "auto" deterministic — the same arrangement
+            # on every press — which is useless for judging repeatability,
+            # because repeating one layout only measures the simulator.
             for _nm, y, z in auto_layout(n - len(crop.placed),
-                                         seed=len(crop.placed)):
+                                         seed=random_seed()):
                 crop.place(y, z)
             continue
         try:
@@ -744,7 +840,13 @@ def main():
     ap.add_argument("--seen", action="store_true",
                     help="perception in the loop instead of telling the planner")
     ap.add_argument("--detector", default="hsv", choices=["hsv", "yolo"])
-    ap.add_argument("--speed", type=float, default=None)
+    # Interactive runs default to 0.4 of rated joint speed. Watching a pick at
+    # 0.15 is 30 s of staring; the measurement tools (week4_run, week4_snap,
+    # week4_envelope) keep reach.DEFAULT_SPEED so their numbers stay comparable
+    # with every earlier week.
+    ap.add_argument("--speed", type=float, default=WATCH_SPEED,
+                    help=f"fraction of rated joint speed (default "
+                         f"{WATCH_SPEED}; use 0.15 to match the measurements)")
     ap.add_argument("--clearance", type=float, default=None, metavar="MM")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log", default=None, help="append JSONL rows here")
