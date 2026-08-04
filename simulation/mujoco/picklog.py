@@ -25,7 +25,7 @@ dropped field is the input to seconds-per-pick, which is the input to kg/hr.
 `t_total` here is park-to-park and covers all three. That is the number that
 divides into 3600.
 
-    ./.venv/bin/python simulation/mujoco/picklog.py runs/dense15.jsonl
+    ./.venv/bin/python simulation/mujoco/picklog.py runs/campaign.jsonl
 """
 
 from __future__ import annotations
@@ -110,7 +110,17 @@ def _plain(o):
 def load(path):
     """Read a JSONL log back. Tolerates a truncated final line from a crash."""
     rows = []
-    with Path(path).open() as fh:
+    p = Path(path)
+    if not p.exists():
+        # A bare FileNotFoundError here reads as a broken tool. It is almost
+        # always "the run that writes this has not been done yet".
+        raise SystemExit(
+            f"  no log at {p}\n"
+            f"  Logs are written by a run, not shipped. Make one with:\n"
+            f"    ./.venv/bin/python simulation/mujoco/week4_run.py --out {p}\n"
+            f"    ./.venv/bin/python simulation/mujoco/week4_place.py "
+            f"--grid 8 --log {p}")
+    with p.open() as fh:
         for line in fh:
             line = line.strip()
             if not line:

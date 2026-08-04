@@ -69,6 +69,21 @@ WHY = {
 # more. See the module docstring for why this and not end position.
 EJECT_MS = 1.0
 
+# Peak peduncle force below which the gripper never touched the fruit at all.
+#
+# A hanging 120 g tomato loads its own stem at 1.18 N, so a peak that never
+# clears ~2 N means nothing ever pulled on it — the arm did not arrive. That is
+# UNREACHABLE, not GRASP_FAILED, and the difference matters: one is the arm
+# failing to get there, the other is the tool failing once it did.
+#
+# Found in the 57-attempt campaign. `grasp_failed` was the dominant bucket at
+# 20/57, and its peak-force distribution came back bimodal —
+# [1.2, 1.2, 1.2, 1.2, 1.2, 9.5, 12.0, ... 19.0] — five attempts sitting exactly
+# on the hanging weight. Those five also ran 38.7 s against 28.0 s for a clean
+# pick, with *larger* clearance, which is the arm stalling short rather than
+# being crowded out.
+NEVER_TOUCHED_N = 2.0
+
 
 def classify(r):
     """One attempt -> one bucket. `r` is a log row; missing keys are tolerated.
@@ -91,6 +106,12 @@ def classify(r):
     grasped = r.get("grasped", False)
     broke = r.get("broke", r.get("stem", False))
     if not (grasped and broke):
+        # Split on whether the tool ever loaded the stem. Never touching it is
+        # the arm failing to arrive; touching it and coming away empty is the
+        # tool failing. Folding both into GRASP_FAILED hides which half to fix.
+        peak = r.get("peak_n")
+        if peak is not None and peak <= NEVER_TOUCHED_N:
+            return UNREACHABLE
         return GRASP_FAILED
 
     if not r.get("in_bin", False):
@@ -122,6 +143,26 @@ def tally(rows):
     return out
 
 
+def instability(rows):
+    """How often the grasp went unstable, regardless of where the fruit landed.
+
+    ⚠️ This is not the same as the CARRY_EJECTED count, and the difference is
+    the point. `carry_ejected` only fires when the fruit misses the crate. But a
+    fruit leaving the pads at 2 m/s sometimes flies *toward* the crate and lands
+    in it, and that attempt scores CLEAN.
+
+    Measured on the first campaign rows: the instability fired on 4 of 6
+    attempts and 2 of those crated anyway. So the clean rate is partly recording
+    where a projectile happened to land rather than whether the gripper held on,
+    and quoting it without this number overstates how much control there is.
+
+    Returns (fired, crated_anyway, measured).
+    """
+    have = [r for r in rows if r.get("peak_held_ms") is not None]
+    fired = [r for r in have if r["peak_held_ms"] > EJECT_MS]
+    return len(fired), sum(1 for r in fired if r.get("in_bin")), len(have)
+
+
 def report(rows, title="outcomes"):
     """Print the breakdown. Returns (clean, total)."""
     n = len(rows)
@@ -141,6 +182,15 @@ def report(rows, title="outcomes"):
         print(f"    {b:<15} {c:>4}   {WHY[b]}{flag}")
     if n:
         print(f"\n  CLEAN {clean}/{n}  ({100 * clean / n:.0f}%)")
+    fired, lucky, measured = instability(rows)
+    if measured:
+        print(f"\n  grasp instability fired on {fired}/{measured} attempts "
+              f"(>{EJECT_MS} m/s while held)")
+        if lucky:
+            print(f"    of those, {lucky} crated anyway — the fruit was flung "
+                  f"and happened to land in the crate.")
+            print(f"    So the clean rate is partly luck, and "
+                  f"'{CARRY_EJECTED}' undercounts the instability.")
     return clean, n
 
 

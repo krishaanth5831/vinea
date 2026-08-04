@@ -503,7 +503,8 @@ def add_greenhouse(spec, leafy=True):
 
 
 def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
-                bin_wall=None, wrist_cam=False, trusses=None):
+                bin_wall=None, wrist_cam=False, trusses=None,
+                place_board=False):
     """The whole Week 2 scene: FR5 + 2F85 + plant row + crate, in a greenhouse.
 
     This is the one place the scene is assembled, so the planner, the executor,
@@ -544,6 +545,12 @@ def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
     if wrist_cam:
         from camera import add_wrist_camera
         add_wrist_camera(spec)
+
+    if place_board:
+        # Week 4's click target. contype=0 scenery, so it changes no dynamics
+        # and no tuned contact number; it exists to be selected by the viewer.
+        from week4_place import add_place_board
+        add_place_board(spec)
 
     if greenhouse:
         add_greenhouse(spec, leafy=leafy)

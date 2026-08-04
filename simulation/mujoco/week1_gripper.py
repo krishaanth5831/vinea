@@ -31,7 +31,7 @@ Usage:
 
     # record the weekly capture
     ./.venv/bin/python simulation/mujoco/week1_gripper.py --headless \
-        --out week1.mp4
+        --out week1_gripper.mp4
 
     # just open and close the gripper, no pick — for checking the actuator
     ./.venv/bin/python simulation/mujoco/week1_gripper.py --wave

@@ -28,6 +28,7 @@ Pad forces are accumulated per *physics substep*, not per control cycle. Polling
 contact at 100 Hz is how Week 2 measured an effective detach force six times the
 one written down; the same trap applies here and the peak is the whole point.
 
+    ./.venv/bin/python simulation/mujoco/carrytrace.py --windowed  # WATCH it get thrown
     ./.venv/bin/python simulation/mujoco/carrytrace.py            # t1, from perception
     ./.venv/bin/python simulation/mujoco/carrytrace.py --fruit t3
     ./.venv/bin/python simulation/mujoco/carrytrace.py --truth    # the control: ground truth
@@ -329,8 +330,6 @@ def main():
     import argparse
     import os
 
-    os.environ.setdefault("MUJOCO_GL", "egl")
-
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fruit", default="t1",
@@ -346,6 +345,10 @@ def main():
     ap.add_argument("--speed", type=float, default=None)
     ap.add_argument("--csv", default=None)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--windowed", action="store_true",
+                    help="open a live viewer and WATCH the ejection happen, at "
+                         "real speed. The trace tells you the fruit left at "
+                         "2.3 m/s; this shows you it.")
     ex = ap.add_argument_group("hypothesis levers (both default to off)")
     ex.add_argument("--hold", type=float, default=None, metavar="CTRL",
                     help="clamp the gripper command to this (0-255) on every "
@@ -363,6 +366,12 @@ def main():
                          "mechanics does not. TICKS_PER_CTRL is rescaled so "
                          "the control rate stays 100 Hz.")
     args = ap.parse_args()
+
+    # ⚠️ Only force EGL when nothing is being watched — setting it
+    # unconditionally makes the file headless-only and --windowed a silent
+    # no-op. A live viewer needs GLFW.
+    if not args.windowed:
+        os.environ.setdefault("MUJOCO_GL", "egl")
 
     import mujoco
 
@@ -480,8 +489,36 @@ def main():
                        hold_ctrl=args.hold)
     guard = Guard(model, data, row, name, stop=GUARD_STOP)
     guard.armed = False
-    r = execute(mission, reacher, gripper, row, box=trace, guard=guard,
-                on_tick=trace.tick, verbose=args.verbose)
+    if args.windowed:
+        import time
+        import warnings
+
+        import mujoco.viewer
+
+        from reach import CTRL_DT
+
+        warnings.filterwarnings("ignore", module="glfw")
+        with mujoco.viewer.launch_passive(model, data) as viewer:
+            clock = [time.perf_counter()]
+
+            def tick(_t=None):
+                trace.tick(_t)
+                if not viewer.is_running():
+                    raise KeyboardInterrupt
+                viewer.sync()
+                clock[0] += CTRL_DT
+                time.sleep(max(0.0, clock[0] - time.perf_counter()))
+                clock[0] = max(clock[0], time.perf_counter() - CTRL_DT)
+
+            r = execute(mission, reacher, gripper, row, box=trace, guard=guard,
+                        on_tick=tick, verbose=args.verbose)
+            print("\n  run finished — the window stays open, close it to quit")
+            while viewer.is_running():
+                viewer.sync()
+                time.sleep(1 / 60)
+    else:
+        r = execute(mission, reacher, gripper, row, box=trace, guard=guard,
+                    on_tick=trace.tick, verbose=args.verbose)
 
     print(f"\n  grasped={r['grasped']} stem={r['broke']} crate={r['in_bin']} "
           f"peak stem {r['peak_n']:.1f} N  cycle {r['seconds']:.1f} s")

@@ -1,0 +1,411 @@
+# Commands — what each one does, and what you actually see
+
+Every command in the repo, Weeks 1–4, with what happens when you run it.
+
+**Run everything from the repo root** (`~/Desktop/personal_projects/vinea`) and use `./.venv/bin/python` explicitly — the system Python has none of this installed.
+
+---
+
+## Legend
+
+| | what you get |
+|---|---|
+| 🪟 | **opens a window** you can orbit, zoom and watch in real time |
+| 🖱 | **you can click** in the window to place or pick things |
+| ⌨️ | **asks you to type** something (coordinates, a target) |
+| 📝 | **text only** — prints numbers to the terminal, no window |
+| 🖼 | **writes an image file** and exits |
+| 🎬 | **records an mp4** — no window while it runs |
+
+⚠️ **`--out` and a window are mutually exclusive everywhere.** Recording forces MuJoCo's offscreen renderer (EGL) and a live window needs GLFW. You cannot watch and record in the same run.
+
+---
+
+## Start here
+
+If you want to see the robot do something interesting, in order:
+
+```bash
+# 🪟🖱 place tomatoes wherever you like, then watch it harvest them
+./.venv/bin/python simulation/mujoco/week4_place.py --windowed
+
+# 🪟🖱 click anywhere on a board, arm picks that tomato and crates it
+./.venv/bin/python simulation/mujoco/week1_mousereach.py
+
+# 🪟 the full planned harvest of a greenhouse row
+./.venv/bin/python simulation/mujoco/week2_pick.py
+
+# 🪟 what the camera sees, the plan drawn before it moves, four panels at once
+./.venv/bin/python simulation/mujoco/week3_watch.py --view all
+
+# 🪟🖱 both at once: click fruit onto the board, then watch four panels pick them
+./.venv/bin/python simulation/mujoco/week4_watch.py
+```
+
+---
+
+## Health check
+
+```bash
+# 📝 six checks: MuJoCo, EGL render, URDF import, IK solve, CUDA, ROS 2
+./.venv/bin/python scripts/phase0_smoketest.py          # expect 6/6
+```
+
+Run this after any machine rebuild. If it is not 6/6, nothing below is trustworthy.
+
+---
+
+## Week 1 — the arm, the gripper, reaching a point
+
+### 🪟🖱 `week1_mousereach.py` — click a tomato onto the row and it picks it
+
+```bash
+# 🪟🖱 double-click anywhere on the green board — a tomato hangs there and the
+#      arm approaches, grips, snaps the stem, carries it and drops it in a crate
+./.venv/bin/python simulation/mujoco/week1_mousereach.py
+
+# 📝 same pipeline without a mouse — name points on the board directly
+./.venv/bin/python simulation/mujoco/week1_mousereach.py \
+    --click 0.0 0.60 --click -0.30 0.40
+
+# 🎬 record it
+./.venv/bin/python simulation/mujoco/week1_mousereach.py --headless \
+    --click -0.50 0.20 --click 0.0 0.60 --out week1_mousereach.mp4
+```
+
+**The board is the arm's working area** — it was measured cell by cell on a 31×24 grid, so every point on it is pickable and a click never lands somewhere the arm has to refuse.
+
+### 🪟 `week1_gripper.py` — pick from a table
+
+```bash
+# 🪟 the whole cycle: approach, grip, lift, carry, drop in the crate
+./.venv/bin/python simulation/mujoco/week1_gripper.py
+
+# 🪟 gripper only — watch the fingers open and close, no arm motion
+./.venv/bin/python simulation/mujoco/week1_gripper.py --wave
+
+# 🎬
+./.venv/bin/python simulation/mujoco/week1_gripper.py --headless --out week1_gripper.mp4
+```
+
+### 🪟⌨️ `week1_targetreach.py` — type a coordinate, watch it go
+
+```bash
+# 🪟⌨️ opens a window and asks you for "x y z" in the terminal
+./.venv/bin/python simulation/mujoco/week1_targetreach.py
+
+# 🪟 skip the typing — give targets up front
+./.venv/bin/python simulation/mujoco/week1_targetreach.py --target 0.6 -0.2 0.7
+./.venv/bin/python simulation/mujoco/week1_targetreach.py --random 5 --seed 1
+```
+
+Good for finding the edges of the workspace by hand. Try a point the arm cannot reach and watch what failing looks like.
+
+### 🪟 `week1_reach.py` — IK following a circle, no gripper
+
+```bash
+# 🪟 the solver on its own, nothing else in the way
+./.venv/bin/python simulation/mujoco/week1_reach.py
+
+# 🎬
+./.venv/bin/python simulation/mujoco/week1_reach.py --headless --out week1_reach.mp4
+```
+
+⚠️ Its `--out` used to default to `week1.mp4`, which is `week1_gripper.py`'s capture — a headless run here silently overwrote it. Now defaults to `week1_reach.mp4`.
+
+### 🖼 `fr5.py` — the arm on its own
+
+```bash
+# 🖼 writes fr5_home.png and exits
+./.venv/bin/python simulation/mujoco/fr5.py
+
+# 🖼 writes fr5_gripper.png, with the 2F85 mounted and tool0 at the fingertips
+./.venv/bin/python simulation/mujoco/fr5.py --gripper
+```
+
+---
+
+## Week 2 — the greenhouse row, planning, the pick
+
+### 🪟 `week2_pick.py` — the main harvest demo
+
+```bash
+# 🪟 harvest the row, window stays open at the end
+./.venv/bin/python simulation/mujoco/week2_pick.py
+
+# 🪟 flat out, at the FR5's full rated joint speed
+./.venv/bin/python simulation/mujoco/week2_pick.py --speed 1.0
+
+# 📝 the milestone: ten jittered trials, scored on collateral damage
+./.venv/bin/python simulation/mujoco/week2_pick.py --trials 10 --headless
+
+# 📝 the whole row in sequence, nothing reset between fruit
+./.venv/bin/python simulation/mujoco/week2_pick.py --sequence --headless
+
+# 📝 what camera error will cost: plan on nominal, execute on jittered
+./.venv/bin/python simulation/mujoco/week2_pick.py --trials 10 --headless --blind
+
+# 🎬
+./.venv/bin/python simulation/mujoco/week2_pick.py --headless --out week2_pick.mp4 --camera row
+```
+
+⚠️ **Add `--no-lessons` to any run that is not deliberately about learning.** Without it the run writes to `simulation/lessons.json`, which is shared with the Week 2 milestone — a comparison run quietly changes the baseline it is being compared against.
+
+### 🪟 `legacy_cycle.py` — the unplanned cycle, kept as the baseline to beat
+
+```bash
+# 🪟 the old cycle: crates fruit, and strips neighbouring trusses doing it
+./.venv/bin/python simulation/mujoco/legacy_cycle.py
+
+# 📝
+./.venv/bin/python simulation/mujoco/legacy_cycle.py --trials 10 --headless
+```
+
+Run this next to `week2_pick.py` to see what collision-aware planning bought: 2/10 clean → 10/10.
+
+### 📝 The library modules — each prints the numbers it stands on
+
+```bash
+# 📝 does the weld read 1.18 N hanging? what force snaps a stem?
+./.venv/bin/python simulation/mujoco/plant_row.py
+
+# 📝 plan every fruit in the row and print each route leg by leg
+./.venv/bin/python simulation/mujoco/mission.py
+
+# 📝 the old cycle with the black box on — why each tomato was lost
+./.venv/bin/python simulation/mujoco/incident.py
+
+# 📝 turn real failures into constraints the planner reads next time
+./.venv/bin/python simulation/mujoco/lessons.py
+
+# 🖼 renders greenhouse_row.png / _aisle.png / _wide.png
+./.venv/bin/python simulation/mujoco/greenhouse.py
+```
+
+---
+
+## Week 3 — the camera, the detector, 3D positions
+
+### 🪟 `week3_watch.py` — the best "what is it thinking" view
+
+```bash
+# 🪟 four panels at once: the scene, the deck camera with the plan drawn into
+#    it, the eye-in-hand camera with live detections, and a stats panel
+./.venv/bin/python simulation/mujoco/week3_watch.py --view all
+
+# 🪟 just what the detector sees — boxes, 3D estimates, error vs ground truth
+./.venv/bin/python simulation/mujoco/week3_watch.py --view wrist
+
+# 🪟 a clean shot with no annotations, for showing someone
+./.venv/bin/python simulation/mujoco/week3_watch.py --view scene
+
+# 🪟 one fruit, brisk — about 90 seconds
+./.venv/bin/python simulation/mujoco/week3_watch.py --view all --fruit t2 --speed 0.4
+
+# 🎬
+./.venv/bin/python simulation/mujoco/week3_watch.py --view all --no-window --out week3_watch.mp4
+```
+
+Three phases are named on every frame: **SCAN** (the arm sweeps the row looking), **PLAN** (the checked route drawn into the scene, held 2.5 s so you can read it *before* the arm commits), **PICK** (flying it with the waypoints still drawn).
+
+Quit with the **QUIT** button, **q**, **Esc**, or the window's X — all four work and all report whatever picks finished.
+
+### 🪟 `week3_perceive.py` — the instrument behind that view
+
+```bash
+# 📝 the geometry gate: project a known fruit into the image, deproject it
+#    back, demand sub-millimetre agreement. Run this first.
+./.venv/bin/python simulation/mujoco/week3_perceive.py --calib
+
+# 📝 detector recall and false positives per frame
+./.venv/bin/python simulation/mujoco/week3_perceive.py --score
+
+# 📝 per-axis position error, mean and p95, against the 40 mm clearance
+./.venv/bin/python simulation/mujoco/week3_perceive.py --budget
+
+# 🪟 watch one cycle picked from a camera estimate rather than ground truth
+./.venv/bin/python simulation/mujoco/week3_perceive.py --pick --windowed --fruit t2
+
+# 📝 the whole row from perception — the headline number
+./.venv/bin/python simulation/mujoco/week3_perceive.py --pick --headless
+```
+
+With no flags it runs `--calib --score`.
+
+⚠️ The `--windowed` view is the *scene*, not the sensor. The detection overlay only exists in `week3_watch.py`, in `--out` recordings, and in `--save-frames`.
+
+### 📝 `camera.py` / `detect.py` — the pieces on their own
+
+```bash
+# 📝 the deprojection gate from three arm poses, PASS/FAIL in millimetres
+./.venv/bin/python simulation/mujoco/camera.py
+
+# 📝 both detectors scored across eight arm poses
+./.venv/bin/python simulation/mujoco/detect.py
+./.venv/bin/python simulation/mujoco/detect.py --only hsv
+./.venv/bin/python simulation/mujoco/detect.py --save /tmp/frames   # 🖼 overlaid stills
+```
+
+---
+
+## Week 4 — put fruit anywhere, and the throughput number
+
+### 🪟🖱 `week4_place.py` — **the one to run**
+
+```bash
+# 🪟🖱 a window opens with a GREEN BOARD showing exactly where the arm can
+#      work. Double-click it to hang a tomato there.
+./.venv/bin/python simulation/mujoco/week4_place.py --windowed
+```
+
+While the window is open:
+
+| | |
+|---|---|
+| **double-click the board** | place a tomato there |
+| **A** | auto-fill the rest (15 max) |
+| **C** | clear them all and start over |
+| **SPACE** | start harvesting what you placed |
+| **Q** or close the window | quit |
+
+Placing and picking happen in **one continuous window** — it does not close and reopen.
+
+The board is not decoration: it is the guaranteed reachable rectangle (y ±0.55 m, z 0.15–0.95 m) measured on Week 1's 31×24 grid, so **anywhere you can click, the arm can work**. Placements closer than 200 mm to another fruit are refused with the reason printed — below that the stems load each other past the detach threshold and a truss snaps itself before the arm moves.
+
+```bash
+# 🪟 skip the clicking — auto-place 6 and watch it work them
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 6 --windowed
+
+# 🪟 THE DEMO: 4 fruit, then 3 more appear mid-run and it re-plans around them
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 4 --add-at 2 --windowed
+
+# 📝 headless is the default — no flag needed
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 15
+
+# 📝 save an arrangement so it can be replayed exactly
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 15 --save layouts/dense15.json
+./.venv/bin/python simulation/mujoco/week4_place.py --layout layouts/dense15.json
+
+# 📝 perception in the loop instead of telling the planner where fruit are
+./.venv/bin/python simulation/mujoco/week4_place.py --layout layouts/dense15.json --seen
+
+# 📝 log every attempt for later analysis
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 8 --log runs/mine.jsonl
+
+# 🎬
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 12 --seed 3 --out week4_place.mp4
+```
+
+### 🪟🖱 `week4_watch.py` — the four-panel view, with clicking
+
+Week 3's OpenCV window with Week 4's free placement in front of it. **This is the one that shows the most at once.**
+
+```bash
+# 🪟🖱 click the green board in the deck panel to place fruit, SPACE to harvest
+./.venv/bin/python simulation/mujoco/week4_watch.py
+
+# 🪟 pre-place 12 and skip straight to watching
+./.venv/bin/python simulation/mujoco/week4_watch.py --grid 12
+
+# 🪟 plan from the camera instead of being told where fruit are
+./.venv/bin/python simulation/mujoco/week4_watch.py --grid 8 --seen
+
+# 🪟 one big panel instead of four
+./.venv/bin/python simulation/mujoco/week4_watch.py --view deck
+./.venv/bin/python simulation/mujoco/week4_watch.py --view wrist
+
+# 🎬 record the whole session, placement included
+./.venv/bin/python simulation/mujoco/week4_watch.py --grid 12 --out week4_watch.mp4
+```
+
+```
++----------------------+----------------------+
+| deck cam + the plan  | wrist cam, live      |
+| CLICK HERE TO PLACE  | detections + error   |
++----------------------+----------------------+
+| clean scene shot     | stats / placements   |
++----------------------+----------------------+
+```
+
+| | |
+|---|---|
+| **click the green board** (top-left panel) | place a tomato exactly where the cursor is |
+| **A** | auto-fill · **C** clear · **SPACE** harvest · **Q** quit |
+
+**Clicking is ray-cast, not guessed.** The pixel is turned into a ray through that camera's pinhole — the same `camera.pixel_ray` the Week 3 deprojection gate is built on — and intersected with the board plane. Verified exact to **0.000 mm** at four points from two different camera angles, so the tomato lands under the cursor regardless of which camera you are looking through.
+
+Refusals appear on the stats panel with the reason — off the board, or under the 200 mm spacing.
+
+### 🪟 `carrytrace.py` — watch a tomato get thrown
+
+```bash
+# 🪟 the bug 40 ejection, live, at real speed — it leaves the pads sideways
+#    mid-carry at 2.3 m/s rather than being dropped
+./.venv/bin/python simulation/mujoco/carrytrace.py --windowed
+
+# 📝 the same run with the force trace printed
+./.venv/bin/python simulation/mujoco/carrytrace.py
+
+# 📝 the control — the same fruit from ground truth, which crates fine
+./.venv/bin/python simulation/mujoco/carrytrace.py --truth
+
+# 📝 the four hypothesis levers, all of which turned out not to fix it
+./.venv/bin/python simulation/mujoco/carrytrace.py --hold 80
+./.venv/bin/python simulation/mujoco/carrytrace.py --rolling 0.1
+./.venv/bin/python simulation/mujoco/carrytrace.py --carry 0.05
+./.venv/bin/python simulation/mujoco/carrytrace.py --timestep 0.001
+```
+
+### 📝 The measurement runs — long, no window
+
+```bash
+# 📝 the throughput campaign: ~58 picks across four crop densities, ~30 min
+./.venv/bin/python simulation/mujoco/week4_run.py --out runs/campaign.jsonl
+
+# 📝 how much kg/hr moves when SNAP_N moves — it barely does
+./.venv/bin/python simulation/mujoco/week4_snap.py --n 8
+
+# 📝 re-read any log later without re-running the physics
+./.venv/bin/python simulation/mujoco/picklog.py runs/campaign.jsonl
+
+# 📝 the failure taxonomy, explained, with a worked example
+./.venv/bin/python simulation/mujoco/outcomes.py
+```
+
+⚠️ **`week4_run.py` appends.** Point `--out` at a fresh file or you mix two campaigns in one log. This has already happened once.
+
+---
+
+## Things that will catch you
+
+**No window appears.** Check for `--out` in the command — recording and a live window cannot coexist. `week4_place.py` and `carrytrace.py` also need `--windowed` explicitly; every Week 1 and Week 2 demo opens a window by default and needs `--headless` to suppress it.
+
+**A window opens but the arm never moves.** It is probably planning. `week4_place.py` with a full pool checks the route against 24 fruit and takes ~1.5 s per pick before anything moves.
+
+**Wayland warnings** — `libdecor`, `GLFWError: window position`. Cosmetic, about decorations and placement. The window works.
+
+**`EGLError` on exit, or a segfault after the run finishes.** Both are upstream MuJoCo teardown issues on this machine, both happen after the work is done, and neither loses anything. Do not go debugging them.
+
+**The run is slower than real time.** Two MuJoCo processes on one machine halve each other's speed. Check nothing else is still running.
+
+**A capture got overwritten.** Captures are named after the script that made them, and `*.mp4` is gitignored — so there is no copy. Check what `--out` defaults to before running anything headless.
+
+---
+
+## What a cycle costs
+
+Useful when deciding whether to sit and watch:
+
+| | |
+|---|---|
+| one pick, default speed | ~28–31 s of simulated time |
+| a 5-fruit row | ~2.5 min |
+| 15 fruit | ~8 min |
+| the full campaign | ~30 min |
+| `week4_snap.py --n 8` | ~20 min |
+
+Watching runs at wall-clock speed. Headless runs faster than real time, but only when nothing else is competing for the machine.
+
+---
+
+[README](README.md) · [Week 4 instructions](../k7_ideaverse_2.0/03%20Projects/Vinea/08%20Technical/) · captures are named after the script that produced them
