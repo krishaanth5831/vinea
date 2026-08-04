@@ -134,9 +134,15 @@ TRUSSES = [
 ]
 
 
-def fruit_home(name):
-    """Where a named fruit hangs when nothing has touched it."""
-    for n, y, z in TRUSSES:
+def fruit_home(name, trusses=TRUSSES):
+    """Where a named fruit hangs when nothing has touched it.
+
+    `trusses` defaults to the module's own five-fruit row, which is what every
+    Week 1-3 caller wants. Week 4 builds rows from a pool whose names are not in
+    that list, and looking them up here would raise — so the list is a parameter
+    rather than a global read.
+    """
+    for n, y, z in trusses:
         if n == name:
             return np.array([ROW_X, y, z])
     raise KeyError(name)
@@ -257,7 +263,13 @@ class Row:
     model.
     """
 
-    def __init__(self, model, data, names=None, snap_n=SNAP_N):
+    def __init__(self, model, data, names=None, snap_n=SNAP_N, homes=None):
+        """`homes` is where each fruit hangs when untouched.
+
+        Left None it is looked up in the module's own TRUSSES, which is right
+        for Weeks 1-3. Week 4 places fruit wherever it likes, so there is no
+        list to look them up in and the caller supplies the map instead.
+        """
         self.model = model
         self.data = data
         self.snap_n = snap_n
@@ -267,7 +279,9 @@ class Row:
         self.mocap_id = {n: model.body(f"stem_{n}").mocapid[0] for n in self.names}
         self.qadr = {n: model.joint(model.body(n).jntadr[0]).qposadr[0]
                      for n in self.names}
-        self.home = {n: fruit_home(n) for n in self.names}
+        self.home = ({n: fruit_home(n) for n in self.names} if homes is None
+                     else {n: np.asarray(homes[n], dtype=float)
+                           for n in self.names})
         self.peak = {n: 0.0 for n in self.names}
 
     def reset(self):

@@ -503,7 +503,7 @@ def add_greenhouse(spec, leafy=True):
 
 
 def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
-                bin_wall=None, wrist_cam=False):
+                bin_wall=None, wrist_cam=False, trusses=None):
     """The whole Week 2 scene: FR5 + 2F85 + plant row + crate, in a greenhouse.
 
     This is the one place the scene is assembled, so the planner, the executor,
@@ -521,7 +521,9 @@ def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
     bin_wall = BIN_WALL if bin_wall is None else bin_wall
 
     spec = build_fr5_spec(with_scene=not greenhouse, gripper=True)
-    add_row(spec)
+    # `trusses` lets Week 4 compile a pool of fruit instead of the fixed row.
+    # None keeps the five-truss default, so every earlier caller is untouched.
+    add_row(spec) if trusses is None else add_row(spec, trusses=trusses)
 
     # Soften the finger pads. Menagerie ships them at solref [0.004, 1] — five
     # times stiffer than MuJoCo's own default — which suits the rigid objects
