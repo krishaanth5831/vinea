@@ -54,7 +54,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import mission  # noqa: E402
 import plant_row  # noqa: E402
+import week2_pick  # noqa: E402
+import week4_place  # noqa: E402
 from farm import house, trolley  # noqa: E402
+
+# ⚠️ **Every module that did `from mission import BIN_POS` holds its own
+# binding, and rebinding `mission.BIN_POS` does not touch it.** `from X import
+# y` copies the reference at import time; there is no live link back.
+#
+# This is not hypothetical bookkeeping. `week2_pick.execute` scores a pick with
+#
+#     "in_bin": crate_contains(fruit.xpos, BIN_POS, BIN_HALF, BIN_WALL)
+#
+# reading the `BIN_POS` it imported at line 68 — the Week 1-4 crate, at the
+# world origin. A pick that carried the fruit to the real crate and dropped it
+# neatly inside was scored against a crate two metres away and came back
+# `in_bin: False`. Calling `crate_contains` by hand on the same numbers returned
+# True. That is the whole bug, and it looks exactly like a carry failure.
+#
+# So the rebinding walks a list of (module, attribute) rather than one module.
+# Anything added to Weeks 1-4 that imports one of these by name has to be added
+# here too, which is a real maintenance cost and the reason the module docstring
+# says this file should eventually delete itself.
+_HOLDERS = {
+    "PARK": [(mission, "PARK")],
+    "STAGE_X": [(mission, "STAGE_X")],
+    "BIN_POS": [(mission, "BIN_POS"), (week2_pick, "BIN_POS")],
+    "ROW_X": [(mission, "ROW_X"), (plant_row, "ROW_X"),
+              (week2_pick, "ROW_X"), (week4_place, "ROW_X")],
+}
 
 # The Week 1-4 values, captured at import so a nested or aborted `at_trolley`
 # can always restore the truth rather than whatever the last caller left.
@@ -152,21 +180,15 @@ def at_trolley(model, data, tag="a", verbose=False):
         print(f"  arm frame: base {off['arm_base'].round(3)} · "
               f"PARK {off['PARK'].round(3)} · "
               f"row x {off['ROW_X']:.2f} · crate {off['BIN_POS'].round(3)}")
-    saved = (mission.PARK, mission.STAGE_X, mission.BIN_POS, mission.ROW_X,
-             plant_row.ROW_X)
+    saved = [(mod, attr, getattr(mod, attr))
+             for key in _HOLDERS for mod, attr in _HOLDERS[key]]
     old_defaults = []
     try:
-        mission.PARK = off["PARK"]
-        mission.STAGE_X = off["STAGE_X"]
-        mission.BIN_POS = off["BIN_POS"]
-        mission.ROW_X = off["ROW_X"]
-        # `plant_row.ROW_X` too: `mission` imported `ROW_X` *from* it, so the
-        # two names are separate bindings to the same original float and
-        # rebinding one leaves the other stale. Anything reading it through
-        # `plant_row` would keep seeing 0.60.
-        plant_row.ROW_X = off["ROW_X"]
-        # And the dataclass defaults, which are a third copy again. See
-        # `_patch_default` for what happens when this is missed.
+        for key, holders in _HOLDERS.items():
+            for mod, attr in holders:
+                setattr(mod, attr, off[key])
+        # And the dataclass defaults, which are a copy again — one the `from X
+        # import y` list above cannot reach. See `_patch_default`.
         for cls in (mission.Route, mission.Mission):
             old_defaults.append(
                 (cls, _patch_default(cls, "stage_x", off["STAGE_X"])))
@@ -174,20 +196,86 @@ def at_trolley(model, data, tag="a", verbose=False):
     finally:
         for cls, old in old_defaults:
             _patch_default(cls, "stage_x", old)
-        (mission.PARK, mission.STAGE_X, mission.BIN_POS, mission.ROW_X,
-         plant_row.ROW_X) = saved
+        for mod, attr, value in saved:
+            setattr(mod, attr, value)
+
+
+def pin_base(reacher):
+    """Stop the IK solver from planning motion the base will never make.
+
+    ⚠️ **This is the bug the mocap deck head was designed to avoid, arriving by
+    the front door.** `reach.Reacher` builds `mink.Configuration(model)` over
+    the *whole* model, and its `VelocityLimit` names only the six arm joints —
+    so every other DOF in the model is, as far as the solver is concerned,
+    free and unlimited. The trolley's slide joint is one of those.
+
+    The solver therefore solves for "arm *and* base", happily translating the
+    chassis along the row to help the tool reach. Then `Reacher.step` writes
+    `data.ctrl[arm_ctrl]` — six numbers, the arm only — so the base never
+    actually moves and the arm lands wherever the six joints alone can get to.
+
+    What that looks like is not an error. It looks like this, on a pick the
+    planner had just verified to 43 mm of clearance:
+
+        clear     arm 3.6 mm          <- fine, the base was where it wanted it
+        lane      DID NOT ARRIVE — 72 mm short
+        approach  DID NOT ARRIVE — 82 mm short
+        insert    DID NOT ARRIVE — 89 mm short
+        check     fruit 318 mm from the tool — DROPPED
+
+    Every leg short by about the same amount, in the direction the base would
+    have moved. It reads as an arm that cannot reach, and it is an arm being
+    asked to make up for a chassis that was never told to move.
+
+    Pinning the joint to zero velocity is the whole fix: the solver then has to
+    find a six-joint answer, which is the only kind that can be executed.
+
+    ⚠️ **And it has to survive `set_speed`.** `mission._legs` gives the carrying
+    legs their own speed cap, so `_run_leg` calls `reacher.set_speed(...)` part
+    way through every mission — and `set_speed` *rebuilds* `self.limits` from
+    `JOINTS` alone, throwing the pin away. The symptom is beautifully confusing:
+    the approach, insert and pull legs arrive to 4 mm, and then `extract` — the
+    first carrying leg, and the first one to change speed — is 84 mm short. So
+    the instance's `set_speed` is wrapped rather than the limit set patched once.
+    """
+    import mink
+
+    from fr5 import JOINTS
+    from reach import JOINT_VELOCITY
+
+    def apply(speed):
+        caps = {j: JOINT_VELOCITY[j] * speed for j in JOINTS}
+        caps[trolley.DRIVE_JOINT] = 0.0
+        reacher.limits = [mink.VelocityLimit(reacher.model, caps)]
+
+    inner = reacher.set_speed
+
+    def set_speed(speed):
+        inner(speed)
+        apply(reacher.speed)
+
+    reacher.set_speed = set_speed
+    apply(reacher.speed)
+    return reacher
 
 
 def park_posture(model, data, tag="a", **kw):
-    """`mission.park_posture`, solved in the arm's actual frame."""
+    """`mission.park_posture`, solved in the arm's actual frame.
+
+    ⚠️ Also has to pin the base, and cannot use `pin_base` to do it — it builds
+    its own `mink.Configuration` internally rather than taking a `Reacher`. It
+    happens to get away with it: it starts from `reset_home`, where the trolley
+    is at zero, and the posture task holds the whole configuration near its seed
+    — so the drift is small. `check_park` below measures it rather than assuming.
+    """
     with at_trolley(model, data, tag):
         return mission.park_posture(model, **kw)
 
 
 def check(model, data, tag="a"):
     """Print what the rebinding does, and assert it restores itself."""
-    before = (np.array(mission.PARK), mission.STAGE_X,
-              np.array(mission.BIN_POS), mission.ROW_X)
+    before = [(mod, attr, np.array(getattr(mod, attr), dtype=float))
+              for key in _HOLDERS for mod, attr in _HOLDERS[key]]
     print(f"\n  --- the arm's frame, on a trolley at "
           f"y={data.body(trolley.TROLLEY).xpos[1]:+.2f} ---")
     print(f"  {'constant':<10} {'week 1-4':<24} {'here':<24}")
@@ -197,9 +285,10 @@ def check(model, data, tag="a"):
                   f"{str(np.asarray(off[k]).round(3)):<24}")
         for k in ("STAGE_X", "ROW_X"):
             print(f"  {k:<10} {_BASE[k]:<24.3f} {off[k]:<24.3f}")
-    after = (np.array(mission.PARK), mission.STAGE_X,
-             np.array(mission.BIN_POS), mission.ROW_X)
-    ok = (np.allclose(before[0], after[0]) and before[1] == after[1]
-          and np.allclose(before[2], after[2]) and before[3] == after[3])
-    print(f"\n  restored on exit: {'yes' if ok else 'NO — globals leaked'}")
-    return ok
+    leaked = [f"{mod.__name__}.{attr}"
+              for mod, attr, was in before
+              if not np.allclose(np.array(getattr(mod, attr), dtype=float), was)]
+    print(f"\n  rebound in {len(before)} places across "
+          f"{len({m.__name__ for m, _a, _v in before})} modules")
+    print(f"  restored on exit: {'yes' if not leaked else 'NO — ' + ', '.join(leaked)}")
+    return not leaked

@@ -74,7 +74,8 @@ from greenhouse import _decor  # noqa: E402
 DECK_Z = 0.25
 
 DECK_L = 1.70             # along the row. Berg BRW170's platform length.
-DECK_W = 0.90             # across it. Wider than theirs: two arms and a crate.
+DECK_W = 1.10             # across it. Wider than theirs: two arms and a crate,
+                          # and wide enough that CRATE_LOCAL is on the deck.
 DECK_T = 0.04
 
 WHEEL_R = 0.065
@@ -215,10 +216,19 @@ def add_trolley(spec, aisle=0, arms=("a",), crate=True, y0=0.0):
     return body
 
 
-# Where the crate sits on the deck, in trolley-local coordinates. Behind the
-# arms along the row, so the carry is a turn and a short move rather than a
-# reach across the second arm's working space.
-CRATE_LOCAL = np.array([0.0, -DECK_L / 2 + 0.20, DECK_Z])
+# Where the crate sits on the deck, in trolley-local coordinates.
+#
+# ⚠️ **Placed at exactly `mission.BIN_POS`'s offset from the arm, not wherever
+# there was room.** The first version put it behind the arms at local
+# (0, -0.65), which is tidy and does not work: the carry leg has to reach 0.2 m
+# *behind* the arm's own working direction with the wrist held downward, and the
+# tool stalled 923 mm short of the crate on every pick — a fruit successfully
+# grasped, detached and then carried nowhere.
+#
+# BIN_POS is [0.30, -0.52, 0.0] relative to an arm at the origin, and Weeks 1-4
+# flew that carry a few hundred times. So the crate goes at the arm's mount plus
+# that offset and the whole carry-and-release geometry comes across proven.
+CRATE_LOCAL = np.array([ARM_X["a"] + 0.30, -0.52, DECK_Z + 0.016])
 
 
 def _add_crate(spec, body):
