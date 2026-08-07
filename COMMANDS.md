@@ -555,6 +555,93 @@ z 0.28      X      g      g      u      u      X      g
 
 ---
 
+## Week 5 — the whole house: scout it, plan it, harvest it
+
+Everything above works one row from a base bolted to the floor. `simulation/mujoco/farm/` is a **separate package** that asks the next question: given four rows and a machine that has to drive, what does a shift look like?
+
+⚠️ **It imports freely from Weeks 1–4 and changes none of it.** Those numbers — 46% clean, 31.3 s cycle, 40 mm clearance — were all measured in a one-row scene with a fixed base. `farm.house` is a new scene *next to* `greenhouse.py`, not a replacement for it.
+
+### 🪟 `farm/watch.py` — **the one to run.** Six panels, including the map
+
+```bash
+# 🪟 the whole shift: scout the house, plan the route, harvest into the crate
+./.venv/bin/python simulation/mujoco/farm/watch.py
+
+# 🪟 skip the scouting pass and route the real crop — isolates routing from perception
+./.venv/bin/python simulation/mujoco/farm/watch.py --truth
+
+# 🪟 short: stop after two trolley stops
+./.venv/bin/python simulation/mujoco/farm/watch.py --truth --stops 2
+
+# 🎬 record it
+./.venv/bin/python simulation/mujoco/farm/watch.py --out farm_watch.mp4
+```
+
+```
++-------------------+-------------------+-------------------+
+| scout cam         | down the aisle    | the house         |
+| what it maps      |                   |                   |
++-------------------+-------------------+-------------------+
+| THE MAP           | the robot's shift | wrist cam         |
+| top-down, live    | what it thinks    | what it picks     |
++-------------------+-------------------+-------------------+
+```
+
+**The map panel is the new thing.** All four rows top-down, every fruit as a dot coloured by the ripeness the robot believes it has, ripe ones ringed, route stops numbered, the trolley drawn to scale with a line to whatever it is currently reaching for, and picked fruit crossed out as the row empties.
+
+⚠️ **It is drawn from `HouseMap`, not from the simulator.** Where the robot is wrong, the map is wrong — which is the only way to watch a perception failure happen rather than read about it afterwards. Ground truth is drawn faintly underneath so the gap is visible.
+
+### 📝 The pieces, each runnable on its own
+
+```bash
+# 🪟 the four-row house: 1.60 m pitch, 51 mm heating pipes as the rails
+./.venv/bin/python simulation/mujoco/farm/house.py
+./.venv/bin/python simulation/mujoco/farm/house.py --plan     # 📝 the layout arithmetic
+./.venv/bin/python simulation/mujoco/farm/house.py --shot     # 🖼
+
+# 🪟 the trolley: drives the length of the house on the pipe rail
+./.venv/bin/python simulation/mujoco/farm/trolley.py --drive
+./.venv/bin/python simulation/mujoco/farm/trolley.py --reach  # 📝 the gate
+./.venv/bin/python simulation/mujoco/farm/trolley.py --shot --arms 2
+
+# 🪟 a random crop — different every time you open it
+./.venv/bin/python simulation/mujoco/farm/crop.py
+./.venv/bin/python simulation/mujoco/farm/crop.py --stats     # 📝
+
+# 🪟 the mapping pass
+./.venv/bin/python simulation/mujoco/farm/scout.py --windowed
+./.venv/bin/python simulation/mujoco/farm/scout.py --recall   # 📝 per-stage recall
+./.venv/bin/python simulation/mujoco/farm/scout.py --shot     # 🖼 boxes + bands
+
+# 📝 the route over a map
+./.venv/bin/python simulation/mujoco/farm/route.py --truth --compare
+
+# 📝 a whole shift, headless, with the full report
+./.venv/bin/python simulation/mujoco/farm/run.py
+./.venv/bin/python simulation/mujoco/farm/run.py --truth --stops 3
+```
+
+### What it does, and what it does not
+
+**A shift on a 48-fruit house**, aisle a0, one arm: 4 crated of the 5 ripe fruit on the worked row, 1 refused (a real neighbour 30 mm from the pad), 2 never detected. 20 s scouting, 33 s driving, 76 s picking.
+
+**Ripeness is measured per stage, and the total is the wrong number to quote.** Hue separation was measured before the detector was designed:
+
+| | hue | separated from the canopy? |
+|---|---|---|
+| red | 2 | yes — **100% recall, 100% correctly banded** |
+| turning | 14 | yes |
+| breaker | 29 | yes |
+| green | 49 | **no** — a stem is 55, a leaf is 62. **33% recall** |
+
+⚠️ That costs the harvest nothing, because only red is picked. It would cost a **scouting yield forecast** a great deal, and that is Vinea's second module — so green recall is the number to quote there, not the average.
+
+⚠️ **The scout camera looks one way, so arm B's row maps 0/14.** A two-armed trolley needs a second head. This is a known gap, not an oversight; `--arms 2` fits the second arm and its plate is drawn either way.
+
+⚠️ **`farm/armframe.py` rebinds other modules' globals.** `mission.py` is written in absolute world coordinates (`PARK`, `STAGE_X`, `BIN_POS`, `ROW_X`) which breaks the moment the arm rides a moving base. The adapter rebinds 8 bindings across 4 modules inside a context manager and asserts it restores them (`armframe.check`). It is the smaller, more reversible change than threading a frame through six classes — but it is a real cost, and the file says so.
+
+---
+
 ## Things that will catch you
 
 **No window appears.** Check for `--out` in the command — recording and a live window cannot coexist. `week4_place.py` and `carrytrace.py` also need `--windowed` explicitly; every Week 1 and Week 2 demo opens a window by default and needs `--headless` to suppress it.
@@ -570,6 +657,12 @@ z 0.28      X      g      g      u      u      X      g
 **Fruit appear as odd shapes floating behind the arm.** Fixed — the 24-truss reserve pool used to be drawn while parked. If you see it again, `Crop._show` is not being called.
 
 **A capture got overwritten.** Captures are named after the script that made them, and `*.mp4` is gitignored — so there is no copy. Check what `--out` defaults to before running anything headless.
+
+**A `farm/` run says the arm cannot reach, on a pick the planner just verified.** Almost certainly the base is not pinned. `mink` builds its configuration over the *whole* model, and the trolley's slide joint looks like a free DOF to it — so it plans base motion the chassis never makes, and every leg lands short by roughly the same amount in the direction the base would have moved. `armframe.pin_base(reacher)` fixes it, and has to be re-applied after any `set_speed`, which rebuilds the velocity limits from the arm's joints alone.
+
+**A `farm/` pick carries the fruit to the crate, drops it in, and still reports `in_bin: False`.** Something is reading a stale `BIN_POS`. `from mission import BIN_POS` copies the reference at import time, so rebinding `mission.BIN_POS` does not reach it — `week2_pick` holds its own. Add the module to `armframe._HOLDERS`.
+
+**The `farm/` house renders dark, or the aisle ends in open sky.** `farm.house` has its own `_lighting` and `_gables`; `greenhouse._lighting` puts two lamps over a 3 m scene and a 9×9 m floor, which leaves an 8 m bay black at the far end. Cameras must also sit *inside* the gables — one placed beyond the end wall shoots through a glazing bar.
 
 ---
 
@@ -597,6 +690,21 @@ Useful when deciding whether to sit and watch:
 | `week4_order.py` (4 layouts, both orders) | **~2 h** — 64 picks, and every survey is a 5-pose scan |
 
 ⚠️ `week4_order.py` got slower when the deck head arrived: each survey is now five renders instead of one, and a re-survey fires on every crop change. Budget accordingly, or drop `--layouts`.
+
+**Week 5, the whole house** — measured, not estimated:
+
+| | |
+|---|---|
+| `farm/house.py --plan` | instant — arithmetic only |
+| `farm/crop.py --stats` | ~1 s |
+| `farm/house.py --shot` | ~6 s |
+| `farm/route.py --truth --compare` | instant — no physics, no rendering |
+| `farm/trolley.py --reach` | ~12 s — 10 routes planned, none flown |
+| `farm/scout.py --recall` | ~13 s — 15 frames and 7 m of driving |
+| `farm/run.py --truth --stops 3` | minutes — 5 picks is ~90 s of *simulated* time and this scene runs well under real time |
+| `farm/watch.py` | the same plus six panels at `--fps` |
+
+⚠️ **The house is a much bigger scene than the Week 1–4 row** — ~5,300 geoms and 407 DOF against ~800 and 44 — so physics runs a good deal slower than real time, and a full shift is dominated by the picking rather than by the driving or the scouting. Use `--stops` to cut a run short while you are iterating.
 
 Watching runs at wall-clock speed. Headless runs faster than real time, but only when nothing else is competing for the machine.
 
