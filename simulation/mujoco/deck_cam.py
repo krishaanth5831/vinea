@@ -767,12 +767,21 @@ def _fuse(sightings, radius=None):
         # when the sighting that would have joined them arrives last, and the
         # result is one fruit reported twice — a phantom, i.e. a second order to
         # pick a tomato that is no longer there. It costs one pass to be right.
-        hit = [g for g in groups
+        #
+        # ⚠️ And merged **by index**, never with `list.remove`. `remove` finds
+        # its target with `==`, and a group is a list of tuples holding
+        # `detect.Detection` — a dataclass with numpy fields — so comparing two
+        # same-length groups evaluates an array in a boolean context and raises
+        # "truth value of an array with more than one element is ambiguous".
+        # It survived every test here by luck: `remove` short-circuits on
+        # identity, so it only bites when an earlier group happens to be the
+        # same length as the one being removed.
+        hit = [i for i, g in enumerate(groups)
                if any(np.linalg.norm(d.est - e[1].est) <= radius for e in g)]
         merged = [(k, d)]
-        for g in hit:
-            merged.extend(g)
-            groups.remove(g)
+        for i in hit:
+            merged.extend(groups[i])
+        groups = [g for i, g in enumerate(groups) if i not in set(hit)]
         groups.append(merged)
     return [{"est": np.mean([d.est for _k, d in g], axis=0),
              "dets": [d for _k, d in g],
