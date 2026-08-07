@@ -319,7 +319,7 @@ def _recentre(look, det, rep, intr):
 
 
 # --- Step 6: plan on estimates, execute on truth -----------------------------
-def _plan_perceived(planner, row, name, sightings):
+def _plan_perceived(planner, row, name, sightings, fallback=None):
     """Plan against where the fruit are *believed* to be, execute on truth.
 
     Same trick as `week2_pick._plan_blind`, and deliberately so — that function
@@ -334,16 +334,32 @@ def _plan_perceived(planner, row, name, sightings):
     fruit it doesn't. That is not a camera, it is a cheat, and it would make the
     clearance figure meaningless.
 
-    A fruit that was **not** seen keeps its ground-truth position for the
-    obstacle check. That is the optimistic choice and it is worth being honest
-    about: the alternative — dropping unseen fruit from the obstacle set — would
-    let the planner fly straight through a tomato it failed to detect. Neither
-    is right. A real machine would use the row map, which is what the miss log
-    at the end of the run exists to feed.
+    A fruit that was **not** seen falls back to `fallback[n]` if a fallback map
+    is given, and to its ground-truth position if not.
+
+    ⚠️ **The ground-truth fallback is a cheat and it was flagged as one here
+    from the start.** Its own note used to read: "the alternative — dropping
+    unseen fruit from the obstacle set — would let the planner fly straight
+    through a tomato it failed to detect. Neither is right. A real machine would
+    use the row map." `fallback` is that row map. Week 4's deck camera surveys
+    the whole row in one frame, so a fruit this frame's wrist detection missed
+    still has a *measured* position to be routed around rather than a perfect
+    one. Passing it closes the last place in the perceive-plan-execute chain
+    where the planner was reading the simulator.
+
+    It is still not free: the deck estimate is ~2 mm on an isolated fruit and
+    tens of millimetres on one whose blob fused with a neighbour, so the
+    obstacle it routes around may be in slightly the wrong place. That is a
+    measurement error, which `mission.CLEARANCE` has margin for. Knowing the
+    exact answer was not an error at all, which is why it was worse.
     """
     import mujoco
 
     truth = {n: row.pos(n).copy() for n in row.names}
+    if fallback:
+        for n, p in fallback.items():
+            if n not in sightings and n in row.home:
+                row.place(n, np.asarray(p, float))
     for n, s in sightings.items():
         row.place(n, s.est)
     mujoco.mj_forward(planner.model, planner.data)

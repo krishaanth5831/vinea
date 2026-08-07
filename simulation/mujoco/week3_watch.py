@@ -354,7 +354,8 @@ class Views:
         cv2.putText(scene, f"scene '{self.scene_name}'",
                     (10, self.h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (210, 210, 210), 1, cv2.LINE_AA)
-        stats = _panel(self.w, self.h, self.stats_lines(), "week 3 pipeline")
+        stats = _panel(self.w, self.h, self.stats_lines(),
+                       getattr(self, "panel_title", "week 3 pipeline"))
         return np.vstack([np.hstack([deck, wrist]),
                           np.hstack([scene, stats])])
 
@@ -387,7 +388,18 @@ class Sink:
 
     QUIT_W, QUIT_H, QUIT_PAD = 140, 36, 12
 
-    def __init__(self, live=True, out=None, fps=30, title="vinea - week 3"):
+    def __init__(self, live=True, out=None, fps=30, title="vinea - week 3",
+                 on_click=None, on_key=None):
+        # `on_click(x, y)` receives every left-click that is not on the QUIT
+        # button, in window pixels. Week 4 uses it to place fruit by clicking
+        # the deck panel; leaving it None keeps Week 3's behaviour exactly.
+        #
+        # `on_key(code)` receives every other keypress. It has to live here
+        # because `push` owns the only `cv2.waitKey` — a second one in the
+        # caller's loop competes for the same event queue and swallows keys at
+        # random, which is exactly how Week 4's SPACE stopped working.
+        self.on_key = on_key
+        self.on_click = on_click
         self.live, self.out, self.fps, self.title = live, out, fps, title
         self.writer = None
         self.stopped = False
@@ -407,11 +419,15 @@ class Sink:
     def _on_mouse(self, event, x, y, flags, param):
         import cv2
 
-        if event != cv2.EVENT_LBUTTONDOWN or self._quit_rect is None:
+        if event != cv2.EVENT_LBUTTONDOWN:
             return
-        x0, y0, x1, y1 = self._quit_rect
-        if x0 <= x <= x1 and y0 <= y <= y1:
-            self.stopped = True
+        if self._quit_rect is not None:
+            x0, y0, x1, y1 = self._quit_rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                self.stopped = True
+                return
+        if self.on_click is not None:
+            self.on_click(x, y)
 
     def _draw_quit(self, frame):
         """Draw the button. On the *displayed* copy only — never the recording.
@@ -466,9 +482,12 @@ class Sink:
             # callback. Physics is much slower than real time here, so no extra
             # pacing is needed — unlike the passive viewer, which outruns the
             # wall clock and needs a sleep.
-            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+            k = cv2.waitKey(1) & 0xFF
+            if k in (27, ord("q")):
                 self.stopped = True
-            elif self._closed_by_user():
+            elif k != 255 and self.on_key is not None:
+                self.on_key(k)
+            if not self.stopped and self._closed_by_user():
                 self.stopped = True
             if self.stopped:
                 self.close_window()

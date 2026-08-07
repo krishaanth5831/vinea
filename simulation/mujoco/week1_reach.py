@@ -19,7 +19,7 @@ there is honest.
     ./.venv/bin/python simulation/mujoco/week1_reach.py
 
     # no display: writes a video for the weekly update
-    ./.venv/bin/python simulation/mujoco/week1_reach.py --headless --out week1.mp4
+    ./.venv/bin/python simulation/mujoco/week1_reach.py --headless --out week1_reach.mp4
 """
 
 import argparse
@@ -136,7 +136,13 @@ def run_headless(model, data, config, tasks, dt, out_path, seconds):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--headless", action="store_true", help="render to video instead of a window")
-    ap.add_argument("--out", default="week1.mp4", help="output video path (headless only)")
+    # ⚠️ Named after this script, not "week1.mp4". Both this file and
+    # week1_gripper.py used to default/document their way to week1.mp4, so a
+    # headless run here silently overwrote the gripper's pick capture with a
+    # reach demo. That is also the repo convention: a capture is named after
+    # the script that produced it, so a video always says which code made it.
+    ap.add_argument("--out", default="week1_reach.mp4",
+                    help="output video path (headless only)")
     ap.add_argument("--seconds", type=float, default=12.0, help="video length (headless only)")
     args = ap.parse_args()
 
