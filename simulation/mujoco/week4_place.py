@@ -26,13 +26,28 @@ chain with fifteen fruit and a planner behind it.
     ./.venv/bin/python simulation/mujoco/week4_place.py --layout L.json --seen
     ./.venv/bin/python simulation/mujoco/week4_place.py --grid 12 --out week4_place.mp4
 
---- how it works, and the three things that are not obvious ------------------
+    # the old behaviour: no chassis camera, fruit picked in placement order
+    ./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --no-deck
 
-**The green board IS the arm's range.** It is sized to the guaranteed zone from
-week1_mousereach's 31x24 grid sweep — y +/-0.55, z 0.15-0.95 — so anywhere you
-can click is somewhere the arm can work, and there is nothing to guess. It is
-`contype=0` scenery and only exists when a window is open, so it changes no
-dynamics and batch scenes stay byte-identical to the campaign's.
+--- how it works, and the four things that are not obvious -------------------
+
+**The deck camera chooses the order and aims the wrist camera.** Before anything
+moves, one frame from the chassis mast (`deck_cam.py`) surveys the whole row;
+`deck_cam.plan_order` turns that into the sequence to work it in, and the wrist
+camera is sent to *measured* positions rather than to `crop.placed`. Both matter
+and neither is cosmetic — see `harvest_placed`. `--no-deck` puts the old
+behaviour back, which was placement order and a look pose read from the answer.
+
+**There is no minimum spacing** — see `TOUCHING` below for the rule that was
+removed and the measurement that says it was wrong. Fruit may be placed
+touching, and a close pair is then a pick-order problem for the deck camera
+rather than a placement the tool refuses.
+
+**The green board IS the arm's range.** It is sized to the band re-measured in
+`week4_envelope.py` — 49 cells, one full pick each — so anywhere you can click is
+somewhere the arm can work, and there is nothing to guess. It is `contype=0`
+scenery and only exists when a window is open, so it changes no dynamics and
+batch scenes stay byte-identical to the campaign's.
 
 **You cannot add a body to a compiled model.** So a POOL of trusses is compiled
 once and "placing" is `Row.place()`, which already moves the mocap stem anchor
@@ -117,18 +132,67 @@ GUARANTEED_Z = (0.50, 0.70)
 MARGINAL_HALF_Y = 0.55
 MARGINAL_Z = (0.42, 0.72)
 
-# ⚠️ Minimum centre-to-centre spacing. plant_row.py records what happens below
-# it: a truss placed 127 mm out hung at 4.76 N instead of 1.18 N and spiked to
-# 9.25 N — over SNAP_N — so it snapped itself before the arm ever moved.
-MIN_SPACING = 0.200
+# ⚠️ **There is no minimum spacing any more, and that is a deliberate removal.**
+#
+# This used to refuse any placement within 200 mm of another fruit, and the
+# reason it gave was this:
+#
+#     "plant_row.py records what happens below it: a truss placed 127 mm out
+#      hung at 4.76 N instead of 1.18 N and spiked to 9.25 N — over SNAP_N — so
+#      it snapped itself before the arm ever moved."
+#
+# ⚠️ **That justification does not survive being measured, and it never
+# applied.** The 127 mm in `plant_row.py` is a fruit's distance from the arm's
+# *home tool0* — a tomato spawned inside the open gripper, which physics then
+# shoves. It is not a fruit-to-fruit distance, and the rule read its own
+# evidence wrong. Two hanging fruit, settled for 3 s, peduncle force at the peak:
+#
+#   centres     70 mm    85 mm   100 mm   140 mm   200 mm
+#   peak N       1.18     1.18     1.18     1.18     1.18
+#
+# 1.18 N is 0.12 kg x 9.81 — each fruit carrying its own weight and nothing
+# else, at every spacing down to touching. Neighbouring stems do not load each
+# other at all, because the stems are `contype=0` and the welds are independent.
+# The rule was guarding against something that does not happen.
+#
+# What *does* happen at close spacing is a planning problem, not a physics one,
+# and refusing the arrangement was the wrong response to it for two reasons:
+#
+#   * **A grower does not space the crop for the robot.** Trusses hang where the
+#     plant puts them, and clusters are the normal case rather than an abuse of
+#     the tool. A demo that only accepts comfortably spaced fruit is a demo that
+#     has quietly removed the hard part.
+#   * **The hard part turned out to be solvable, and the rule was hiding it.**
+#     The pair sweep shows that at 100 mm apart *one* of the two is refused and
+#     the other plans fine — so picking the plannable one first turns a pair
+#     that looks impossible into two clean picks. That is what `deck_cam.
+#     plan_order` does, and it could not have been found while the arrangement
+#     was forbidden.
+#
+# What replaces it is not a constraint but information: `check` still reports
+# how close the nearest neighbour is, `Crop.place` prints it, and the deck
+# camera's order is what actually deals with it.
+#
+# The one thing still refused is fruit that would occupy the same space —
+# `TOUCHING` below — and that is geometry, not policy: two spheres whose centres
+# are less than a diameter apart are interpenetrating, and MuJoCo resolves that
+# by firing them apart at speed before the arm has moved.
+TOUCHING = 2 * FRUIT_R + 0.004      # 70 mm; 4 mm of skin so they rest, not push
 
-# ⚠️ **Ten, not fifteen.** The marginal band is 1.10 m x 0.30 m, which holds
-# 5 x 2 = 10 fruit at the pitch `auto_layout` uses (the 200 mm minimum plus
-# twice the jitter, so the jitter cannot push a pair under the minimum).
-# Fifteen was chosen against the old (wrong) envelope and simply does not fit a
-# region the arm can work. Asking for more than this now returns fewer rather
-# than silently placing unpickable fruit.
-MAX_FRUIT = 10
+# What a *close* neighbour means, for reporting only. Both come from the sweep
+# in `deck_cam`: under 120 mm centre to centre a square-on pick is refused,
+# under 170 mm it costs a fallback route. Neither refuses a placement here.
+CLOSE_M = 0.170
+VERY_CLOSE_M = 0.120
+
+# ⚠️ **Fifteen again.** Ten was not a property of the arm — it was arithmetic on
+# the old 200 mm lattice: a 1.10 x 0.30 m band holds 5 x 2 slots at that pitch
+# and no more. With the spacing rule gone the limit is the pool and the band,
+# and 15 fruit fit the measured band comfortably. `auto_layout` still spreads
+# them, because an auto-filled row exists to be a fair test rather than a
+# worst case; put them on top of each other by hand if that is what you want to
+# see.
+MAX_FRUIT = 15
 POOL = 24
 
 # Where unplaced fruit hang: behind the arm, clear of everything, welds live.
@@ -172,52 +236,90 @@ def zone(y, z):
     return None
 
 
+def nearest(y, z, placed):
+    """(name, metres) of the closest already-placed fruit, or (None, inf)."""
+    best, best_d = None, float("inf")
+    for name, p in placed.items():
+        d = float(np.hypot(p[1] - y, p[2] - z))
+        if d < best_d:
+            best, best_d = name, d
+    return best, best_d
+
+
 def check(y, z, placed):
-    """(ok, reason, zone). Refusing says why — a silent refusal teaches nothing."""
+    """(ok, reason, zone). Refusing says why — a silent refusal teaches nothing.
+
+    Two refusals left, and neither of them is a spacing policy:
+
+      * outside the band the arm was *measured* to work in (`zone`)
+      * close enough to another fruit that the two spheres overlap (`TOUCHING`)
+
+    A crowded-but-separate placement is accepted. `reason` still comes back
+    populated in that case so the caller can say how tight it is — see
+    `Crop.place`, which prints it — because "the robot took this and it is going
+    to be hard" is useful and "refused" is not.
+    """
     zn = zone(y, z)
     if zn is None:
         return False, (f"outside the arm's measured envelope "
                        f"(y {y:+.2f}, z {z:.2f})"), None
-    for name, p in placed.items():
-        d = float(np.hypot(p[1] - y, p[2] - z))
-        if d < MIN_SPACING:
-            return False, (f"{d * 1000:.0f} mm from {name} — under the "
-                           f"{MIN_SPACING * 1000:.0f} mm minimum, the stems "
-                           f"would load each other over SNAP_N"), zn
     if len(placed) >= MAX_FRUIT:
         return False, f"already at the {MAX_FRUIT}-fruit limit", zn
+    name, d = nearest(y, z, placed)
+    if name is not None and d < TOUCHING:
+        return False, (f"{d * 1000:.0f} mm from {name} — two tomatoes cannot "
+                       f"occupy the same space ({TOUCHING * 1000:.0f} mm "
+                       f"centre to centre is touching)"), zn
+    if name is not None and d < VERY_CLOSE_M:
+        return True, (f"{d * 1000:.0f} mm from {name} — square-on this pair "
+                      f"cannot both be planned; the order is what solves it"), zn
+    if name is not None and d < CLOSE_M:
+        return True, (f"{d * 1000:.0f} mm from {name} — tight, expect a "
+                      f"fallback route"), zn
     return True, "", zn
 
 
-def auto_layout(n, seed=0, margin=0.02):
-    """`n` fruit on a jittered lattice inside the guaranteed rectangle.
+# Lattice pitches `auto_layout` will try, widest first. The first two are the
+# thresholds the pair sweep in `deck_cam` found — 170 mm is where the direct
+# route survives a neighbour, 120 mm is where a square-on pick starts being
+# refused outright — so an auto-filled row says something about which regime it
+# is in rather than just "some tomatoes".
+AUTO_PITCHES = (0.24, 0.20, 0.17, 0.15, 0.13, 0.11, 0.09)
 
-    A generator that cannot emit an invalid layout. The lattice guarantees the
-    spacing; the jitter stops every layout being the same one. 1.10 x 0.80 m at
-    200 mm gives 6 x 5 = 30 slots, so 15 fruit uses half of them and the row is
-    roughly twice the density anything in this repo has been measured against.
+
+def auto_layout(n, seed=0, margin=0.02):
+    """`n` fruit on a jittered lattice across the measured band.
+
+    An auto-filled row is a *fair test*, not a worst case: it spreads the fruit
+    as far apart as the count allows, so a success rate measured on it is not
+    secretly a measurement of one pathological cluster. Hand placement is where
+    you make it hard — there is nothing stopping you now.
+
+    ⚠️ **Widest pitch that fits, rather than one fixed pitch and a cap.** The
+    old version pitched the lattice at the 200 mm minimum plus the jitter, which
+    fixed the slot count at 10; asking for 15 printed a warning and silently
+    gave you 10. Choosing the pitch from the count instead means `--grid 15`
+    means fifteen, and it says which of the pair-sweep regimes the row landed in
+    rather than pretending density is not a variable.
     """
     rng = np.random.default_rng(seed)
-    # Generated across the marginal band, because the guaranteed core is only
-    # 0.20 m tall and holds a single row. Every slot is still inside a region
-    # that was measured, which the old version could not claim.
-    #
-    # ⚠️ Pitch is MIN_SPACING **plus twice the jitter**, not MIN_SPACING. On a
-    # lattice pitched at exactly the minimum, any jitter at all can push two
-    # neighbours under it — two fruit each nudged 20 mm toward each other sit
-    # 160 mm apart — so the spacing check rejected them and a request for 12
-    # quietly produced 8. Widening the pitch makes the jitter safe by
-    # construction instead of relying on a retry.
-    pitch = MIN_SPACING + 2 * margin
-    ys = np.arange(-MARGINAL_HALF_Y, MARGINAL_HALF_Y + 1e-9, pitch)
-    zs = np.arange(MARGINAL_Z[0], MARGINAL_Z[1] + 1e-9, pitch)
-    slots = [(float(y), float(z)) for y in ys for z in zs]
+    pitch = AUTO_PITCHES[-1]
+    slots = []
+    for p in AUTO_PITCHES:
+        ys = np.arange(-MARGINAL_HALF_Y, MARGINAL_HALF_Y + 1e-9, p)
+        zs = np.arange(MARGINAL_Z[0], MARGINAL_Z[1] + 1e-9, p)
+        cells = [(float(y), float(z)) for y in ys for z in zs]
+        pitch, slots = p, cells
+        if len(cells) >= n:
+            break
     if n > len(slots):
-        # Cap rather than raise: asking for more than fits is a reasonable
-        # thing to do interactively, and placing fewer is the honest answer.
-        print(f"  ⚠️ {n} requested but only {len(slots)} slots fit at "
-              f"{MIN_SPACING * 1000:.0f} mm inside the measured band")
+        print(f"  ⚠️ {n} requested; {len(slots)} slots fit the measured band "
+              f"even at the {pitch * 1000:.0f} mm lattice")
         n = len(slots)
+    elif pitch < CLOSE_M:
+        print(f"  ⚠️ {n} fruit needs a {pitch * 1000:.0f} mm lattice — inside "
+              f"the {CLOSE_M * 1000:.0f} mm at which a neighbour starts costing "
+              f"a fallback route. Expect the order to matter.")
     rng.shuffle(slots)
     out, placed = [], {}
     for y, z in slots:
@@ -253,9 +355,16 @@ def random_seed():
 def save_layout(path, layout, meta=None):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    pts = [(y, z) for _n, y, z in layout]
+    closest = min((float(np.hypot(a[0] - b[0], a[1] - b[1]))
+                   for i, a in enumerate(pts) for b in pts[i + 1:]),
+                  default=float("nan"))
     p.write_text(json.dumps(
         {"fruit": [{"name": n, "y": y, "z": z} for n, y, z in layout],
-         "min_spacing_mm": MIN_SPACING * 1000, **(meta or {})}, indent=2))
+         # Recorded, not enforced. A layout file is a description of an
+         # arrangement, and how tight it is decides how much the pick order
+         # matters — which is worth knowing when reading a run back.
+         "closest_pair_mm": round(closest * 1000, 1), **(meta or {})}, indent=2))
     print(f"  layout: {len(layout)} fruit -> {p}")
 
 
@@ -357,8 +466,12 @@ class Crop:
         self.version += 1
         mujoco.mj_forward(self.model, self.data)
         if not quiet:
+            # `why` is populated on an *accepted* tight placement too — that is
+            # the point of dropping the spacing rule. Saying "this is 90 mm from
+            # p03 and the order is what solves it" is worth more than refusing.
+            note = f"  ⚠️ {why}" if why else ""
             print(f"    placed {name} at y{y:+.3f} z{z:.3f}  [{zn}]  "
-                  f"(crop v{self.version})")
+                  f"(crop v{self.version}){note}")
         return name, zn
 
     def apply(self, layout, quiet=True):
@@ -397,12 +510,34 @@ def diff_maps(before, after, moved_mm=30.0):
 
 def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
                    sensor=None, detector=None, log=None, verbose=False,
-                   add_at=None, add_layout=None, seed=0, on_tick=None):
+                   add_at=None, add_layout=None, seed=0, on_tick=None,
+                   on_event=None, deck=None):
     """Plan and pick every placed fruit. Returns the log rows.
 
     `sensor`/`detector` given -> perception in the loop ("seen"). Absent -> the
     planner is handed the crop directly ("told"). Told is the mechanism; seen is
     the honest demo. Both replan on a stale crop version.
+
+    `deck` is a `deck_cam.DeckSurvey`, and it changes two things that used to be
+    the script's job rather than the robot's:
+
+      * **The order.** Without it, fruit are picked in the order the pool
+        happens to name them — which is placement order, which is nothing. With
+        it, the survey is fed to `deck_cam.plan_order` and the row is worked in
+        the order that measured cheapest, re-planned from scratch whenever the
+        crop changes. See the pair sweep in `deck_cam`: on a close pair the
+        order is the difference between harvesting one fruit and harvesting two.
+      * **Where the wrist camera looks.** Without it, the staging pose for each
+        look came out of `crop.placed` — the operator's ground truth, handed to
+        the robot. That is the one cheat left in the Week 4 loop and it was a
+        load-bearing one: take it away with only an eye-in-hand sensor and the
+        arm has to sweep the row to find anything. With a deck survey the look
+        pose is a *measurement*, the arm drives straight to it, and no sweep
+        happens because none is needed.
+
+    ⚠️ **The survey runs with the arm parked, always.** `deck_cam.parked`
+    enforces it; the reason is in `DECK_MOUNT` — staged mid-row the arm eclipses
+    a fruit and the survey comes back one short with nothing to say so.
     """
     import time as _time
 
@@ -420,41 +555,169 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
 
     speed = DEFAULT_SPEED if speed is None else speed
     clearance = CLEARANCE if clearance is None else clearance
+
+    # `on_event(kind, **info)` narrates the run for a viewer. Everything the
+    # loop decides is otherwise only ever printed, which is no use to a panel
+    # that has to show what the arm is doing *right now*.
+    def say(kind, **info):
+        if on_event is not None:
+            on_event(kind, **info)
+
     rows = []
+
+    # --- what the deck camera knows, and when it re-learns it -----------------
+    # `survey` is name -> measured position; `plan` is the order it implies.
+    # Both are rebuilt from one render whenever the crop changes, because a plan
+    # made against an older crop is ordering fruit it has never seen.
+    survey = {}
+    plan = None
+    surveyed_at = None
+
+    def resurvey(why):
+        """One deck frame, arm parked. Refreshes the map and the order."""
+        nonlocal survey, plan, surveyed_at
+        from deck_cam import parked, plan_order
+
+        park_arm(model, data, park_q)
+        mujoco.mj_forward(model, data)
+        if not parked(model, data, park_q):
+            raise RuntimeError(
+                "deck survey attempted with the arm off park — it would "
+                "eclipse fruit and silently return a short row")
+        # Only fruit still on the plant are candidates. A harvested tomato is
+        # sitting in the crate, still red and still in shot, and the camera has
+        # no opinion about that — the robot does, because it put it there. Left
+        # in, its blob would associate to its own name and the order would
+        # include a fruit that has already been picked.
+        standing = [n for n in crop.pool if n in crop.placed and row.attached(n)
+                    and n not in {r["fruit"] for r in rows}]
+        seen, rep = deck.look(data, standing)
+        survey = {n: s.est for n, s in seen.items()}
+        plan = plan_order(seen)
+        surveyed_at = crop.version
+        missed = [n for n in standing if n not in survey]
+        errs = [s.err_mm for s in seen.values()]
+        print(f"\n  --- deck survey ({why}) — one frame, arm parked ---")
+        print(f"  {len(survey)}/{len(standing)} found"
+              + (f", missed {', '.join(missed)}" if missed else "")
+              + (f" · position error mean {np.mean(errs):.1f} mm, "
+                 f"max {np.max(errs):.1f} mm" if errs else ""))
+        if missed:
+            print(f"  ⚠️ a fruit the deck camera cannot separate is a fruit "
+                  f"this run will not pick. It is not lost — it is unseen, and "
+                  f"the two are different failures.")
+        if plan.steps:
+            print(plan.table())
+        say("survey", survey=dict(survey), plan=plan, missed=missed)
+        return plan
+
+    if deck is not None:
+        resurvey("start")
+
     per = None
     if sensor is not None and detector is not None:
-        per = Perception(model, sensor, detector, crop.row_map())
+        # ⚠️ The row map the wrist camera associates against. With a deck
+        # survey it is a *measurement*; without one it is `crop.row_map()`,
+        # which is the operator's ground truth wearing a prior's clothes.
+        per = Perception(model, sensor, detector,
+                         dict(survey) if deck is not None else crop.row_map())
 
     targets = list(crop.placed)
     print(f"\n{'=' * 78}\n  HARVEST — {len(targets)} fruit placed, "
-          f"{'perception' if per else 'told'}, clearance "
-          f"{clearance * 1000:.0f} mm, crop v{crop.version}")
+          f"{'perception' if per else 'told'}, "
+          f"{'deck-planned order' if deck is not None else 'placement order'}, "
+          f"clearance {clearance * 1000:.0f} mm, crop v{crop.version}")
 
     done = 0
     while True:
+        attempted = {r["fruit"] for r in rows}
         remaining = [n for n in crop.placed if row.attached(n)
-                     and n not in {r['fruit'] for r in rows}]
+                     and n not in attempted]
         if not remaining:
             break
-        name = remaining[0]
+
+        # --- whose turn -------------------------------------------------------
+        if deck is None:
+            # No survey: the pool's own naming, which is placement order and
+            # carries no information about the row at all.
+            name = remaining[0]
+            queue = list(remaining)
+        else:
+            if crop.version != surveyed_at:
+                resurvey(f"crop moved to v{crop.version}")
+            queue = [n for n in plan.order if n in remaining]
+            if not queue:
+                # Everything left was invisible to the deck camera — a fused
+                # cluster, most likely. Do NOT fall back to placement order:
+                # the positions would have to come from `crop.placed`, which is
+                # the ground truth the mast exists to stop reading, and a silent
+                # fallback would make a survey failure read as a pick failure.
+                #
+                # ⚠️ Book them as `not_detected` rather than just stopping.
+                # `outcomes.py`'s first rule is that every attempt lands in
+                # exactly one named bucket, and a fruit that vanishes from the
+                # log entirely is worse than one in the wrong bucket: the report
+                # would show 6 attempts on 8 placed fruit and a clean *rate*
+                # computed over the 6, which flatters it.
+                print(f"\n  {len(remaining)} fruit the deck camera never "
+                      f"separated: {', '.join(remaining)}")
+                print(f"  logged as not_detected — unseen, not lost, and the "
+                      f"two are different failures")
+                for n in remaining:
+                    miss = {"fruit": n, "seen": False, "err_mm": None,
+                            "zone": crop.zones.get(n),
+                            "n_fruit": len(crop.placed),
+                            "crop_version": crop.version, "seed": seed,
+                            "ordered_by": "deck", "missed_by": "deck",
+                            "outcome": "not_detected",
+                            "t_scan": 0.0, "t_plan": 0.0, "t_total": 0.0}
+                    rows.append(miss)
+                    if log:
+                        log.add(**miss)
+                    say("refused", fruit=n, why="deck camera never saw it")
+                break
+            name = queue[0]
+        say("select", fruit=name, queue=queue,
+            placed=len(crop.placed), done=len(rows))
 
         # --- mid-run addition -------------------------------------------------
         if add_at is not None and done == add_at and add_layout:
             print(f"\n  --- adding {len(add_layout)} fruit mid-run, after "
                   f"{done} picks ---")
-            before = crop.row_map()
+            # ⚠️ `before` is what the robot *believed*, not what was true. With
+            # a deck camera that is the last survey; without one there is
+            # nothing to compare against but the operator's own map, which
+            # makes the diff a tautology — it reports exactly the fruit the
+            # script just added, because the script wrote both sides of it.
+            #
+            # ⚠️ Fruit already harvested are dropped from `before`. They are
+            # genuinely no longer on the plant, so a raw diff lists them under
+            # `vanished` — and `vanished` is the bucket that is supposed to mean
+            # "a tomato fell off and nobody noticed". Letting the routine
+            # successes pile up in it is how a real one would go unread.
+            before = {n: p for n, p in
+                      (survey if deck is not None else crop.row_map()).items()
+                      if row.attached(n) and n not in attempted}
             for _n, y, z in add_layout:
                 crop.place(y, z)
-            after = crop.row_map()
-            appeared, vanished, moved = diff_maps(before, after)
             print(f"  crop is now v{crop.version} — every plan checked against "
                   f"an older version is void")
+
+            if deck is not None:
+                # Look again. This is the robot *noticing*: the diff is between
+                # two surveys, so a fruit that appeared is one the camera saw
+                # appear, and a fruit it cannot separate simply does not show up.
+                resurvey(f"crop moved to v{crop.version}")
+                after = dict(survey)
+            else:
+                after = crop.row_map()
+            appeared, vanished, moved = diff_maps(before, after)
+            print(f"  re-scan diff: appeared {appeared or '-'}, "
+                  f"vanished {vanished or '-'}, moved {moved or '-'}")
             if per is not None:
-                # Seen, not told: the row map the perception associates against
-                # is refreshed, so the new fruit can be detected at all.
+                # The row map the wrist camera associates against has to track
+                # the new survey, or the added fruit cannot be detected at all.
                 per.row_map = after
-                print(f"  re-scan diff: appeared {appeared or '-'}, "
-                      f"vanished {vanished or '-'}, moved {moved or '-'}")
             targets = list(crop.placed)
             add_at = None
             continue
@@ -471,14 +734,28 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
 
         rec = {"fruit": name, "seen": True, "err_mm": None,
                "zone": crop.zones.get(name), "n_fruit": len(crop.placed),
-               "crop_version": crop.version, "seed": seed}
+               "crop_version": crop.version, "seed": seed,
+               "ordered_by": "deck" if deck is not None else "placement",
+               "order_index": len(rows)}
+        if deck is not None:
+            step = next((s for s in plan.steps if s.fruit == name), None)
+            if step is not None:
+                rec.update({"deck_risk": round(step.risk, 3),
+                            "deck_unblocks": round(step.unblocks, 3),
+                            "deck_err_mm": round(float(np.linalg.norm(
+                                survey[name] - crop.placed[name]) * 1000), 2)})
 
         # --- look -------------------------------------------------------------
         t_scan = 0.0
         sights = None
         if per is not None:
+            say("scan", fruit=name)
             s0 = _time.perf_counter()
-            nominal = crop.placed[name]
+            # ⚠️ Where the wrist camera is sent. With a deck survey this is the
+            # deck camera's own measurement; without one it is `crop.placed`,
+            # i.e. the answer. The whole point of the mast is that this line
+            # stops reading ground truth.
+            nominal = survey[name] if deck is not None else crop.placed[name]
             stage(model, data, park_q,
                   np.array([STAGE_X, nominal[1], nominal[2]]), row=row,
                   speed=speed, reset="arm")
@@ -494,16 +771,19 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
                 print(f"  {name}: NOT DETECTED")
                 done += 1
                 continue
+            say("seen", fruit=name, err_mm=s.err_mm, est=s.est)
             rec["err_mm"] = s.err_mm
             e = s.err
             rec.update({"err_x": float(e[0]), "err_y": float(e[1]),
                         "err_z": float(e[2]), "associated_to": name})
 
         # --- plan -------------------------------------------------------------
+        say("plan", fruit=name, version=crop.version)
         p0 = _time.perf_counter()
         planned_at = crop.version
-        mission = (_plan_perceived(planner, row, name, sights) if sights
-                   else planner.plan(name))
+        mission = (_plan_perceived(planner, row, name, sights,
+                                   fallback=survey if deck is not None else None)
+                   if sights else planner.plan(name))
         t_plan = _time.perf_counter() - p0
 
         if not mission.ok:
@@ -514,6 +794,7 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
             rows.append(rec)
             if log:
                 log.add(**rec)
+            say("refused", fruit=name, why=str(why))
             print(f"  {name}: REFUSED — {why}")
             done += 1
             continue
@@ -533,6 +814,8 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
         guard = Guard(model, data, row, name,
                       stop=min(GUARD_STOP, 0.4 * clearance))
         guard.armed = False
+        say("fly", fruit=name, mission=mission, trace=trace, guard=guard,
+            t_plan=t_plan)
         # The trace has to tick every cycle (it is the ejection discriminator),
         # and a recorder wants the same hook. Chained rather than either one
         # replacing the other.
@@ -574,6 +857,7 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
         if log:
             log.add(**rec)
 
+        say("result", fruit=name, rec=rec)
         flag = "" if rec["outcome"] == "clean" else f"  <-- {rec['outcome']}"
         print(f"  {name}: {rec['outcome']:<14} "
               f"grasp={rec['grasped']} stem={rec['broke']} "
@@ -727,12 +1011,19 @@ def place_interactively(crop):
     display. Placing blind is the worse experience by a long way, which is why
     the click board exists and is the default.
     """
+    # ⚠️ These three lines used to name DOME_HALF_Y, DOME_Z, DOME_APEX_HALF_Y
+    # and DOME_APEX_Z, none of which exist in this module — the envelope was
+    # re-measured into GUARANTEED_*/MARGINAL_* and this print was left behind.
+    # It is the first statement in the function, so the no-window placement path
+    # raised NameError before reading a single coordinate. Nothing caught it
+    # because every documented command passes --windowed, --grid or --layout.
     print(f"\n  Place up to {MAX_FRUIT} fruit. The arm works:")
     print(f"    guaranteed   |y| <= {GUARANTEED_HALF_Y}, "
-          f"z {GUARANTEED_Z[0]}-{GUARANTEED_Z[1]}")
-    print(f"    dome         |y| <= {DOME_HALF_Y} up to z {DOME_Z[1]}, "
-          f"closing to |y| < {DOME_APEX_HALF_Y} at z {DOME_APEX_Z}")
-    print(f"    minimum spacing {MIN_SPACING * 1000:.0f} mm")
+          f"z {GUARANTEED_Z[0]}-{GUARANTEED_Z[1]}   (10/10 clean)")
+    print(f"    marginal     |y| <= {MARGINAL_HALF_Y}, "
+          f"z {MARGINAL_Z[0]}-{MARGINAL_Z[1]}   (18/21 clean)")
+    print(f"    no minimum spacing — put them as close as you like, down to "
+          f"{TOUCHING * 1000:.0f} mm centre to centre")
     print("\n  'y z' to place · 'auto N' to fill · 'list' · 'done'\n")
     while True:
         try:
@@ -840,6 +1131,10 @@ def main():
     ap.add_argument("--seen", action="store_true",
                     help="perception in the loop instead of telling the planner")
     ap.add_argument("--detector", default="hsv", choices=["hsv", "yolo"])
+    ap.add_argument("--no-deck", action="store_true",
+                    help="switch the chassis camera off and pick in placement "
+                         "order, which is what this did before the mast "
+                         "existed. Kept so the ordering can be A/B'd.")
     # Interactive runs default to 0.4 of rated joint speed. Watching a pick at
     # 0.15 is 30 s of staring; the measurement tools (week4_run, week4_snap,
     # week4_envelope) keep reach.DEFAULT_SPEED so their numbers stay comparable
@@ -888,7 +1183,8 @@ def main():
     # The click board only exists when it is going to be clicked. It is
     # contype=0 scenery, so it changes no dynamics either way, but leaving it
     # out of batch runs keeps those scenes byte-identical to the campaign's.
-    model = build_scene(wrist_cam=args.seen, trusses=pool,
+    model = build_scene(wrist_cam=args.seen, deck_cam=not args.no_deck,
+                        trusses=pool,
                         place_board=interactive and args.windowed)
     data = mujoco.MjData(model)
     names = [n for n, _, _ in pool]
@@ -948,17 +1244,25 @@ def main():
     if args.no_harvest:
         return
 
-    sensor = detector = None
-    if args.seen:
-        from week3_perceive import build_detector
+    from week3_perceive import build_detector
 
+    sensor = detector = deck = None
+    if args.seen:
         sensor = SensorCamera(model, camera="wrist")
         detector = build_detector(args.detector)
+    if not args.no_deck:
+        from deck_cam import DeckSurvey
+
+        # ⚠️ Same detector class as the wrist camera, deliberately. The claim is
+        # that the deck camera is the *same pipeline at a different range*; give
+        # it its own detector and the comparison between what the two see stops
+        # meaning anything.
+        deck = DeckSurvey(model, detector=build_detector(args.detector))
 
     add_layout = None
     if args.add_at is not None:
-        # Generated against the already-placed fruit so the additions respect
-        # the spacing rule rather than being dropped on top of the crop.
+        # Generated against the already-placed fruit, so the additions land
+        # where the arm can work rather than on top of the crop.
         add_layout = []
         rng = np.random.default_rng(args.seed + 99)
         tries = 0
@@ -981,7 +1285,8 @@ def main():
 
     kw = dict(speed=args.speed, clearance=clearance, sensor=sensor,
               detector=detector, log=log, verbose=args.verbose,
-              add_at=args.add_at, add_layout=add_layout, seed=args.seed)
+              add_at=args.add_at, add_layout=add_layout, seed=args.seed,
+              deck=deck)
 
     if args.windowed and args.out:
         raise SystemExit("--windowed and --out are mutually exclusive: "
@@ -1033,6 +1338,13 @@ def main():
               f"{t['kg_week']:.0f} kg/week/robot at 24/7")
     if log:
         log.close()
+    # Both sensors own a GL context. `SensorCamera.close` exists because
+    # headless depth rendering raises EGLError out of Renderer.__del__ at
+    # process exit on this machine; closing explicitly keeps it off the common
+    # path. See the note in camera.SensorCamera.close.
+    for s in (deck, sensor):
+        if s is not None:
+            s.close()
 
 
 if __name__ == "__main__":

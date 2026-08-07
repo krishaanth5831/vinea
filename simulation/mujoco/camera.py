@@ -131,17 +131,191 @@ def _xyaxes_towards(origin, target, up_hint=(1.0, 0.0, 0.0)):
     return [*right, *up]
 
 
+# --- what the sensor looks like ----------------------------------------------
+#
+# A MuJoCo camera is a coordinate frame and nothing else. It is invisible, and
+# for three weeks that was fine because nothing depended on seeing it. It
+# stopped being fine the moment there were two: "where is the deck camera
+# looking from" is the first question anyone asks of a survey, and the answer
+# was three numbers in a source file. A camera you cannot see is a camera nobody
+# can check.
+#
+# There is no RGBD mesh anywhere in `third_party` — Menagerie ships the arm and
+# the gripper, not sensors — so the housings are built from primitives at the
+# real products' dimensions. That is the better trade here rather than a
+# concession: a mesh would be an opaque blob, and these numbers are the ones
+# that decide whether the sensor fits, which is exactly the sort of thing this
+# repo writes down. Drop a real .obj in later and only `_housing` changes.
+#
+# **Two different cameras, because they do two different jobs.**
+#
+#   wrist   D405-class, 42 x 42 x 23 mm, usable from ~70 mm to ~500 mm.
+#           It works at the staging distance, 280 mm (`mission.STAGE_X`), which
+#           is inside a D435's blind spot. Short range is why it is the one that
+#           inspects.
+#   deck    D435-class, 90 x 25 x 25 mm, usable from ~300 mm to ~3 m.
+#           It works at 1.3 m, which is what surveying a whole row from the
+#           chassis costs. See `deck_cam.DECK_MOUNT`.
+#
+# The 90 mm long axis is also why the deck camera is the one on a post and the
+# wrist one is not: 90 mm bolted to wrist3_link would stand further out than the
+# gripper does.
+HOUSINGS = {
+    #          length   height   depth    baseline   lens r
+    "d435":  (0.090,   0.025,   0.025,   0.050,     0.0055),
+    "d405":  (0.042,   0.042,   0.023,   0.018,     0.0050),
+}
+
+CASE_GREY = [0.16, 0.17, 0.19, 1.0]
+LENS_BLACK = [0.03, 0.03, 0.035, 1.0]
+LENS_RGB = [0.06, 0.10, 0.20, 1.0]      # the colour imager reads blue-black
+MOUNT_STEEL = [0.45, 0.47, 0.50, 1.0]
+
+
+def _quat_from_xyaxes(xyaxes):
+    """`xyaxes` (6 numbers) -> a geom `quat` in the same frame.
+
+    A camera is declared by its x and y axes; a geom is declared by a
+    quaternion. The housing has to sit in the camera's frame — front face on
+    -z, where the lens looks — so the two conventions have to be bridged here
+    rather than by hand-writing a quaternion per mount.
+
+    ⚠️ The matrix is built **columns-first**: R maps camera-local vectors into
+    the parent frame, so its columns are the camera's axes expressed in the
+    parent. Building it row-wise instead gives R.T, which is a housing rotated
+    to a plausible-looking wrong orientation with nothing to flag it.
+    """
+    import mujoco
+
+    x = np.asarray(xyaxes[:3], float)
+    y = np.asarray(xyaxes[3:], float)
+    x = x / np.linalg.norm(x)
+    y = y - x * float(x @ y)
+    y /= np.linalg.norm(y)
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, np.column_stack([x, y, np.cross(x, y)]).flatten())
+    return quat.tolist()
+
+
+def add_camera_housing(body, name, pos, xyaxes, kind="d435", stalk=None):
+    """Draw the sensor at `pos`/`xyaxes`, in whatever frame those are given in.
+
+    Call with the *same* pos and xyaxes the camera itself was added with, so the
+    drawing and the frame the maths uses cannot drift apart. Returns nothing —
+    the geoms go straight onto `body`.
+
+    `stalk` is an optional point in the same frame to run a mounting stub back
+    to, which is what stops the deck camera reading as a floating brick.
+
+    ⚠️ **contype=0, conaffinity=0 and mass=0 on every geom, and all three
+    matter.**
+
+      * contype/conaffinity: the wrist housing hangs 90 mm off wrist3_link,
+        which is precisely where `mission.ClearanceModel` measures gripper-to-
+        fruit distance. A collidable box there would move CLEARANCE, the guard
+        stop, and every clearance figure in the README — and it would do it
+        silently, because they are all measured rather than asserted.
+      * mass: the FR5's links carry explicit <inertial> from the URDF, so
+        MuJoCo ignores geom mass on those. Bodies created by this repo's own
+        spec code do not. Relying on remembering which is which is how a 40 g
+        camera quietly joins the payload the joint torque limits were checked
+        against. `deck_cam.main` asserts the wrist link's mass and inertia are
+        unchanged by this, rather than trusting the argument.
+    """
+    import mujoco
+
+    length, height, depth, baseline, lens_r = HOUSINGS[kind]
+    quat = _quat_from_xyaxes(xyaxes)
+    pos = np.asarray(pos, float)
+
+    def local(p):
+        """Camera-frame offset -> the frame `pos` is expressed in."""
+        R = np.array(_quat_to_mat(quat))
+        return (pos + R @ np.asarray(p, float)).tolist()
+
+    def add(gname, gtype, offset, **kw):
+        kw.setdefault("contype", 0)
+        kw.setdefault("conaffinity", 0)
+        kw.setdefault("mass", 0.0)
+        return body.add_geom(name=gname, type=gtype, pos=local(offset),
+                             quat=quat, **kw)
+
+    # ⚠️ **Every geom here sits strictly behind the pinhole**, i.e. at
+    # positive z in camera coordinates, with `BEHIND_APERTURE` of daylight.
+    # That is not cosmetic tidiness — it is what keeps `occluder` working.
+    #
+    # `occluder` casts a ray from the camera's own position. The first version
+    # of this centred the lens barrels on z=0 so they straddled the aperture,
+    # which put the ray's *origin* inside a geom: `mj_ray` duly returned a hit
+    # at ~0 m and every fruit in the Step 3 calibration report came back
+    # "occluded by wrist3_link". The gate still passed — the depth render is
+    # unaffected, because the near plane clips anything that close — so the only
+    # symptom was an occlusion column that had quietly become all-ones. An
+    # occlusion test that always says "occluded" is worse than none, because
+    # `camera.CAM_MOUNT` was chosen by reading exactly that column.
+    #
+    # Half a millimetre is invisible at any framing and is also the truthful
+    # arrangement: a lens element sits behind its aperture, not in front of it.
+    BEHIND_APERTURE = 0.0005
+    lens_half = 0.0035
+
+    # The case, its front face level with the aperture.
+    add(f"{name}_case", mujoco.mjtGeom.mjGEOM_BOX,
+        [0, 0, BEHIND_APERTURE + depth / 2],
+        size=[length / 2, height / 2, depth / 2], rgba=CASE_GREY)
+
+    # Imagers just inside the front face, looking down -z with the camera. Left
+    # and right IR at the stereo baseline, the projector between them, the
+    # colour imager outboard — a D4xx's actual layout, left to right.
+    lenses = [(-baseline / 2, lens_r, LENS_BLACK, "ir_l"),
+              (0.0, lens_r * 0.7, LENS_BLACK, "proj"),
+              (baseline / 2, lens_r, LENS_BLACK, "ir_r"),
+              (baseline / 2 + lens_r * 2.4, lens_r * 0.9, LENS_RGB, "rgb")]
+    for dx, r, rgba, tag in lenses:
+        if abs(dx) + r > length / 2:
+            continue        # the colour imager does not fit on the short case
+        add(f"{name}_{tag}", mujoco.mjtGeom.mjGEOM_CYLINDER,
+            [dx, 0, BEHIND_APERTURE + lens_half],
+            size=[r, lens_half, 0], rgba=rgba)
+
+    if stalk is not None:
+        end = np.asarray(stalk, float)
+        back = np.asarray(local([0, 0, depth]), float)
+        body.add_geom(
+            name=f"{name}_stub", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            fromto=[*back, *end], size=[0.010, 0, 0], rgba=MOUNT_STEEL,
+            contype=0, conaffinity=0, mass=0.0)
+
+
+def _quat_to_mat(quat):
+    import mujoco
+
+    mat = np.zeros(9)
+    mujoco.mju_quat2Mat(mat, np.asarray(quat, float))
+    return mat.reshape(3, 3)
+
+
 def add_wrist_camera(spec, name=CAM_NAME, mount=CAM_MOUNT, aim=CAM_AIM,
-                     fovy=45.0):
+                     fovy=45.0, housing=True):
     """Bolt the sensor camera to wrist3_link. Call before `spec.compile()`.
 
     `fovy` matches the three cinematic cameras so the intrinsics story is one
     story. A real sensor would be chosen for its FoV and this is where that
     choice would live.
+
+    `housing` draws the sensor as well as declaring it. It is on by default
+    because an invisible camera is one nobody can check, and it is a flag at all
+    because it is drawing — see `add_camera_housing` for why it changes no
+    physics either way.
     """
-    spec.body("wrist3_link").add_camera(
-        name=name, pos=list(mount), fovy=fovy,
-        xyaxes=_xyaxes_towards(mount, aim))
+    wrist = spec.body("wrist3_link")
+    xyaxes = _xyaxes_towards(mount, aim)
+    wrist.add_camera(name=name, pos=list(mount), fovy=fovy, xyaxes=xyaxes)
+    if housing:
+        # D405-class: short range, and small enough to sit inside the gripper's
+        # own width. See HOUSINGS.
+        add_camera_housing(wrist, f"cam_{name}", mount, xyaxes, kind="d405",
+                           stalk=[0.0, -0.030, FLANGE_Z + 0.02])
     return spec
 
 

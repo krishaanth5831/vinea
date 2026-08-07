@@ -265,7 +265,7 @@ While the window is open:
 | | |
 |---|---|
 | **double-click the board** | place a tomato there |
-| **A** | auto-fill the rest (10 max) — **a different arrangement every press** |
+| **A** | auto-fill the rest (15 max) — **a different arrangement every press** |
 | **C** | clear them all and start over |
 | **SPACE** | start harvesting what you placed |
 | **Q** or close the window | quit |
@@ -288,9 +288,53 @@ Both failing bands have a physical cause in the scene:
 
 The five fixed trusses this repo has always scored 5/5 on sit at z 0.54–0.72 — inside the good band, which is why they always worked.
 
-⚠️ **Ten fruit, not fifteen.** The band the arm can work is 1.10 × 0.30 m, which holds 10 at the 200 mm minimum spacing. Asking for more returns fewer and says so.
+⚠️ **There is no minimum spacing any more.** It used to refuse anything within 200 mm of another fruit, and the cap of ten fruit was arithmetic on that lattice rather than anything about the arm. Put them as close as you like now, down to touching (70 mm centre to centre — closer than that and the two spheres interpenetrate, which MuJoCo resolves by firing them apart). Fifteen fit.
 
-Placements closer than 200 mm to another fruit are refused with the reason printed — below that the stems load each other past the detach threshold and a truss snaps itself before the arm moves.
+A tight placement is **accepted and annotated** rather than refused, because how tight it is decides how much the pick order matters:
+
+| nearest neighbour | what you are told |
+|---|---|
+| under 120 mm | *"square-on this pair cannot both be planned; the order is what solves it"* |
+| 120 – 170 mm | *"tight, expect a fallback route"* |
+| over 170 mm | nothing — a neighbour that far away costs the planner nothing |
+
+Those thresholds are swept, not chosen: `deck_cam.py --pairs`.
+
+### 📷 The two cameras
+
+Both are now **visible in the 3D scene** — a D435-shaped housing on a mast behind the arm and a smaller D405-shaped one on the wrist, built from primitives at the real products' dimensions. Both are `contype=0` with zero mass, so neither changes a single clearance or inertia number (`deck_cam.py` asserts it).
+
+The deck camera surveys the whole row in **one frame with the arm parked** and does two jobs the script used to do: it tells the wrist camera where to look, and it decides the pick order.
+
+```bash
+# 📝 the gate: does one frame from the chassis find the row?
+./.venv/bin/python simulation/mujoco/deck_cam.py
+./.venv/bin/python simulation/mujoco/deck_cam.py -n 15
+
+# 📝 the sweeps every constant in the cost model is read off
+./.venv/bin/python simulation/mujoco/deck_cam.py --pairs      # what a neighbour costs
+./.venv/bin/python simulation/mujoco/deck_cam.py --corridor   # the pull-down wedge
+./.venv/bin/python simulation/mujoco/deck_cam.py --mounts     # why the mast is where it is
+./.venv/bin/python simulation/mujoco/deck_cam.py --sweep      # the arm's swept volume
+
+# 📝 one deck frame vs sweeping the row with the wrist — what the mast buys
+./.venv/bin/python simulation/mujoco/deck_cam.py --vs-sweep
+
+# 🖼 stills: both cameras, and what each one sees
+./.venv/bin/python simulation/mujoco/deck_cam.py --shot
+```
+
+### 📝 `week4_order.py` — does the order actually help?
+
+Flies the same clustered layouts twice, once in the deck camera's order and once in placement order, and reports what came out of the crate. **Both arms get the deck camera's positions** — only the order differs.
+
+```bash
+./.venv/bin/python simulation/mujoco/week4_order.py
+./.venv/bin/python simulation/mujoco/week4_order.py --layouts 6 --fruit 10
+./.venv/bin/python simulation/mujoco/week4_order.py --spread   # the control: order should NOT matter
+```
+
+⚠️ The layouts it builds have pairs in the 90–150 mm band, which is where the sweep says a neighbour decides whether a pick is refused. Those rows were **impossible to construct at all** until the 200 mm rule came out.
 
 ```bash
 # 🪟 skip the clicking — auto-place 6 and watch it work them
@@ -311,6 +355,9 @@ Placements closer than 200 mm to another fruit are refused with the reason print
 
 # 📝 log every attempt for later analysis
 ./.venv/bin/python simulation/mujoco/week4_place.py --grid 8 --log runs/mine.jsonl
+
+# 📝 the old behaviour: no chassis camera, fruit picked in placement order
+./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --no-deck
 
 # 🎬
 ./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --seed 3 --out week4_place.mp4
@@ -355,9 +402,38 @@ Week 3's OpenCV window with Week 4's free placement in front of it. **This is th
 | **click the green board** (top-left panel) | place a tomato exactly where the cursor is |
 | **A** | auto-fill · **C** clear · **SPACE** harvest · **Q** quit |
 
+**The bottom-right panel is a live readout of what the arm is doing**, not a static summary:
+
+```
+PHASE   PICK
+  fruit 0/2 attempted
+  target  p00
+  then    p01
+  (order as placed - not optimised)
+
+  nearest crop   243 mm (p01)      <- live, every frame
+  tool [+0.32 -0.54 +0.52]         <- live
+  fruit peak 0.52 m/s while held   <- live
+
+PLAN lane 'direct' clears 71 mm
+  checked in 0.82 s
+  leg 10/17
+   grasp
+ > extract
+     backing out with the fruit held
+   turn
+   carry
+```
+
+It moves through **SELECT → SCAN → PLAN → PICK → DONE**, and the phase is also burned across the top of every panel. During PLAN it shows the lane the planner chose and the clearance it verified; during PICK it names the current leg, explains in words what that leg is for, and reports the closest fruit the arm is *not* picking — the number the guard is watching.
+
+⚠️ **The pick order is as-placed and is labelled as such.** There is no "which tomato is most optimal" selection yet; the panel says so rather than implying one exists.
+
 **Clicking is ray-cast, not guessed.** The pixel is turned into a ray through that camera's pinhole — the same `camera.pixel_ray` the Week 3 deprojection gate is built on — and intersected with the board plane. Verified exact to **0.000 mm** at four points from two different camera angles, so the tomato lands under the cursor regardless of which camera you are looking through.
 
-Refusals appear on the stats panel with the reason — off the board, or under the 200 mm spacing.
+Refusals appear on the stats panel with the reason — off the board, or two tomatoes in the same space. A *tight but legal* placement is accepted and annotated in blue instead, because that is a pick-order problem rather than a placement error.
+
+⚠️ The top-left panel is now the **real** deck camera, not the `row` cinematic framing wearing that label. It is the sensor on the mast you can see in the scene panel, so the survey shown is the survey that was used. `--deck-camera row` puts the old framing back.
 
 ### 🪟 `carrytrace.py` — watch a tomato get thrown
 
@@ -407,6 +483,9 @@ z 0.28      X      g      g      u      u      X      g
 # 📝 the throughput campaign: ~58 picks across four crop densities, ~30 min
 ./.venv/bin/python simulation/mujoco/week4_run.py --out runs/campaign.jsonl
 
+# 📝 the same campaign with the chassis camera surveying and choosing the order
+./.venv/bin/python simulation/mujoco/week4_run.py --deck --out runs/campaign_deck.jsonl
+
 # 📝 how much kg/hr moves when SNAP_N moves — it barely does
 ./.venv/bin/python simulation/mujoco/week4_snap.py --n 8
 
@@ -418,6 +497,8 @@ z 0.28      X      g      g      u      u      X      g
 ```
 
 ⚠️ **`week4_run.py` appends.** Point `--out` at a fresh file or you mix two campaigns in one log. This has already happened once.
+
+⚠️ **`--deck` is a different campaign, not more samples of the same one.** It changes the pick order, which is a methodology change — the 57-attempt figure in the README was taken without it, on rows generated under the old 200 mm spacing minimum. Log it separately and compare the two, rather than pooling them.
 
 ---
 
@@ -452,6 +533,10 @@ Useful when deciding whether to sit and watch:
 | the full campaign | ~30 min |
 | `week4_snap.py --n 8` | ~20 min |
 | `week4_envelope.py` (49 cells) | ~26 min |
+| `deck_cam.py` (the gate) | ~1 min — one render, no picks |
+| `deck_cam.py --pairs` / `--corridor` | ~15 / ~25 min — planning only, no flying |
+| `deck_cam.py --vs-sweep` | ~4 min |
+| `week4_order.py` (3 layouts, both orders) | ~50 min — it flies every layout twice |
 
 Watching runs at wall-clock speed. Headless runs faster than real time, but only when nothing else is competing for the machine.
 

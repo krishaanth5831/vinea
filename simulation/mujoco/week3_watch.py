@@ -354,7 +354,8 @@ class Views:
         cv2.putText(scene, f"scene '{self.scene_name}'",
                     (10, self.h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (210, 210, 210), 1, cv2.LINE_AA)
-        stats = _panel(self.w, self.h, self.stats_lines(), "week 3 pipeline")
+        stats = _panel(self.w, self.h, self.stats_lines(),
+                       getattr(self, "panel_title", "week 3 pipeline"))
         return np.vstack([np.hstack([deck, wrist]),
                           np.hstack([scene, stats])])
 

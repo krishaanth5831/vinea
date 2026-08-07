@@ -55,6 +55,15 @@ def main():
                     help="perception in the loop (slower, and the honest number)")
     ap.add_argument("--detector", default="hsv", choices=["hsv", "yolo"])
     ap.add_argument("--speed", type=float, default=None)
+    # ⚠️ **Off by default, and that is not an oversight.** The campaign's whole
+    # value is that its 57 attempts are comparable with each other and with the
+    # figure in the README; turning the deck camera on changes the pick order,
+    # which is a methodology change, not a flag. Run it on to measure what the
+    # ordering does to throughput across densities — but report it as its own
+    # campaign rather than as more samples of the old one.
+    ap.add_argument("--deck", action="store_true",
+                    help="survey with the chassis camera and pick in its order "
+                         "(a different campaign, not more of the same one)")
     args = ap.parse_args()
 
     import mujoco
@@ -65,6 +74,7 @@ def main():
     from outcomes import report
     from picklog import PickLog, throughput
     from plant_row import Row
+    from week3_perceive import build_detector
     from week4_place import (Crop, MAX_FRUIT, auto_layout, harvest_placed,
                              park_spot, pool_trusses)
 
@@ -73,7 +83,9 @@ def main():
     print(f"\n{'=' * 78}")
     print(f"  CAMPAIGN — {total} attempts across densities "
           f"{', '.join(f'{n}x{k}' for n, k in plan)}")
-    print(f"  {'perception' if args.seen else 'told'} · log -> {args.out}")
+    print(f"  {'perception' if args.seen else 'told'} · "
+          f"{'deck-planned order' if args.deck else 'placement order'} · "
+          f"log -> {args.out}")
     print(f"  expect roughly {total * 30 / 60:.0f} min of simulated cycle time")
 
     log = PickLog(args.out, meta={
@@ -91,7 +103,8 @@ def main():
             # it guarantees no state leaks between layouts — the failure mode
             # bug 39 was, where a reset quietly restored fruit between trials.
             pool = pool_trusses()
-            model = build_scene(wrist_cam=args.seen, trusses=pool)
+            model = build_scene(wrist_cam=args.seen, deck_cam=args.deck,
+                                trusses=pool)
             data = mujoco.MjData(model)
             names = [nm for nm, _, _ in pool]
             row = Row(model, data, names=names,
@@ -104,17 +117,27 @@ def main():
             crop = Crop(model, data, row, names)
             crop.apply(auto_layout(min(n_fruit, MAX_FRUIT), seed=seed))
 
-            sensor = detector = None
+            sensor = detector = deck = None
             if args.seen:
-                from week3_perceive import build_detector
-
                 sensor = SensorCamera(model, camera="wrist")
                 detector = build_detector(args.detector)
+            if args.deck:
+                from deck_cam import DeckSurvey
+
+                deck = DeckSurvey(model, detector=build_detector(args.detector))
 
             log.meta["layout"] = f"auto{n_fruit}s{seed}"
-            rows = harvest_placed(model, data, row, crop, park_q,
-                                  speed=args.speed, sensor=sensor,
-                                  detector=detector, log=log, seed=seed)
+            try:
+                rows = harvest_placed(model, data, row, crop, park_q,
+                                      speed=args.speed, sensor=sensor,
+                                      detector=detector, log=log, seed=seed,
+                                      deck=deck)
+            finally:
+                # Each layout builds a fresh model, so each also builds fresh
+                # GL contexts. Not closing them exhausts EGL a few layouts in.
+                for s_ in (deck, sensor):
+                    if s_ is not None:
+                        s_.close()
             all_rows.extend(rows)
             print(f"  running total: {len(all_rows)} attempts, "
                   f"{time.perf_counter() - t_start:.0f}s wall")
@@ -126,12 +149,18 @@ def main():
     # Density is the axis this campaign exists to add.
     #
     # ⚠️ Grouped by the density that was actually *placed*, not the one asked
-    # for. The validator refuses a placement that would sit under the 200 mm
-    # spacing, so a request for 15 can land 14 — and grouping by the request
-    # silently drops that whole layout out of the table. It did exactly that on
-    # the first campaign: 14 rows vanished from the summary while still counting
-    # in the headline, which is the kind of quiet inconsistency that makes a
-    # number impossible to defend.
+    # for, and grouping by the request silently drops a whole layout out of the
+    # table when the two differ. It did exactly that on the first campaign: 14
+    # rows vanished from the summary while still counting in the headline, which
+    # is the kind of quiet inconsistency that makes a number impossible to
+    # defend.
+    #
+    # The reason they used to differ was the 200 mm spacing minimum, which could
+    # turn a request for 15 into 14. That rule is gone (see
+    # `week4_place.TOUCHING`), so `auto_layout` now returns what it was asked
+    # for — but the two can still part company, because `--deck` books fruit the
+    # chassis camera never separated as `not_detected` against a crop that did
+    # contain them. Keep reading the placed number.
     print(f"\n  {'-' * 66}\n  by crop density (as placed):")
     print(f"  {'fruit':>6} {'n':>4} {'clean':>7} {'cycle s':>9} {'kg/hr':>7}")
     for n_fruit in sorted({r.get("n_fruit") for r in all_rows if r.get("n_fruit")}):
