@@ -302,14 +302,25 @@ Those thresholds are swept, not chosen: `deck_cam.py --pairs`.
 
 ### 📷 The two cameras
 
-Both are now **visible in the 3D scene** — a D435-shaped housing on a mast behind the arm and a smaller D405-shaped one on the wrist, built from primitives at the real products' dimensions. Both are `contype=0` with zero mass, so neither changes a single clearance or inertia number (`deck_cam.py` asserts it).
+Both are now **visible in the 3D scene** — a D435-shaped housing on a pan-tilt head on a mast behind the arm, and a smaller D405-shaped one on the wrist, built from primitives at the real products' dimensions. Both are `contype=0` with zero mass, so neither changes a single clearance or inertia number (`deck_cam.py` asserts it).
 
-The deck camera surveys the whole row in **one frame with the arm parked** and does two jobs the script used to do: it tells the wrist camera where to look, and it decides the pick order.
+The deck camera surveys the whole row **with the arm parked** and does two jobs the script used to do: it tells the wrist camera where to look, and it decides the pick order.
+
+**The head is articulated**, and the reason is not the obvious one. Rotating a camera about its own optical centre cannot see round anything — every occlusion stays exactly where it was. The lens sits on a **100 mm yoke offset from the pan axis**, so panning *translates* it up to 90 mm, and that is what separates fruit a fixed frame merges: 31/48 → 40/48 on rows packed to 72–100 mm centres, for 2.9 s of head slew and **no arm motion at all**.
+
+⚠️ The head is a **mocap body, not two hinge joints**. Hinges would add two DOFs to `mjModel`, and `mink.Configuration` in `reach.Reacher` is built over the whole model — so the IK solver would see two free joints it could park anywhere, and "where the arm is reaching" would start quietly coupling to "where the camera is pointing". A mocap body has no DOFs: it is commanded, not simulated, which is what a pan-tilt unit with position servos actually is.
 
 ```bash
-# 📝 the gate: does one frame from the chassis find the row?
+# 📝 the gate: does the mast find the row, and what does the head add?
 ./.venv/bin/python simulation/mujoco/deck_cam.py
 ./.venv/bin/python simulation/mujoco/deck_cam.py -n 15
+
+# 📝 what looking around is worth — sets SCAN_POSES
+./.venv/bin/python simulation/mujoco/deck_cam.py --scan
+./.venv/bin/python simulation/mujoco/deck_cam.py --eclipse    # can it see round a staged arm?
+
+# 📝 the exact pick-order solver against the hill-climb it replaced
+./.venv/bin/python simulation/mujoco/deck_cam.py --optimal
 
 # 📝 the sweeps every constant in the cost model is read off
 ./.venv/bin/python simulation/mujoco/deck_cam.py --pairs      # what a neighbour costs
@@ -317,24 +328,53 @@ The deck camera surveys the whole row in **one frame with the arm parked** and d
 ./.venv/bin/python simulation/mujoco/deck_cam.py --mounts     # why the mast is where it is
 ./.venv/bin/python simulation/mujoco/deck_cam.py --sweep      # the arm's swept volume
 
-# 📝 one deck frame vs sweeping the row with the wrist — what the mast buys
-./.venv/bin/python simulation/mujoco/deck_cam.py --vs-sweep
+# 📝 the deck survey vs sweeping the row with the wrist — what the mast buys
+./.venv/bin/python simulation/mujoco/deck_cam.py --vs-sweep --speed 0.15
 
 # 🖼 stills: both cameras, and what each one sees
 ./.venv/bin/python simulation/mujoco/deck_cam.py --shot
 ```
+
+⚠️ `--eclipse` answers a question honestly in the negative. The scan recovers a fruit the arm eclipses when staged mid-row (11/12 → 12/12) but **not** when staged high (11/12 either way), so `deck_cam.parked()` stays a hard precondition rather than becoming a preference.
+
+### 🔧 `week4_grip.py` — why the tomato fell out, and the number that stopped it
+
+The gripper used to pluck the tomato and then drop it. The cause was **pad compliance**: a soft contact does not hold a tangential load indefinitely, so the fruit crept out of a closed gripper under its own weight, ~30 mm during the carry, and fell off the edge of the pad. `greenhouse.PAD_SOLREF` went `0.02` → `0.006`, which takes 5/8 crated to 8/8.
+
+⚠️ The old value was chosen to protect the peduncle at the close, back when the grip was a step input. `--close` shows it never did that job either (`0.02` still snapped the stem at 15.86 N) and that `reach.Gripper.ramp` does it at every stiffness. The softening had been buying nothing and costing three picks in eight.
+
+```bash
+# 📝 the gate: does the shipped value hold the fruit AND spare the stem?
+./.venv/bin/python simulation/mujoco/week4_grip.py
+
+# 📝 both sides of the trade, one full pick per cell
+./.venv/bin/python simulation/mujoco/week4_grip.py --solref
+./.venv/bin/python simulation/mujoco/week4_grip.py --close    # ramped vs step input
+
+# 📝 the substep trace that found it — watch `gap mm` during `extract`
+./.venv/bin/python simulation/mujoco/week4_grip.py --trace
+./.venv/bin/python simulation/mujoco/week4_grip.py --trace --seed 71   # the residual
+
+# 🪟 watch one pick at wall-clock speed
+./.venv/bin/python simulation/mujoco/week4_grip.py --windowed
+```
+
+⚠️ The gate prints **two verdicts on purpose**. The grasp (which `PAD_SOLREF` decides) passes 8/8. The carry does not: 1 of 8 still throws the fruit over 1 m/s, starting in the `turn` leg, and that one is older and separate — the same layout at the old value never reached the crate at all.
 
 ### 📝 `week4_order.py` — does the order actually help?
 
 Flies the same clustered layouts twice, once in the deck camera's order and once in placement order, and reports what came out of the crate. **Both arms get the deck camera's positions** — only the order differs.
 
 ```bash
-./.venv/bin/python simulation/mujoco/week4_order.py
-./.venv/bin/python simulation/mujoco/week4_order.py --layouts 6 --fruit 10
-./.venv/bin/python simulation/mujoco/week4_order.py --spread   # the control: order should NOT matter
+./.venv/bin/python simulation/mujoco/week4_order.py                     # contested band
+./.venv/bin/python simulation/mujoco/week4_order.py --band blocked      # ties by construction
+./.venv/bin/python simulation/mujoco/week4_order.py --band loose        # ties by construction
+./.venv/bin/python simulation/mujoco/week4_order.py --spread            # the other control
 ```
 
-⚠️ The layouts it builds have pairs in the 90–150 mm band, which is where the sweep says a neighbour decides whether a pick is refused. Those rows were **impossible to construct at all** until the 200 mm rule came out.
+⚠️ **`--band` matters more than any other flag here, and getting it wrong produces a confident null.** Ordering can only earn anything between the distance where a neighbour starts refusing picks and the distance where it stops mattering at all. Outside that window every order ties, for opposite reasons. Rows in any of these bands were **impossible to construct** until the 200 mm rule came out.
+
+⚠️ **It currently returns a tie, and that is the honest state of the feature** — 19 crated vs 18, **12 refused vs 12**, on 32 attempts per arm. The corrected cost model forecast that tie exactly (`0.00` fruit of predicted gain on all four layouts); the model it replaced forecast 3.33 fruit that never arrived. `deck_cam._pair_risk` is symmetric, so it scores both fruit of a close pair as blocked while the sweep it was fitted to says one of them plans fine; the model therefore cannot express the asymmetry the ordering exists to exploit. See the note by `deck_cam.BLOCKED_M`.
 
 ```bash
 # 🪟 skip the clicking — auto-place 6 and watch it work them
@@ -533,10 +573,17 @@ Useful when deciding whether to sit and watch:
 | the full campaign | ~30 min |
 | `week4_snap.py --n 8` | ~20 min |
 | `week4_envelope.py` (49 cells) | ~26 min |
-| `deck_cam.py` (the gate) | ~1 min — one render, no picks |
+| `deck_cam.py` (the gate) | ~2 min — renders only, no picks |
+| `deck_cam.py --scan` | ~12 min — 6 patterns × 6 layouts × up to 9 renders |
+| `deck_cam.py --optimal` | ~2 min — no physics at all, just the solver |
 | `deck_cam.py --pairs` / `--corridor` | ~15 / ~25 min — planning only, no flying |
-| `deck_cam.py --vs-sweep` | ~4 min |
-| `week4_order.py` (3 layouts, both orders) | ~50 min — it flies every layout twice |
+| `deck_cam.py --vs-sweep --speed 0.15` | ~4 min |
+| `week4_grip.py` (the gate) | ~15 min — 8 full picks |
+| `week4_grip.py --solref` | ~90 min — 6 settings × 8 picks |
+| `week4_grip.py --close` | ~6 min — no pull, no carry |
+| `week4_order.py` (4 layouts, both orders) | **~2 h** — 64 picks, and every survey is a 5-pose scan |
+
+⚠️ `week4_order.py` got slower when the deck head arrived: each survey is now five renders instead of one, and a re-survey fires on every crop change. Budget accordingly, or drop `--layouts`.
 
 Watching runs at wall-clock speed. Headless runs faster than real time, but only when nothing else is competing for the machine.
 

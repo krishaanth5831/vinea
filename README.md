@@ -53,23 +53,34 @@ Adding fruit mid-run **voids every checked plan** rather than weakening it: the 
 
 ### The deck camera: it decides where to look and what to pick first
 
-There are now **two** cameras, and you can see both in the scene — an RGBD sensor on a mast behind the arm and a second on the wrist. They do different jobs, and neither can do the other's:
+There are now **two** cameras, and you can see both in the scene — an RGBD sensor on a pan-tilt head on a mast behind the arm, and a second on the wrist. They do different jobs, and neither can do the other's:
 
 | | deck (chassis mast) | wrist (eye in hand) |
 |---|---|---|
 | range | 1.26 – 1.48 m | 0.28 m |
-| sees | the whole row, one frame, arm stationary | one fruit |
+| sees | the whole row, arm stationary | one fruit |
 | accuracy | ~2 mm on an isolated fruit | sub-millimetre (Week 3's gate) |
 | blind to | the difference between two touching fruit | everything it has not been driven to |
+
+**The deck camera is articulated, and the head had to earn its place.** The obvious argument — "it can look around" — is worth nothing here, twice over: one fixed frame already covers the whole placement band, and a camera rotating about its own optical centre cannot see round anything, because pure rotation about the pinhole leaves every occlusion in the scene exactly where it was. What pays is that the lens sits on a **100 mm yoke offset from the pan axis**, so panning *translates* it by up to 90 mm — and translation is the only thing that changes which fruit is hidden behind which. Measured over 48 fruit packed to 72–100 mm centres, the band the old 200 mm spacing rule forbade:
+
+| | fruit found | head slew | arm motion |
+|---|---|---|---|
+| bolted down, one frame | 31/48 (65%) | — | none |
+| five head poses | **40/48 (83%)** | 2.9 s | none |
+
+Nine poses buy one more fruit for 3.6 s more slew; going wider is worse on every column. Five is where it stops paying. The mast also moved *back* 100 mm to make room for the yoke, so the lens stays exactly where the optics were measured and the head is **further** from the arm when panned than when parked — articulating it spends none of the swept-volume clearance that sited it.
 
 This closes the last cheat in the Week 4 loop. The arm used to know where to point the wrist camera because **the script told it** — the staging pose came out of the operator's ground truth. So what the mast replaces is not slow code, it is a cheat, and the fair comparison is against the honest alternative: with one eye-in-hand sensor you have to *sweep* the row. Both measured on the same 8-fruit row, counting simulated arm-seconds:
 
 | | fruit found | arm travel | arm time |
 |---|---|---|---|
-| one deck frame | 8/8 | 0.000 m | **0.00 s** |
+| the deck survey | 8/8 | 0.000 m | **0.00 s** |
 | a wrist sweep (10 poses) | 8/8 | 2.557 m | **24.14 s** |
 
-Both find everything, so this is not an accuracy argument. 24 seconds is most of a whole pick — the campaign's mean cycle is 31.3 s — spent before the first tomato is touched, and paid again on every row. The sweep's cost scales with the length of the row; the deck frame's does not scale at all.
+Both find everything, so this is not an accuracy argument. 24 seconds is most of a whole pick — the campaign's mean cycle is 31.3 s — spent before the first tomato is touched, and paid again on every row. The sweep's cost scales with the length of the row; the deck survey's does not scale at all.
+
+⚠️ Both rows are at **`--speed 0.15`**, the speed the campaign and the 31.3 s cycle were measured at. That matters and it is a flag you have to pass: the sub-command's own default is 0.5, where the same ten poses cost 11.56 s. Quoting the sweep at one speed and the cycle at another would flatter the mast by more than 2×. The deck survey costs 0.00 s of arm time at every speed, because the arm does not move — the head slews for 2.9 s instead.
 
 It also decides the **order**, which is not cosmetic. Swept in `deck_cam.py --pairs`, two fruit at a given centre-to-centre distance:
 
@@ -79,34 +90,71 @@ It also decides the **order**, which is not cosmetic. Swept in `deck_cam.py --pa
 | 120 – 140 mm | pickable, but only via a fallback route — a wrist roll, a leaned-back pull, or a deeper staging plane |
 | ≥ 170 mm | the direct route works; the neighbour costs nothing |
 
-Read the first row again: on a close pair, **which one you pick first is the difference between harvesting one fruit and harvesting two** — pick the plannable one and the other becomes a lone fruit with a clear route. So the survey is fed to a cost model (crowding, plus the wedge-shaped corridor the 140 mm pull sweeps *below* each fruit) and a greedy-plus-improvement search over the whole sequence. The obstacle set shrinks as the row empties, which is exactly why the order cannot be a sort.
+Read the first row again: on a close pair, **which one you pick first is the difference between harvesting one fruit and harvesting two** — pick the plannable one and the other becomes a lone fruit with a clear route. So the survey is fed to a cost model (crowding, plus the wedge-shaped corridor the 140 mm pull sweeps *below* each fruit). The obstacle set shrinks as the row empties, which is exactly why the order cannot be a sort.
 
-**Does it actually help?** `week4_order.py` flies the same clustered layouts twice — both arms working from the deck camera's positions, only the order differing. Three layouts × 6 fruit, 18 attempts per arm, at the 0.15 speed every other number here was taken at:
+**What the order minimises is tomatoes lost, and it is proved rather than approximated.** The objective used to be "minimise total risk", which is the wrong quantity: summing a risk score treats one pick at risk 2.0 as equal to two picks at risk 1.0, but a pick whose worst neighbour is inside the refusal distance *is refused* — so the second case loses two fruit and the first loses one. An optimiser on that sum will trade a whole tomato to shave a fraction off a score. The rewrite splits what a neighbour does into a **saturating max** (does this pick get refused — the loss) and a **sum** (route length — a tie-break), and counts the first in fruit.
 
-| order | clean | crated | **refused** | neighbours disturbed |
+Given that objective the problem is *almost* small enough to solve exactly, and the "almost" is one line of physics. Under the relaxation "every attempt removes its fruit", the cost of a pick depends only on the **set** still standing, which makes the state space 2ⁿ rather than n! — Held-Karp over (set already picked, fruit picked last) settles a 15-fruit row in 451 ms against a 31 s cycle. But a **refused** pick leaves its fruit standing, so which fruit are up after k attempts is not a function of which k were attempted, and the set stops being a sufficient state. The shipped planner therefore solves the relaxation exactly and then hill-climbs that answer against the true cost. Against brute force over all permutations at n = 5–8, the pair reaches the true optimum on 21–27 of 30 layouts and averages 0.0006 of cost above it when it misses, against 0.077 for the exact-but-relaxed answer alone.
+
+| n=15, 30 layouts | cost | expected fruit lost | tour | solve |
 |---|---|---|---|---|
-| deck-planned | 11/18 (61%) | 11 | **2** | 0 |
-| placement order | 10/18 (56%) | 10 | **6** | 0 |
+| placement order | 18.758 | 14.588 | 3.73 m | — |
+| greedy | 18.758 | 14.588 | 3.59 m | 7 ms |
+| greedy + hill-climb | 18.703 | 14.588 | 1.59 m | 1067 ms |
+| exact on relaxation | 18.730 | 14.588 | 2.25 m | 630 ms |
+| **exact + refined** (ships) | **18.702** | **14.588** | **1.58 m** | 1473 ms |
 
-**Refusals are the real signal — 2 against 6.** The clean rate moves by one fruit, which on n=18 is noise; the refusal count is the mechanism the pair sweep predicts, doing what it predicts. Per layout, the picture is more honest than the aggregate:
+⚠️ **Read the `expected fruit lost` column. It is identical for every method.** That is not a formatting error — it is the finding, and it is explained two sections down: the cost model is symmetric, so it believes no order can save a fruit, and the optimiser correctly reports that there is nothing to win. What ordering *does* buy under this model is tour length, 3.73 m → 1.58 m, and `mission.park_arm` teleports between picks so that cannot show up in a measured cycle time either.
 
-| closest pair | deck order | placement order |
+**Does it actually help? ⚠️ This README previously answered "yes, 2 refusals against 6". That result has been withdrawn.** Two separate faults, both in the test rather than the robot, and both found by re-running it:
+
+1. **The control arm was handed ground truth.** `week4_order.py` passed `deck=None` for the placement-order arm, which does not only drop the ordering — it also switches that arm's staging poses over to `crop.placed`, the operator's exact positions. So the baseline was running with *better* position knowledge than the arm being tested. The control is now `deck_order=False`, which keeps the survey and throws away only the sequence.
+2. **The "clustered" rows were not in the band they claimed.** `cluster_layout` aimed pairs at 90–150 mm but never enforced a floor on the *incidental* pairs eight fruit make in a small envelope, so rows labelled clustered had closest pairs of **76–97 mm**. That is the blocked band — where by construction no order can help, because a fruit inside 120 mm of a neighbour is refused whichever one you take first. Re-running with the ground-truth fault corrected gave exactly what that band predicts: **19 refusals against 19, no difference at all.**
+
+Both are now fixed — the floor is checked pair by pair, and `--band` names the three regimes explicitly:
+
+| band | centres | what ordering can do |
 |---|---|---|
-| 107 mm | 5/6 clean, 0 refused | 4/6 clean, 1 refused |
-| 112 mm | 5/6 clean, 0 refused | 5/6 clean, 0 refused — **a tie** |
-| 75 mm | 1/6 clean, 2 refused | 1/6 clean, 5 refused |
+| `blocked` | 75 – 95 mm | nothing. Everything is inside the refusal distance of something. |
+| `contested` | 100 – 150 mm | this is the band the pair sweep says order decides |
+| `loose` | 175 – 260 mm | nothing. No neighbour costs anything past 170 mm. |
 
-The 112 mm row is a genuine tie: that spacing is inside the fallback band but outside the refusal band, so both orders find routes and there is nothing to win. The 75 mm row is dominated by the fruit being barely pickable at all — the deck camera cannot even separate three of the six. Ordering earns its keep in the band between, which is where the pair sweep says it should. **n = 18 per arm is thin: read the direction, not the decimal.**
+With both faults fixed, the `contested`-band run — 32 attempts per arm, both arms on the deck survey, only the sequence differing:
+
+| order | clean | crated | **refused** | disturbed | predicted refusals |
+|---|---|---|---|---|---|
+| deck-planned | 19/32 (59%) | 19 | **12** | 0 | 6.95 / 6.37 / 8.00 / 6.05 |
+| placement order | 18/32 (56%) | 18 | **12** | 0 | 6.95 / 6.37 / 8.00 / 6.05 |
+
+**That is a tie, and — this is the part that matters — the corrected cost model predicted the tie exactly.** Its forecast gain was `0.00` fruit on every one of the four layouts, and the measured refusal difference was 0. The *old* model, on the same layouts, forecast a 3.33-fruit gain that never appeared. So the rewrite did not make the robot harvest more; it made the planner stop claiming it would. That is a smaller result and a real one.
+
+The reason it forecasts zero is a flaw in the optimiser that only showed up by flying it:
+
+**`_pair_risk` is symmetric, and the effect the whole thing exists to exploit is not.** The pair sweep's finding is that at 100 mm *one* fruit of a pair is refused and *the other plans fine* — that asymmetry is the entire ordering argument. But the cost model is a function of the separation vector, so at 100 mm side by side it returns 1.000 in both directions: it says both fruit are blocked, and cannot say which to take first because it does not believe there is a difference. Run `deck_cam.py --optimal` and the consequence is stark — **every method, from placement order to the exact solver, produces an identical expected loss** (14.588 fruit at n=15). Only tour length moves, from 3.73 m to 1.58 m.
+
+So the machinery is right and it is pointed at a cost function with no ordering signal in it. **The fix is a measurement, not a weight:** `--pairs` records *that* one of a close pair was refused but not *which*, and the crowd term needs a directional part fitted to that. Until then the honest claim is narrow — the deck camera's ordering is optimal under a model which says order does not matter, and it demonstrably does not harm anything.
+
+⚠️ **One loose end, reported because it is consistent and not because it is understood.** The deck-ordered arm ran a **16.3 s mean cycle against 21.0 s**, and the direction held on three of the four layouts. That should not happen: `mission.park_arm` teleports between picks, so tour length cannot reach the clock. The plausible mechanism is route complexity — a fruit picked after its neighbours are gone gets a direct route, one picked while crowded gets a fallback with a deeper staging plane — but the per-layout magnitudes are too large for the number of picks involved, so something else is in there. It has not been traced and is not claimed as a result.
+
+One thing did come out of the corrected model, and it came from watching a real failure. Layout 1 opened with `p06`, which was refused (`gr_right_pad within 25 mm of p00`), and then `p00` was refused too — `within 32 mm of p06`, by the fruit the model had already crossed off. **A refused pick does not remove the fruit.** The old cost function removed every attempted fruit whether the attempt worked or not; it now removes them only on success, which is what makes the exact solver only exact on a relaxation and is why the shipped planner refines its answer afterwards.
+
+```bash
+./.venv/bin/python simulation/mujoco/week4_order.py --band contested   # the real test
+./.venv/bin/python simulation/mujoco/week4_order.py --band blocked     # ties, by construction
+./.venv/bin/python simulation/mujoco/week4_order.py --band loose       # ties, by construction
+```
 
 ```bash
 ./.venv/bin/python simulation/mujoco/deck_cam.py             # the survey gate
+./.venv/bin/python simulation/mujoco/deck_cam.py --scan      # what the head buys
+./.venv/bin/python simulation/mujoco/deck_cam.py --optimal   # exact vs the hill-climb
 ./.venv/bin/python simulation/mujoco/deck_cam.py --pairs     # what a neighbour costs
 ./.venv/bin/python simulation/mujoco/deck_cam.py --shot      # stills of both cameras
 ./.venv/bin/python simulation/mujoco/week4_order.py          # does the order actually help?
 ./.venv/bin/python simulation/mujoco/week4_place.py --grid 10 --no-deck   # the old behaviour
 ```
 
-Two things it is honest about. The deck camera **cannot separate touching fruit at 1.3 m** — four in a 70 mm cluster come back as one blob, and a fruit it never saw is one this run will not pick. That is the sensor's limit, not a bug to be tuned out, and it is why the wrist camera still goes in. And the cost model's travel term **cannot show up in the measured cycle time**, because `mission.park_arm` teleports the arm back to park between picks; it is weighted low, reported separately, and it is there because a real machine pays it.
+Three things it is honest about. The deck camera **cannot separate touching fruit at 1.3 m** — four in a 70 mm cluster come back as one blob from *every* head pose, because 90 mm of parallax does not undo a 70 mm separation at 1300 mm. The head widens the band it copes with; it does not remove the floor, and that is why the wrist camera still goes in. The cost model's travel term **cannot show up in the measured cycle time**, because `mission.park_arm` teleports the arm back to park between picks; it is weighted low, reported separately, and it is there because a real machine pays it. And **"optimal" means optimal under the proxy** — a geometric model that runs in milliseconds, not the kinematic replay that decides whether a route actually exists. The only thing that settles whether a better order harvests more tomatoes is flying both, which is what `week4_order.py` does.
 
 ### The Week 4 result — a throughput number, and it is bad
 
@@ -138,7 +186,36 @@ Two things it is not. It is not a forecast — it is an upper bound with the cha
 
 ⚠️ **The clean rate is substantially luck.** The grasp goes unstable on **34 of 57 attempts**, and **17 of those crate anyway** — the fruit is flung and happens to fly toward the crate. Peak speed of a fruit that is supposed to be held: **4.22 m/s**. So "ejected: 3" undercounts the problem by an order of magnitude, and 46% clean is not 46% of grasps under control.
 
-That instability was measured directly (`carrytrace.py`) and **is not a tunable**: it survives hold force 255→80, pad rolling friction 1e-4→0.3, `CARRY_SPEED` 0.25→0.05, and a 4× smaller physics timestep. The 2F85 pinches a smooth 66 mm sphere at ~113 N when holding it needs 1.18 N, and a sphere between converging pads is unstable — 3.9 mm of position error is enough to start it. **The fix is the tool, not a constant**, which is the sharpest argument this project has for the cradle-from-below gripper the MVP specifies.
+Worse, the **`grasp failed: 20` row above was hiding a second failure**. Fourteen of those twenty have `broke: true` and a resting position **3 to 39 metres from the row** — those are not failed grasps, they are fruit leaving the gripper and travelling. The bucket said "the tool failed once the arm arrived" and stopped there, and the distinction was sitting in the log the whole time.
+
+#### ⚠️ Correction: most of this *was* a tunable, and this section said it was not
+
+This section previously claimed the instability "is not a tunable", listing hold force, pad rolling friction, `CARRY_SPEED` and timestep as things it survived. Every one of those tests was real and every one of those conclusions holds. The list was simply missing the parameter that mattered: **pad compliance**.
+
+Traced substep by substep (`week4_grip.py --trace`), the fruit is not flung when the peduncle parts — at that instant it is still centred, 2.3 mm off the tool site, with the pads loaded at ~99 N. It is lost a second and a half later, during the carry: it **creeps out of a closed gripper under its own weight**, because a soft MuJoCo contact does not hold a tangential load indefinitely, it drifts. Once the centre has walked ~30 mm the sphere is off the edge of a 37 mm pad and there is nothing left to hold. Eight layouts, one full pick each:
+
+| pad `solref` | crated | peak grip force | fruit creep |
+|---|---|---|---|
+| `[0.004, 1]` | 8/8 | 10.1 N | 280 mm |
+| **`[0.006, 1]`** — now | **8/8** | **7.0 N** | **34 mm** |
+| `[0.008, 1]` | 6/8 | 6.2 N | 1519 mm |
+| `[0.020, 1]` — was | 5/8 | 6.0 N | 1486 mm |
+
+**The old value's justification had expired.** The pads were softened to `0.02` to keep the *closing* transient off the peduncle, back when the grip was a step input. Closing on a hanging fruit and reading the stem shows softening never actually fixed that — `0.02` still snapped it, at 16.97 N against a `SNAP_N` of 12.0 — and that `reach.Gripper.ramp`, which arrived later, fixes it at **every** stiffness tested (9.54 / 6.47 / 5.16 N). So the softening had been buying nothing and costing three picks in eight. That is the lesson worth keeping: not that a number was wrong, but that it was *right when it was chosen* and nobody re-took the measurement when the thing it compensated for was fixed properly.
+
+What survives the fix: **1 of 8 picks still shows a fruit over 1 m/s**, and it starts in the `turn` leg, where the pad force spikes to 761 N and collapses to 15 N while the wrist rotates. That one is older and genuinely separate — the same layout at the old `0.02` was *worse* (never reached the crate at all), and it does not scale with cycle speed. `mission.TURN_DONE_DEG` carries a note about a 2F85 rolling a sphere out of its pads past ~22°, measured on the soft pads; that measurement is now due to be re-taken.
+
+So the argument for the cradle-from-below gripper the MVP specifies is **weaker than this README claimed, and still standing**. A 2F85 pinching a smooth 66 mm sphere at ~100 N when holding it needs 1.18 N is not a good way to hold a tomato, and the residual proves it. But "not a tunable" was an overclaim, and it was reached by sweeping four parameters and concluding about all of them.
+
+⚠️ **The 57-attempt campaign above predates this fix and has not been re-run.** Re-running it is its own measurement.
+
+```bash
+./.venv/bin/python simulation/mujoco/week4_grip.py            # the gate
+./.venv/bin/python simulation/mujoco/week4_grip.py --solref   # the trade, both sides
+./.venv/bin/python simulation/mujoco/week4_grip.py --close    # ramp vs step input
+./.venv/bin/python simulation/mujoco/week4_grip.py --trace    # where the fruit goes
+./.venv/bin/python simulation/mujoco/week4_grip.py --windowed # watch one pick
+```
 
 **Harvest a row in a greenhouse.** The arm plans each pick before it moves, checks the route clears every fruit it is *not* picking, then flies it.
 
@@ -185,6 +262,8 @@ Two things worth reading off that table.
 **What actually breaks is the gripper, not the arm.** At full speed the approach and grasp are fine — insert arrives 2-5 mm out, the stem releases at 12-16 N — and then the arm accelerates out of the row and throws the tomato clean out of the pads, 185 mm and 376 mm from the tool by the end of a 290 mm move. The legs that carry fruit are therefore capped separately (`mission.CARRY_SPEED`), and sweeping that cap shows a sharp cliff between 0.35 and 0.25 rather than a graceful rolloff: the fruit is either held or launched.
 
 That is a result, not a tuning detail. **Payload retention is what caps kg/hr, not joint speed** — and it is the strongest argument yet for the cradle-from-below gripper the MVP calls for, which supports a truss instead of pinching it.
+
+⚠️ **This speed sweep predates the `PAD_SOLREF` fix and has not been re-run.** It was taken at pad compliance `0.02`, where the fruit crept out of the pads under its own weight on 3 picks in 8 *at any speed at all* — so some of what this table attributes to speed is that. The direction is unlikely to reverse: the fix does not touch what happens when the arm accelerates out of the row. But the numbers are due to be re-taken, and `mission.CARRY_SPEED`'s 0.25 cap was chosen against a gripper that is no longer the one in the model.
 
 ```bash
 ./.venv/bin/python simulation/mujoco/week2_pick.py --speed 1.0    # watch it run flat out
@@ -256,8 +335,8 @@ Worth saying before anyone else says it:
   ./.venv/bin/python simulation/mujoco/week4_snap.py     # the sweep
   ```
 - **The planner is no longer given perfect positions, but the cameras are perfect.** Week 3 closed the loop — an eye-in-hand camera, a detector and a deprojection verified to 0.39 mm against ground truth — and the deck camera closed the last hole in it, which was that the arm still learned *where to look* from the script. What remains ideal is the *sensors*: square pixels, no distortion, principal point exactly centred, no noise, and extrinsics known to machine precision. Real hand-eye calibration is a millimetre-level problem on its own and is not in this repo, and a second camera means two of them plus the transform between.
-- **The deck camera's recall is flattered by the scene.** Red spheres against green foliage, noiseless depth, and every leaf `contype=0` and above the fruit. It finds 21/21 across the whole band in one frame, and that number says more about the renderer than about the sensor. The one place it fails is real and is not tuned away: four fruit in a 70 mm cluster fuse into a single blob and come back as *one* detection with a position 48 mm off, between them.
-- **The pick order is scored by a proxy, not by the planner.** `deck_cam.plan_order` runs a geometric cost model in microseconds; whether a route actually exists is `mission.Planner`'s kinematic replay at ~150 ms. The proxy's thresholds are swept against the planner, but a cheap model that agrees with an expensive one on two-fruit sweeps is not guaranteed to agree on fifteen. `week4_order.py` flies both orders and reports what came out of the crate, which is the only answer that counts.
+- **The deck camera's recall is flattered by the scene.** Red spheres against green foliage, noiseless depth, and every leaf `contype=0` and above the fruit. It finds 21/21 across the whole band, and that number says more about the renderer than about the sensor. The one place it fails is real and is not tuned away: four fruit in a 70 mm cluster fuse into a single blob and come back as *one* detection with a position 48 mm off, between them — **and the pan-tilt head does not fix it**, returning the same 3 of 6 from all five poses.
+- **The pick order is scored by a proxy, and the proxy currently has no ordering signal in it.** `deck_cam.plan_order` runs a geometric cost model in milliseconds; whether a route actually exists is `mission.Planner`'s kinematic replay at ~150 ms. The proxy's thresholds were swept against the planner on *two-fruit* rows, and they do not survive the trip to fifteen: `_pair_risk` is symmetric, so it scores both fruit of a close pair as blocked while the sweep it was fitted to says one of them plans fine. The search over that model is exact-then-refined and near-optimal; the model it is searching believes no order can save a fruit. `week4_order.py` flies both orders and returns a tie, which is the model's own prediction. The fix is a directional term fitted to a sweep that records *which* fruit of a pair gets refused.
 - **The chassis never moves.** Every number here is measured with the arm bolted in one place, working fruit inside its own envelope. A real harvester spends a large fraction of its cycle travelling down the row and turning at the headland, and none of that is simulated or counted in any cycle time. It is the single largest reason a kg/hr figure from this repo is an upper bound.
 - **It picks every fruit it sees.** No ripeness selection — that is deferred by design and blocked on a dataset licence — so the throughput assumes every tomato is a target, which no real pass ever is.
 - **A hand-placed crop is not a crop.** `week4_place.py` will put fruit anywhere, which is what makes it useful for stress-testing the planner, and it means the layouts are arrangements *chosen* rather than ones a plant produced. Real trusses sit where the plant puts them.
@@ -289,8 +368,8 @@ simulation/mujoco/
   week2_pick.py       plan → fly → explain → learn, and the scoring
   camera.py           the eye-in-hand sensor, intrinsics, deprojection,
                       and the housings that make both cameras visible
-  deck_cam.py         the chassis survey camera: finds the whole row in one
-                      frame and decides what to pick first
+  deck_cam.py         the chassis survey camera on its pan-tilt head: scans
+                      the whole row and decides what to pick first
   detect.py           the detectors, scored on recall and false positives
   week3_perceive.py   see the fruit, estimate where it is, pick it from that
   outcomes.py         one attempt → exactly one named failure bucket
@@ -299,6 +378,7 @@ simulation/mujoco/
   week4_place.py      put fruit anywhere, harvest them, add more mid-run
   week4_watch.py      the same, in a four-panel window you click to place in
   week4_order.py      does the deck camera's pick order beat placement order?
+  week4_grip.py       why the tomato fell out, and the number that stopped it
   week4_run.py        the throughput campaign across crop densities
   legacy_cycle.py     the unplanned cycle, kept as the baseline to beat
   week1_*.py          the Week 1 demos

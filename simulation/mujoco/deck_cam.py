@@ -10,12 +10,20 @@ camera because the script told it.** The staging pose for every look came out of
 comparison has to be against the honest alternative rather than against what the
 repo used to do. With one eye-in-hand sensor and no ground truth, finding the
 row means sweeping it — drive the wrist along the staging plane, render, drive
-on. Both measured on the same 8-fruit row by `main --vs-sweep`, counting
-*simulated* arm seconds because a robot's cycle time is made of the seconds the
-arm spends moving and not of how fast this laptop renders:
+on. Both measured on the same 8-fruit row by `main --vs-sweep --speed 0.15`,
+counting *simulated* arm seconds because a robot's cycle time is made of the
+seconds the arm spends moving and not of how fast this laptop renders:
 
-    one deck frame     8/8 found    arm moved 0.000 m     0.00 s
+    the deck survey    8/8 found    arm moved 0.000 m     0.00 s
     a wrist sweep      8/8 found    arm moved 2.557 m    24.14 s   (10 poses)
+
+⚠️ **`--speed 0.15` is not decoration, it is the speed every other number in
+this repo was taken at** — the campaign's, and the one 31.3 s is a cycle at.
+The sweep's cost is arm motion, so it scales: the same ten poses cost 17.06 s at
+0.25 and 11.56 s at the sub-command's own default of 0.5. Quoting the sweep at
+one speed and the cycle at another would flatter the mast by more than a
+factor of two. The deck survey costs 0.00 s at every one of them, because the
+arm does not move.
 
 24 seconds is most of a whole pick — the campaign's mean cycle is 31.3 s — spent
 before the first tomato is touched, and it is paid again on every row. Both find
@@ -23,9 +31,9 @@ everything, so this is not an accuracy argument; the sweep's cost is arm motion
 and scales with the length of the row, and the deck frame's does not scale at
 all.
 
-So this adds the sensor a real harvester has and this repo did not: a fixed
-RGBD camera on the chassis, facing the plane the fruit hang in, that sees the
-whole working band in **one frame with the arm stationary**. It does two jobs:
+So this adds the sensor a real harvester has and this repo did not: an RGBD
+camera on the chassis, facing the plane the fruit hang in, that sees the whole
+working band **with the arm stationary**. It does two jobs:
 
     1. **It tells the wrist camera where to look.** The survey is the row map.
        No sweep, no ground truth, and the wrist camera goes straight to a
@@ -35,6 +43,25 @@ whole working band in **one frame with the arm stationary**. It does two jobs:
        in `main --pairs` shows two fruit 100 mm apart where one is refused
        outright and the other plans fine, so picking the plannable one first is
        the difference between harvesting one and harvesting both.
+
+**The camera is on a pan-tilt head, and the head had to earn its place.** The
+obvious argument for articulation — "it can look around" — is worth nothing
+here, twice over: one fixed frame already covers the whole placement band, and
+a camera rotating about its own optical centre cannot see round anything at
+all, because pure rotation about the pinhole leaves every occlusion in the
+scene exactly where it was. What pays is that the lens sits on a 100 mm yoke
+offset from the pan axis, so panning **translates** it by up to 90 mm, and
+translation is the only thing that changes which fruit is hidden behind which.
+Measured over 48 fruit packed to 72-100 mm centres — the band the old 200 mm
+placement rule forbade — `main --scan`:
+
+    bolted down, one frame       31/48 found
+    five head poses              40/48 found     2.9 s of head slew, arm parked
+
+⚠️ It does not remove the floor, it moves it. At exactly 70 mm — touching —
+the scan finds the same 3 of 6 the fixed camera does, from every angle: 90 mm
+of parallax does not undo a 70 mm separation at 1300 mm. The wrist camera still
+goes in.
 
 The division of labour is the point, and it is the one real greenhouse machines
 settle on. The deck camera is **wide, far and coarse**; the wrist camera is
@@ -46,9 +73,42 @@ settle on. The deck camera is **wide, far and coarse**; the wrist camera is
     wrist   0.28 m range, one fruit, sub-millimetre geometry (`camera.py`'s
             Step 3 gate) — and it has to be driven there to see anything.
 
+**The order is chosen to lose the fewest tomatoes.** What the row is worth is
+fruit, so that is the unit the objective is in — see the `W_LOST` block for why
+"minimise total risk" was the wrong quantity and quietly traded whole fruit for
+fractions of a score.
+
+Solved in two stages, and the split is forced by one line of physics:
+
+    1. Held-Karp over (set already picked, fruit picked last). Exact, because
+       under the relaxation "every attempt removes its fruit" the cost of a pick
+       depends only on the *set* still standing — 2^n states rather than n!, and
+       fifteen fruit settle in 451 ms against a 31 s cycle.
+    2. Then hill-climb that answer against the **true** cost, in which a
+       *refused* pick leaves its fruit standing. Which fruit are up after k
+       attempts is then no longer a function of which k were attempted, so
+       (attempted-set, last) stops being a sufficient state and stage 1 stops
+       being exact for the real problem.
+
+⚠️ **That second rule is not a nicety, and it was found by flying the thing.**
+In the contested-band A/B, the planner opened layout 1 with p06 and followed
+with p00. p06 was refused — `insert: gr_right_pad within 25 mm of p00` — and
+then p00 was refused too, `within 32 mm of p06`, by the fruit the cost model had
+already crossed off. The old function removed every attempted fruit whether or
+not the attempt worked. Measured against brute force over all permutations, the
+two stages together reach the true optimum on 21-27 of 30 random layouts at
+n=5-8, and average 0.0006 of cost above it when they miss — against 0.077 for
+the exact-but-relaxed answer alone.
+
+⚠️ **What none of that has done yet is harvest more tomatoes**, and this file is
+not the place that gets to decide otherwise. See `week4_order.py`.
+
 Every constant in here is read off a sweep that can be re-run:
 
     ./.venv/bin/python simulation/mujoco/deck_cam.py             # the gate
+    ./.venv/bin/python simulation/mujoco/deck_cam.py --scan      # what the head buys
+    ./.venv/bin/python simulation/mujoco/deck_cam.py --eclipse   # can it see round the arm
+    ./.venv/bin/python simulation/mujoco/deck_cam.py --optimal   # exact vs the hill-climb
     ./.venv/bin/python simulation/mujoco/deck_cam.py --pairs     # what a neighbour costs
     ./.venv/bin/python simulation/mujoco/deck_cam.py --corridor  # the pull-down wedge
     ./.venv/bin/python simulation/mujoco/deck_cam.py --mounts    # why the mast is there
@@ -132,6 +192,46 @@ DECK_POST_X = -0.60
 # to run unless the arm is at park; see the check there.
 DECK_MOUNT = np.array([DECK_POST_X, 0.0, 1.10])
 
+# --- the head that carries it ------------------------------------------------
+#
+# The camera is on a pan-tilt head, not bolted down. Two joints: pan about the
+# post's own vertical axis, tilt about a trunnion at the top of the post.
+#
+# ⚠️ **The camera sits on a yoke arm, offset from the pan axis, and that offset
+# is the entire reason the head is worth having.** A camera that rotates about
+# its own optical centre gains *nothing* but field of view: pure rotation about
+# the pinhole leaves every occlusion relationship in the scene exactly as it
+# was, so a fruit hidden behind another fruit is still hidden and two fruit
+# whose blobs merge still merge. Panning a camera in place cannot see round
+# anything. Offset it from the axis and panning *translates* it, and translation
+# is what changes who is behind what.
+#
+# So the post moved back rather than the camera moving forward. The optics were
+# measured at x = -0.60 and stay there; the mast now stands at -0.70 with a
+# 100 mm arm, which puts the lens back on the measured line at home and buys
+# clearance rather than spending it:
+#
+#     pan      camera x      camera y     closest the arm gets (sweep says
+#      0°        -0.600         0.000      the arm reaches x = -0.457)
+#    ±30°       -0.613        ∓0.050          156 mm
+#    ±60°       -0.650        ∓0.087          193 mm
+#    ±90°       -0.700         ∓0.100          243 mm
+#
+# The camera is *furthest* from the arm when panned, so the swept-volume
+# clearance that sited the mast is not spent by articulating it. See `--mounts`.
+DECK_PAN_AXIS_X = -0.70
+DECK_YOKE_M = 0.10
+
+# How fast the head slews, degrees per second. A pan-tilt unit in this class
+# (FLIR PTU-D48 and friends) manages 60-100 deg/s under a camera payload; 60 is
+# the conservative end.
+#
+# ⚠️ It is here so `DeckSurvey.scan` can **charge for the look**. The whole
+# argument for the mast is that it costs no arm-seconds, and a scan that took
+# an unbilled amount of time would quietly undo that. The arm still does not
+# move — but the head does, and the report says how long for.
+DECK_SLEW_DEG_S = 60.0
+
 # Aimed at the centre of the band `week4_place` lets fruit be placed in, not at
 # the row centre in the abstract. The two are the same today and would stop
 # being the same the moment the band moves, which is exactly the sort of drift
@@ -156,49 +256,254 @@ DECK_FOVY = 58.0
 # separately seen.
 DECK_GATE_M = 0.060
 
+# How close two sightings have to be to be called the same fruit. See `_fuse`.
+FUSE_M = 0.030
+
+# The poses the head visits when it scans, as (pan, tilt) in degrees from home.
+#
+# ⚠️ **Articulation had to earn this and very nearly did not.** Panning a camera
+# about its own optical centre is worth precisely nothing for finding fruit: one
+# fixed frame already covers the whole placement band — that is what `DECK_FOVY`
+# was chosen for — and a pure rotation about the pinhole leaves every occlusion
+# in the scene exactly where it was. What pays is the 100 mm yoke, which turns
+# pan and tilt into *translation* of up to 90 mm, and translation is the only
+# thing that changes who is hidden behind what.
+#
+# Measured by `main --scan` on 8 fruit x 6 layouts packed to 72-100 mm centres —
+# the band the old 200 mm rule forbade, and the band `week4_order`'s 75 mm row
+# showed the fixed camera losing three fruit of six in:
+#
+#   pattern         poses    fruit found    mean err    phantoms   head slew
+#   fixed             1        31/48         3.8 mm        0         0.00 s
+#   pan +-20          3        35/48         4.1 mm        0         1.00 s
+#   pan +-35          3        36/48         4.6 mm        0         1.75 s
+#   pan +-35          5        36/48         4.3 mm        0         2.95 s
+#   cross             5        38/48         4.2 mm        1         2.07 s
+#   box               5        40/48         4.8 mm        0         2.92 s   <-
+#   grid              7        40/48         5.3 mm        0         4.53 s
+#   box wide          5        39/48         5.4 mm        1         4.67 s
+#   box               9        41/48         4.7 mm        0         6.53 s
+#
+# 65% to 83% of a packed row, for 2.9 s in which **the arm does not move**.
+# Compare the alternative in `--vs-sweep`: 24.14 s of arm motion.
+#
+# ⚠️ Read the two failure columns against each other, because they pull opposite
+# ways. `found` rewards more poses; `phantoms` punishes them, because two
+# sightings of one fruit that fail to fuse become two orders to pick the same
+# tomato. `box wide` and `cross` each produced one, and both are patterns that
+# move the viewpoint furthest — which is exactly where fusing gets hardest.
+#
+# Nine poses buy one more fruit for 3.6 s more slew, and going wider is worse on
+# every column. Five is where it stops paying.
+SCAN_POSES = ((0.0, 0.0), (-25.0, -10.0), (25.0, -10.0),
+              (-25.0, 10.0), (25.0, 10.0))
+
+
+HEAD_BODY = "deck_head"
+
+# The home aim, in world axes. At home the head's quaternion is the identity, so
+# head-local and world coincide and this doubles as the camera's declaration in
+# the head's own frame. Everything `DeckHead` does is expressed relative to it.
+DECK_HOME_XYAXES = _xyaxes_towards(DECK_MOUNT, DECK_AIM, up_hint=(0.0, 0.0, 1.0))
+
 
 def add_deck_camera(spec, name=DECK_NAME, mount=DECK_MOUNT, aim=DECK_AIM,
-                    fovy=DECK_FOVY, post=True):
-    """Put the deck camera, its post and its housing into a spec.
+                    fovy=DECK_FOVY, post=True, articulated=True):
+    """Put the deck camera, its mast and its pan-tilt head into a spec.
 
     Call before `spec.compile()`. The post is drawn by default because a camera
     floating 1.1 m above the floor with nothing holding it up invites the
     question "how is that mounted", and the answer — a post on the chassis,
     behind the arm's swept volume — is the interesting part.
 
+    ⚠️ **The head is a mocap body, not a pair of hinge joints, and that is a
+    correctness decision rather than a shortcut.** Hinges would add two DOFs to
+    `mjModel`, and `mink.Configuration` in `reach.Reacher` is built over the
+    *whole* model — so the IK solver would see two free joints, notice they
+    lower its cost function not at all, and be free to leave them anywhere. Any
+    coupling between "where the arm is reaching" and "where the camera is
+    pointing" would be a bug that only showed up as a survey quietly missing
+    fruit. A mocap body has no DOFs at all: it is commanded, it is not
+    simulated, and a pan-tilt unit with position servos is exactly that.
+
     ⚠️ Everything here is `contype=0`, like `greenhouse.py`'s scenery and for
     the same reason: the collision set this repo's clearance numbers were
     measured against is the fruit, the support bar, the row panel, the floor and
-    the crate. Adding a solid post 600 mm behind the shoulder would change what
-    the planner routes around, and it would change it invisibly. The post is
+    the crate. Adding a solid post 700 mm behind the shoulder would change what
+    the planner routes around, and it would change it invisibly. The mast is
     sited where the arm does not go, so it *could* be solid — the measurement
     above is what says so — but making it solid is a separate change with its
     own numbers to re-take.
+
+    `articulated=False` bolts the camera to the mast at the home pose, which is
+    what shipped before the head existed. Kept so `--scan` can measure the two
+    against each other in one process rather than against a memory.
     """
     import mujoco
 
+    mount = np.asarray(mount, float)
     xyaxes = _xyaxes_towards(mount, aim, up_hint=(0.0, 0.0, 1.0))
-    body = spec.worldbody.add_body(name="deck_mast", pos=[0, 0, 0])
-    spec.worldbody.add_camera(name=name, pos=list(mount), fovy=fovy,
-                              xyaxes=xyaxes)
+    mast = spec.worldbody.add_body(name="deck_mast", pos=[0, 0, 0])
 
     if post:
-        x, y = float(mount[0]), float(mount[1])
+        # ⚠️ The mast stands on the *pan axis*, which is 100 mm behind the lens.
+        # Drawing it under the camera instead would put the post where the yoke
+        # swings and make the picture disagree with the kinematics.
+        x, y = (DECK_PAN_AXIS_X, 0.0) if articulated else (float(mount[0]), 0.0)
         top = float(mount[2]) - 0.05
-        body.add_geom(
+        mast.add_geom(
             name="deck_post", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
             fromto=[x, y, 0.02, x, y, top], size=[0.022, 0, 0],
             rgba=[0.42, 0.44, 0.47, 1.0], contype=0, conaffinity=0, mass=0.0)
         # A foot, so it reads as bolted to a deck rather than stuck in the floor.
-        body.add_geom(
+        mast.add_geom(
             name="deck_post_foot", type=mujoco.mjtGeom.mjGEOM_BOX,
             pos=[x, y, 0.015], size=[0.09, 0.09, 0.015],
             rgba=[0.35, 0.37, 0.40, 1.0], contype=0, conaffinity=0, mass=0.0)
 
-    add_camera_housing(body, f"cam_{name}", mount, xyaxes, kind="d435",
-                       stalk=[float(mount[0]), float(mount[1]),
-                              float(mount[2]) - 0.05])
+    if not articulated:
+        spec.worldbody.add_camera(name=name, pos=list(mount), fovy=fovy,
+                                  xyaxes=xyaxes)
+        add_camera_housing(mast, f"cam_{name}", mount, xyaxes, kind="d435",
+                           stalk=[float(mount[0]), 0.0, float(mount[2]) - 0.05])
+        return spec
+
+    # The head. Its origin is the pan axis at the trunnion height, so a pure
+    # quaternion on the mocap body *is* the pan-tilt command and nothing has to
+    # track a moving centre of rotation.
+    origin = np.array([DECK_PAN_AXIS_X, 0.0, float(mount[2])])
+    head = spec.worldbody.add_body(name=HEAD_BODY, pos=list(origin),
+                                   mocap=True)
+
+    # Camera-in-head coordinates. At home the head is the identity, so the
+    # camera's local offset is just the yoke and its local axes are the world
+    # ones — which is what makes `DeckHead`'s angles read as world pan and tilt.
+    local = (mount - origin).tolist()
+
+    head.add_geom(
+        name="deck_trunnion", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+        fromto=[0, -0.030, 0, 0, 0.030, 0], size=[0.020, 0, 0],
+        rgba=[0.35, 0.37, 0.40, 1.0], contype=0, conaffinity=0, mass=0.0)
+    head.add_geom(
+        name="deck_yoke", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+        fromto=[0, 0, 0, local[0], local[1], local[2]], size=[0.011, 0, 0],
+        rgba=[0.45, 0.47, 0.50, 1.0], contype=0, conaffinity=0, mass=0.0)
+
+    head.add_camera(name=name, pos=local, fovy=fovy, xyaxes=xyaxes)
+    add_camera_housing(head, f"cam_{name}", local, xyaxes, kind="d435",
+                       stalk=[0.0, 0.0, 0.0])
     return spec
+
+
+class DeckHead:
+    """Where the deck camera is pointing, and how to point it somewhere else.
+
+    Two angles, both in degrees and both measured from the home aim rather than
+    from an absolute frame — `pan=0, tilt=0` is the pose every fixed-camera
+    number in this module was taken at, so the articulated camera and the bolted
+    one are the same measurement at the same place.
+
+    ⚠️ Pan and tilt are *not* independent of where the camera is. The lens is on
+    a 100 mm yoke, so panning swings it through an arc; asking "point at that
+    fruit" is therefore a fixed point rather than a formula, and `look_at`
+    iterates it. Three passes is plenty — the yoke is 100 mm against a 1.3 m
+    working range, so the first correction is already sub-degree.
+    """
+
+    def __init__(self, model, data=None, name=HEAD_BODY):
+        import mujoco
+
+        self.model = model
+        self.body = name
+        try:
+            self.mocap = int(model.body(name).mocapid[0])
+        except KeyError:
+            self.mocap = -1
+        if self.mocap < 0:
+            raise RuntimeError(
+                f"no articulated deck head in this model — build the scene "
+                f"with deck_cam=True, or use add_deck_camera(articulated=False) "
+                f"and skip the head entirely")
+        self.origin = model.body(name).pos.copy()
+        self.fwd0 = np.asarray(DECK_AIM, float) - np.asarray(DECK_MOUNT, float)
+        self.fwd0 /= np.linalg.norm(self.fwd0)
+        # The camera's right axis at home. Horizontal by construction —
+        # `_xyaxes_towards` crosses the forward vector with world up — which is
+        # what lets pan and tilt decompose into azimuth and elevation below.
+        self.right0 = np.asarray(DECK_HOME_XYAXES[:3], float)
+        self.pan = 0.0
+        self.tilt = 0.0
+        if data is not None:
+            self.aim(data, 0.0, 0.0)
+
+    # --- pointing ------------------------------------------------------------
+
+    def _quat(self, pan_deg, tilt_deg):
+        import mujoco
+
+        qp, qt, out = np.zeros(4), np.zeros(4), np.zeros(4)
+        mujoco.mju_axisAngle2Quat(qp, np.array([0.0, 0.0, 1.0]),
+                                  np.radians(pan_deg))
+        mujoco.mju_axisAngle2Quat(qt, self.right0, np.radians(tilt_deg))
+        # Pan is the outer rotation and tilt the inner one, which is the order a
+        # real pan-tilt unit is built in: the tilt trunnion rides on the pan
+        # table. Composed the other way the head yaws about a tilted axis and
+        # the horizon rolls.
+        mujoco.mju_mulQuat(out, qp, qt)
+        return out
+
+    def aim(self, data, pan_deg, tilt_deg):
+        """Command the head. Returns the seconds a real unit would take to slew.
+
+        ⚠️ Caller must `mj_forward` before rendering. Writing `mocap_quat` does
+        not move `cam_xpos` on its own, and a render taken in between is a frame
+        from the *previous* pose with the new pose's label on it — which is the
+        one failure here that produces plausible wrong numbers rather than an
+        error.
+        """
+        swing = max(abs(pan_deg - self.pan), abs(tilt_deg - self.tilt))
+        data.mocap_quat[self.mocap] = self._quat(pan_deg, tilt_deg)
+        self.pan, self.tilt = float(pan_deg), float(tilt_deg)
+        return swing / DECK_SLEW_DEG_S
+
+    def home(self, data):
+        return self.aim(data, 0.0, 0.0)
+
+    def camera_pos(self, pan_deg=None, tilt_deg=None):
+        """Where the lens ends up at that pose, without touching `mjData`."""
+        import mujoco
+
+        pan = self.pan if pan_deg is None else pan_deg
+        tilt = self.tilt if tilt_deg is None else tilt_deg
+        mat = np.zeros(9)
+        mujoco.mju_quat2Mat(mat, self._quat(pan, tilt))
+        offset = np.asarray(DECK_MOUNT, float) - self.origin
+        return self.origin + mat.reshape(3, 3) @ offset
+
+    def angles_to(self, point, passes=3):
+        """(pan, tilt) in degrees that put `point` on the optical axis.
+
+        Exact but for the fixed point: because pan and tilt are pure azimuth and
+        elevation offsets from the home aim (see `right0`), each pass is a
+        closed-form solve, and the only thing being iterated is where the yoke
+        has carried the lens to.
+        """
+        def az_el(v):
+            v = np.asarray(v, float)
+            return (np.degrees(np.arctan2(v[1], v[0])),
+                    np.degrees(np.arcsin(v[2] / np.linalg.norm(v))))
+
+        az0, el0 = az_el(self.fwd0)
+        pan = tilt = 0.0
+        for _ in range(passes):
+            d = np.asarray(point, float) - self.camera_pos(pan, tilt)
+            az, el = az_el(d)
+            pan, tilt = az - az0, el - el0
+        return float(pan), float(tilt)
+
+    def look_at(self, data, point):
+        """Point the head at a world position. Returns the slew seconds."""
+        return self.aim(data, *self.angles_to(point))
 
 
 # --- the survey --------------------------------------------------------------
@@ -303,6 +608,116 @@ class DeckSurvey:
         return out, {"log": log, "dets": dets, "usable": usable,
                      "rgb": rgb, "depth": depth, "R": R, "C": C}
 
+    # --- looking around ------------------------------------------------------
+
+    def scan(self, data, names, head=None, poses=None, truth=True):
+        """Sweep the head across `poses` and fuse what every pose saw.
+
+        Returns the same `(map, report)` shape as `look`, so a caller can be
+        handed either and not care. The report gains `poses`, `slew_s` and a
+        per-pose breakdown.
+
+        ⚠️ **Detections are fused in world coordinates, not in the image.** Each
+        pose deprojects to metres before anything is compared, which is what
+        makes fusing across poses meaningful at all — two pixels from two
+        different camera orientations have no relationship to each other, and
+        two points in the greenhouse do.
+
+        ⚠️ The head is left where the last pose put it. Callers that render
+        anything afterwards want `head.home(data)` first, or they get a frame
+        from wherever the scan finished.
+        """
+        import mujoco
+
+        from detect import estimate
+
+        head = DeckHead(self.model, data) if head is None else head
+        poses = SCAN_POSES if poses is None else poses
+
+        found, per_pose, slew = [], [], 0.0
+        for k, (pan, tilt) in enumerate(poses):
+            slew += head.aim(data, pan, tilt)
+            mujoco.mj_forward(self.model, data)   # see DeckHead.aim
+            rgb, depth = self.sensor.both(data)
+            R, C = self.sensor.pose(data)
+            dets = [estimate(d, depth, self.intr, R, C)
+                    for d in self.detector(rgb)]
+            usable = [d for d in dets if d.est is not None]
+            per_pose.append({"pan": pan, "tilt": tilt, "blobs": len(dets),
+                             "usable": len(usable), "cam": C.copy()})
+            # Which pose a sighting came from, carried on the detection so
+            # `_fuse` can report how many *distinct viewpoints* backed a fruit.
+            # Four sightings from four poses is corroboration; four from one
+            # pose would be the detector firing repeatedly on one blob, and the
+            # two mean opposite things about how much to trust the position.
+            found.extend((k, d) for d in usable)
+
+        clusters = _fuse(found)
+        pairs = sorted(
+            (float(np.linalg.norm(c["est"] - data.body(n).xpos)), i, n)
+            for i, c in enumerate(clusters) for n in names
+            if np.linalg.norm(c["est"] - data.body(n).xpos) <= self.gate)
+
+        taken, out, log = set(), {}, []
+        for _dist, i, n in pairs:
+            if i in taken or n in out:
+                continue
+            taken.add(i)
+            c = clusters[i]
+            out[n] = Seen(name=n, est=c["est"].copy(),
+                          truth=data.body(n).xpos.copy() if truth else None,
+                          det=c["dets"][0],
+                          edge=all(bool(d.extra.get("edge")) for d in c["dets"]))
+            log.append(f"{n} <- {len(c['dets'])} sighting(s) from "
+                       f"{len(c['poses'])} of {len(poses)} poses, est "
+                       f"{c['est'].round(3)} err {out[n].err_mm:.1f} mm"
+                       + ("  [edge in every pose]" if out[n].edge else ""))
+        for i, c in enumerate(clusters):
+            if i not in taken:
+                log.append(f"UNASSOCIATED cluster -> {c['est'].round(3)} "
+                           f"({len(c['dets'])} sightings, no truss within "
+                           f"{self.gate * 1000:.0f} mm)")
+        return out, {"log": log, "clusters": clusters, "per_pose": per_pose,
+                     "poses": list(poses), "slew_s": slew}
+
+
+def _fuse(sightings, radius=None):
+    """Group sightings that are the same fruit seen from different poses.
+
+    `sightings` is `[(pose_index, detection)]`. Single-link clustering on the
+    deprojected positions, then the mean of each group. Returns
+    `[{est, dets, poses}]`, where `poses` is the set of distinct viewpoints that
+    saw it — not the number of detections, which is a different claim.
+
+    ⚠️ **`radius` is what decides whether the scan can tell two fruit apart, so
+    it is the one number in here that must not be generous.** Fruit centres
+    70 mm apart are touching (`plant_row.FRUIT_R` x 2 plus a little); anything
+    at or over half of that would merge a real pair into one phantom fruit
+    halfway between them and report it as a confident single detection — which
+    is worse than missing one, because the arm would then be sent somewhere
+    there is no tomato. 30 mm is under half the touching distance and well over
+    the ~2 mm the deck camera resolves an isolated fruit to, so the two failure
+    modes are nowhere near each other.
+    """
+    radius = FUSE_M if radius is None else radius
+    groups = []
+    for k, d in sightings:
+        # ⚠️ Collect **every** group this sighting links to and merge them, not
+        # just the first. A first-match-wins loop leaves two groups unmerged
+        # when the sighting that would have joined them arrives last, and the
+        # result is one fruit reported twice — a phantom, i.e. a second order to
+        # pick a tomato that is no longer there. It costs one pass to be right.
+        hit = [g for g in groups
+               if any(np.linalg.norm(d.est - e[1].est) <= radius for e in g)]
+        merged = [(k, d)]
+        for g in hit:
+            merged.extend(g)
+            groups.remove(g)
+        groups.append(merged)
+    return [{"est": np.mean([d.est for _k, d in g], axis=0),
+             "dets": [d for _k, d in g],
+             "poses": sorted({k for k, _d in g})} for g in groups]
+
 
 def parked(model, data, park_q, tol=0.02):
     """Is the arm at the park posture? The survey's precondition.
@@ -346,6 +761,45 @@ def parked(model, data, park_q, tol=0.02):
 BLOCKED_M = 0.120       # under this, a neighbour refuses the pick outright
 CROWDED_M = 0.170       # under this, it costs a fallback route and cycle time
 
+# ⚠️ **KNOWN LIMITATION, and it is the one that matters most in this file:
+# the crowd term above is symmetric, and the effect this module exists to
+# exploit is not.**
+#
+# Read the 100 mm row of the sweep again — "one refused, one ok". That
+# asymmetry is the entire ordering argument: pick the plannable one, it comes
+# off, and the other is left a lone fruit with a clear route. But `_pair_risk`
+# is a function of the separation vector, so at 100 mm side by side it returns
+# 1.000 in **both** directions. The model says both fruit are blocked. It cannot
+# tell you which one to take first, because it does not believe there is a
+# difference.
+#
+# The corridor term is directional and does produce some asymmetry — a
+# neighbour 100 mm directly below scores 1.636 against 1.000 the other way —
+# but `exposure` clips `block` at 1.0, which is correct for a probability and
+# erases exactly that difference at the distances where it would have mattered.
+#
+# What this predicts, and what was then measured:
+#
+#   * `main --optimal` — every method, from placement order to the exact
+#     solver, produces an **identical** expected loss (7.036 at n=8, 11.405 at
+#     n=12, 14.588 at n=15). Only tour length moves. Under a symmetric model
+#     with mutual blocking, no order can save a fruit, and the optimiser
+#     correctly reports that there is nothing to win.
+#   * `week4_order.py --band contested` — 32 attempts per arm, deck order
+#     against placement order: 19 crated vs 18, **12 refused vs 12**. A tie —
+#     and the model forecast that tie exactly, at 0.00 fruit of predicted gain
+#     on all four layouts. The *old* model forecast 3.33 fruit on the same rows
+#     and delivered none. So the honest reading of this limitation is that it is
+#     now **visible in the forecast** rather than hidden behind a number that
+#     looked like a result.
+#
+# So the ordering machinery is correct, exact, and currently pointed at a cost
+# function that has no ordering signal in it. **The fix is a measurement, not a
+# weight**: `--pairs` has to record *which* of the two fruit was refused, not
+# just that one of them was, and the crowd term has to grow a directional part
+# fitted to that. Until then, `plan_order` is honest about producing an order
+# that is optimal under a model which says order does not matter.
+
 # The pull is `mission.PULL_DOWN` = 140 mm straight down with the fruit in the
 # pads, so the gripper sweeps the space *below* the target and nowhere else.
 # That asymmetry is why the order comes out roughly bottom-up without anything
@@ -376,21 +830,63 @@ CROWDED_M = 0.170       # under this, it costs a fallback route and cycle time
 CORRIDOR_DOWN_M = 0.275
 CORRIDOR_HALF_M = 0.220
 
-# What the two halves of the cost are worth against each other.
+# --- what the order is actually optimising -----------------------------------
 #
-# ⚠️ **Only `W_RISK` and `W_UNBLOCK` change anything measurable today, and
-# `W_TRAVEL` is in here anyway — on purpose.** `mission.park_arm` teleports the
-# arm back to park between picks (for posture reasons, documented there), so the
-# distance from one fruit to the next costs this simulation exactly nothing and
-# tour length cannot show up in a measured cycle time. A real machine pays it.
-# So it is weighted low, it breaks ties between equally safe orders in the
-# direction a real machine would want, and `plan_order` reports it as its own
-# column rather than folding it into a single score that would imply the sim had
-# measured it. If the teleport is ever replaced by a driven return, raise it and
-# the numbers become real without the model changing.
-W_RISK = 1.0
-W_UNBLOCK = 0.6
-W_TRAVEL = 0.08
+# ⚠️ **The objective used to be "minimise total risk" and that was the wrong
+# quantity.** Summing a risk score over the picks treats one pick at risk 2.0 as
+# equal to two picks at risk 1.0 — but a pick whose worst neighbour is inside
+# BLOCKED_M is *refused*, so the second case loses two fruit and the first loses
+# one. An order optimised on the sum will happily trade a fruit to shave a
+# fraction off a score. What the row is worth is fruit, so that is the unit.
+#
+# The rewrite splits what a neighbour does into two things, because the sweeps
+# found two mechanisms with different shapes and only one of them costs yield:
+#
+#   block   the **worst single** neighbour, clipped at 1. `--pairs` measured a
+#           pick being refused outright when one neighbour is inside BLOCKED_M,
+#           and refusal does not get worse with a second one. Saturating, and a
+#           max rather than a sum: this is a probability that the pick is lost.
+#   crowd   the **sum** over neighbours. Not a loss — a longer route.
+#
+# W_LOST is 1.0 by definition: it is the unit, one refused pick is one fruit.
+#
+# ⚠️ **W_CROWD is small because a fallback route turns out to cost nothing
+# measurable.** The expectation was that crowding buys a longer path and so
+# cycle time. Planning a target with one neighbour swept underneath it and
+# measuring the committed tool path against the same target alone:
+#
+#   neighbour 150 mm below, swept across      path length vs alone
+#     0 / 40 / 80 mm                          -0.098 / -0.063 / -0.063 m
+#     120 mm and beyond                        0.000 m
+#   neighbour beside it
+#     80 / 100 mm                             REFUSED
+#     120 mm                                  -0.098 m
+#     140 mm and beyond                        0.000 m
+#
+# Every route the planner accepted was the same length or **shorter**. So
+# crowding does not cost seconds in this cycle at all; the only thing a
+# neighbour ever costs is the whole fruit, and crowd is kept purely as a
+# tie-break between orders that lose the same number.
+#
+# W_TRAVEL is smaller still, and is in here knowing it measures nothing today:
+# `mission.park_arm` teleports the arm back to park between picks (for posture
+# reasons, documented there), so fruit-to-fruit distance costs this simulation
+# exactly zero. A real machine pays it. It breaks remaining ties in the
+# direction a real machine would want, and is reported in its own column rather
+# than folded into a score that would imply the sim had measured it.
+W_LOST = 1.0
+W_CROWD = 0.05
+W_TRAVEL = 0.02
+
+# Rows this many fruit or fewer are solved **exactly**; above it, the local
+# search below is used instead.
+#
+# ⚠️ The exact solver is Held-Karp over (set already picked, fruit picked last),
+# which is O(n^2 · 2^n) — 15 fruit is 32768 subsets and runs in about a second,
+# 20 would be 32x that. `week4_place.MAX_FRUIT` is 15, so in practice the exact
+# path is the only one that ever runs and the local search is a guard against a
+# caller that places more.
+EXACT_MAX = 15
 
 
 def _pair_risk(a, b):
@@ -427,9 +923,29 @@ def _pair_risk(a, b):
 
 
 def risk(name, positions, remaining):
-    """How exposed a pick of `name` is, given what is still on the plant."""
+    """How exposed a pick of `name` is, given what is still on the plant.
+
+    The summed form, kept because it is what the campaign logs as `deck_risk`
+    and changing its meaning would silently break comparison against every row
+    already written. `exposure` is what the optimiser reads.
+    """
     p = positions[name]
     return sum(_pair_risk(p, positions[n]) for n in remaining if n != name)
+
+
+def exposure(name, positions, remaining):
+    """(block, crowd) — the two things the neighbours do, kept apart.
+
+    `block` saturates and is a max, because one neighbour inside BLOCKED_M
+    refuses the pick and a second one cannot refuse it twice. `crowd` sums,
+    because route length does accumulate. Collapsing them into one number is
+    what the old cost model did and what made it prefer losing a fruit.
+    """
+    p = positions[name]
+    rs = [_pair_risk(p, positions[n]) for n in remaining if n != name]
+    if not rs:
+        return 0.0, 0.0
+    return float(min(1.0, max(rs))), float(sum(rs))
 
 
 @dataclass
@@ -438,14 +954,21 @@ class Step:
 
     fruit: str
     pos: np.ndarray
-    risk: float
+    risk: float          # summed, as the campaign logs it
     unblocks: float
     travel: float
     remaining: int
+    block: float = 0.0   # worst single neighbour, clipped — the loss term
 
     @property
     def verdict(self):
-        if self.risk >= 1.0:
+        # ⚠️ Reads `block`, not `risk`. Three distant neighbours can sum to a
+        # risk over 1.0 without any one of them being close enough to refuse the
+        # pick, and calling that "crowded" put a warning on picks that plan
+        # perfectly well while missing the ones that do not.
+        if self.block >= 0.99:
+            return "BLOCKED"
+        if self.block >= 0.5:
             return "crowded"
         if self.risk >= 0.25:
             return "tight"
@@ -459,158 +982,325 @@ class OrderedPlan:
     worst_risk: float = 0.0
     travel_m: float = 0.0
     improved_from: tuple = ()
+    lost: float = 0.0        # expected fruit the planner will refuse
+    cost: float = 0.0        # the objective actually minimised
+    optimal: bool = False    # solved exactly, or hill-climbed
+    solve_s: float = 0.0
 
     @property
     def order(self):
         return [s.fruit for s in self.steps]
 
     def table(self, indent="  "):
-        out = [f"{indent}{'#':>2} {'fruit':<6} {'y':>7} {'z':>7} {'risk':>6} "
-               f"{'unblocks':>9} {'travel m':>9} {'left':>5}  note"]
+        out = [f"{indent}{'#':>2} {'fruit':<6} {'y':>7} {'z':>7} {'block':>6} "
+               f"{'risk':>6} {'unblocks':>9} {'travel m':>9} {'left':>5}  note"]
         for i, s in enumerate(self.steps, 1):
             out.append(f"{indent}{i:2d} {s.fruit:<6} {s.pos[1]:+7.3f} "
-                       f"{s.pos[2]:7.3f} {s.risk:6.2f} {s.unblocks:9.2f} "
-                       f"{s.travel:9.3f} {s.remaining:5d}  {s.verdict}")
-        out.append(f"{indent}total risk {self.total_risk:.2f} · worst single "
-                   f"pick {self.worst_risk:.2f} · tour {self.travel_m:.2f} m")
-        # Whether the improvement pass actually moved anything. Worth printing:
-        # if it never fires, the greedy answer was already optimal under this
-        # cost and the second stage is dead weight that should be deleted.
+                       f"{s.pos[2]:7.3f} {s.block:6.2f} {s.risk:6.2f} "
+                       f"{s.unblocks:9.2f} {s.travel:9.3f} {s.remaining:5d}  "
+                       f"{s.verdict}")
+        out.append(f"{indent}expected refusals {self.lost:.2f} fruit · total "
+                   f"risk {self.total_risk:.2f} · worst single pick "
+                   f"{self.worst_risk:.2f} · tour {self.travel_m:.2f} m")
+        out.append(f"{indent}"
+                   + ("exact, and unchanged by refinement — proved optimal"
+                      if self.optimal else
+                      "exact on the relaxation, then refined against the true "
+                      "walk")
+                   + f" in {self.solve_s * 1000:.0f} ms")
+        # What the search bought over taking them in the order they were placed.
         if self.improved_from and tuple(self.order) != tuple(self.improved_from):
             moved = sum(1 for a, b in zip(self.order, self.improved_from)
                         if a != b)
             out.append(f"{indent}(greedy gave {' '.join(self.improved_from)}; "
-                       f"the improvement pass moved {moved})")
+                       f"the search moved {moved})")
         return "\n".join(out)
 
 
 def _sequence_cost(order, positions, start):
-    """Score a whole order.
+    """Score a whole order. **This is the true objective.**
 
     ⚠️ The obstacle set **shrinks as it goes**, which is the entire reason order
     matters and the reason this cannot be a sum of pairwise scores computed up
     front. A fruit's risk is whatever is still standing when its turn comes, so
     the same fruit is cheap ninth and expensive first.
+
+    ⚠️ And it shrinks **only on success** — see the note on `block < 1.0` below.
+    That one line is what makes this function not solvable by `_solve_exact`:
+    which fruit are standing after k attempts is no longer a function of *which*
+    k were attempted, it depends on how they went, so (attempted-set, last) stops
+    being a sufficient DP state. `_solve_exact` optimises the relaxation where
+    every attempt removes its fruit; `plan_order` then refines that answer
+    against this one. See there.
     """
-    remaining = set(order)
+    standing = set(order)
     here = np.asarray(start, float)
-    cost = travel = total = worst = 0.0
+    cost = travel = total = worst = lost = 0.0
+    steps = []
     for n in order:
-        r = risk(n, positions, remaining)
+        block, crowd = exposure(n, positions, standing - {n})
         step = float(np.linalg.norm(positions[n] - here))
-        cost += W_RISK * r + W_TRAVEL * step
-        total += r
+        cost += W_LOST * block + W_CROWD * crowd + W_TRAVEL * step
+        lost += block
+        total += crowd
         travel += step
-        worst = max(worst, r)
-        remaining.discard(n)
+        worst = max(worst, crowd)
+        # ⚠️ **The fruit comes off the plant only if the pick succeeds.** A
+        # refused pick leaves it exactly where it was, still blocking everything
+        # attempted after it — and the harness attempts each fruit once, so a
+        # refusal is not retried when its blocker clears.
+        #
+        # Getting this wrong is not academic. In the `contested` A/B, layout 1,
+        # the planner opened with p06 (block 1.00) and followed with p00. p06
+        # was refused — `insert: gr_right_pad within 25 mm of p00` — and then
+        # p00 was refused too, `within 32 mm of p06`, by the fruit the model had
+        # already written off. The old cost function removed every attempted
+        # fruit whether or not the attempt worked, so it scored p06 as clearing
+        # the way for p00 when it had cleared nothing.
+        if block < 1.0:
+            standing.discard(n)
         here = positions[n]
+        steps.append({"fruit": n, "block": block, "crowd": crowd,
+                      "travel": step, "standing": len(standing)})
     return {"cost": cost, "total_risk": total, "worst_risk": worst,
-            "travel_m": travel}
+            "travel_m": travel, "lost": lost, "steps": steps}
 
 
-def plan_order(survey, start=None, improve=True):
-    """Decide what to pick first. Returns an `OrderedPlan`.
+def _greedy(names, positions, start):
+    """A decent order, fast. The exact solver's starting point and its check.
 
-    `survey` is `{name: position}` — whatever the deck camera came back with,
-    which is emphatically not the order the fruit were declared or placed in.
+    At each step, score every fruit still on the plant on what it costs to pick
+    **now**, minus what picking it is worth to everything left (`unblocks` — the
+    risk it is currently imposing on others), plus the travel to reach it. The
+    obstacle set then shrinks and every remaining score changes, which is why
+    this is re-scored per step instead of sorted once.
 
-    **Two stages, and the second one is what makes this an optimisation rather
-    than a sort.**
-
-    *Greedy.* At each step, score every fruit still on the plant on what it
-    costs to pick **now** (`risk`, against the fruit still standing), minus what
-    picking it is worth to everything left (`unblocks` — the risk it is
-    currently imposing on others), plus the travel to reach it. Take the
-    cheapest. The obstacle set then shrinks and every remaining score changes,
-    which is why this is re-scored per step instead of sorted once.
-
-    Those two terms genuinely pull against each other and neither one alone is
-    right. Risk alone says "do the easy ones first" and leaves a knot of
+    Those two terms genuinely pull against each other and neither alone is
+    right. Cost alone says "do the easy ones first" and leaves a knot of
     mutually blocking fruit for the end. Unblocking alone says "go straight for
     the fruit in everyone's way", which is the one most likely to be refused.
-
-    *Improve.* Greedy commits early and cannot undo it, so the order is then
-    walked through every pairwise swap and every single-fruit relocation, taking
-    any that lowers the whole-sequence cost, until nothing does. n is at most 15
-    here so this is microseconds; it is worth having because the greedy answer
-    is regularly one swap off the best one.
-
-    ⚠️ **This orders picks, it does not verify them.** Whether a route exists is
-    `mission.Planner`'s job and it stays there — this model is a cheap geometric
-    proxy that runs in microseconds on positions from a camera, and the planner
-    is a kinematic replay that runs in ~150 ms on the real scene. Using the
-    proxy to decide a pick is safe would be exactly the mistake `mission.py`
-    exists to prevent.
     """
-    from mission import PARK
-
-    positions = {n: (s.est if isinstance(s, Seen) else np.asarray(s, float))
-                 for n, s in survey.items()}
-    if not positions:
-        return OrderedPlan()
-    start = np.asarray(PARK if start is None else start, float)
-
-    # --- greedy ---------------------------------------------------------------
-    remaining = set(positions)
-    here = start
+    remaining = set(names)
+    here = np.asarray(start, float)
     order = []
     while remaining:
         best, best_cost = None, np.inf
-        for n in remaining:
-            r = risk(n, positions, remaining)
+        for n in sorted(remaining):
+            block, crowd = exposure(n, positions, remaining)
             others = remaining - {n}
             unblocks = sum(_pair_risk(positions[m], positions[n])
                            for m in others)
-            cost = (W_RISK * r - W_UNBLOCK * unblocks
+            cost = (W_LOST * block + W_CROWD * crowd - 0.6 * W_LOST * unblocks
                     + W_TRAVEL * float(np.linalg.norm(positions[n] - here)))
             if cost < best_cost:
                 best, best_cost = n, cost
         order.append(best)
         remaining.discard(best)
         here = positions[best]
+    return order
 
-    greedy = tuple(order)
 
-    # --- improve --------------------------------------------------------------
-    if improve and len(order) > 2:
-        best_cost = _sequence_cost(order, positions, start)["cost"]
-        changed = True
-        while changed:
-            changed = False
-            for i in range(len(order)):
-                for j in range(len(order)):
-                    if i == j:
-                        continue
-                    trial = list(order)
-                    trial[i], trial[j] = trial[j], trial[i]      # swap
-                    c = _sequence_cost(trial, positions, start)["cost"]
-                    if c < best_cost - 1e-9:
-                        order, best_cost, changed = trial, c, True
-                        continue
-                    trial = list(order)
-                    trial.insert(j, trial.pop(i))                # relocate
-                    c = _sequence_cost(trial, positions, start)["cost"]
-                    if c < best_cost - 1e-9:
-                        order, best_cost, changed = trial, c, True
+def _local_search(order, positions, start):
+    """Hill-climb the greedy answer: every swap, every relocation, to a fixpoint.
 
-    # --- write it out ---------------------------------------------------------
-    plan = OrderedPlan(improved_from=greedy)
-    remaining = set(order)
-    here = start
-    for n in order:
-        r = risk(n, positions, remaining)
-        others = remaining - {n}
-        unblocks = sum(_pair_risk(positions[m], positions[n]) for m in others)
-        step = float(np.linalg.norm(positions[n] - here))
-        remaining.discard(n)
-        plan.steps.append(Step(fruit=n, pos=positions[n], risk=r,
-                               unblocks=unblocks, travel=step,
-                               remaining=len(remaining)))
-        here = positions[n]
+    Only used above `EXACT_MAX`. Kept because the exact solver is exponential
+    and something has to answer when a caller places more fruit than
+    `week4_place.MAX_FRUIT` allows.
+    """
+    order = list(order)
+    if len(order) <= 2:
+        return order
+    best = _sequence_cost(order, positions, start)["cost"]
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(order)):
+            for j in range(len(order)):
+                if i == j:
+                    continue
+                trial = list(order)
+                trial[i], trial[j] = trial[j], trial[i]          # swap
+                c = _sequence_cost(trial, positions, start)["cost"]
+                if c < best - 1e-9:
+                    order, best, changed = trial, c, True
+                    continue
+                trial = list(order)
+                trial.insert(j, trial.pop(i))                    # relocate
+                c = _sequence_cost(trial, positions, start)["cost"]
+                if c < best - 1e-9:
+                    order, best, changed = trial, c, True
+    return order
+
+
+def _solve_exact(names, positions, start):
+    """The provably cheapest order, by Held-Karp over subsets.
+
+    ⚠️ **The reason this is possible at all is that the cost of a pick depends
+    only on the *set* still standing, never on the path taken to get there.**
+    Given that, "which fruit are already picked" is a complete state, and the
+    number of states is 2^n rather than n!. For fifteen fruit that is 32768
+    against 1.3 trillion.
+
+    State is (set already picked, fruit picked last) — `last` is carried purely
+    for the travel term, which is the one part of the cost that is not a
+    function of the set alone.
+
+    Two precomputations make the inner loop a single vector op:
+
+      * `crowd[i][S]` and `block[i][S]` — what fruit `i` would face if exactly
+        `S` were still standing. Built by subset recurrence off the lowest set
+        bit, so each is one add (or one max) rather than a re-sum: O(n · 2^n)
+        instead of O(n^2 · 2^n).
+      * `step[S][i]` — the whole non-travel cost of picking `i` as the fruit
+        that completes `S`. The set still standing afterwards is the complement
+        of `S`, which is why this can be indexed by `S` directly.
+
+    Returns (order, seconds).
+    """
+    import time
+
+    t0 = time.perf_counter()
+    n = len(names)
+    P = np.array([positions[x] for x in names], float)
+
+    R = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                R[i, j] = _pair_risk(P[i], P[j])
+    dist = np.linalg.norm(P[:, None, :] - P[None, :, :], axis=2)
+    from_start = np.linalg.norm(P - np.asarray(start, float), axis=1)
+
+    full = 1 << n
+    crowd = np.zeros((n, full))
+    block = np.zeros((n, full))
+    for S in range(1, full):
+        low = (S & -S).bit_length() - 1
+        prev = S & (S - 1)
+        crowd[:, S] = crowd[:, prev] + R[:, low]
+        block[:, S] = np.maximum(block[:, prev], R[:, low])
+    np.clip(block, None, 1.0, out=block)
+
+    # Standing after `i` completes `S` is everything not in `S`.
+    comp = (full - 1) ^ np.arange(full)
+    step = (W_LOST * block[:, comp] + W_CROWD * crowd[:, comp]).T   # (full, n)
+
+    dp = np.full((full, n), np.inf)
+    par = np.zeros((full, n), dtype=np.int16)
+    for i in range(n):
+        dp[1 << i, i] = step[1 << i, i] + W_TRAVEL * from_start[i]
+
+    for S in range(1, full):
+        mem = [i for i in range(n) if S >> i & 1]
+        if len(mem) < 2:
+            continue
+        prevs = [S ^ (1 << i) for i in mem]
+        # (k, n): cost of arriving at each `mem[k]` from every possible `last`.
+        # Entries where `last` is not in the predecessor set are already inf, so
+        # they can never win — no masking needed.
+        cand = dp[prevs] + W_TRAVEL * dist[:, mem].T
+        j = cand.argmin(axis=1)
+        dp[S, mem] = cand[np.arange(len(mem)), j] + step[S, mem]
+        par[S, mem] = j
+
+    last = int(dp[full - 1].argmin())
+    order, S = [], full - 1
+    while S:
+        order.append(names[last])
+        S, last = S ^ (1 << last), int(par[S, last])
+    order.reverse()
+    return order, time.perf_counter() - t0
+
+
+def plan_order(survey, start=None, improve=True, exact=None):
+    """Decide what to pick first. Returns an `OrderedPlan`.
+
+    `survey` is `{name: position}` — whatever the deck camera came back with,
+    which is emphatically not the order the fruit were declared or placed in.
+
+    **What is minimised is expected fruit lost**, then crowding, then travel —
+    see the `W_LOST` block for why that is the right quantity and why summing a
+    risk score was not.
+
+    **How it is minimised depends on how many fruit there are.** At or under
+    `EXACT_MAX` the answer is *proved* optimal by `_solve_exact`; above it the
+    old greedy-plus-hill-climb runs instead and `OrderedPlan.optimal` says so.
+    The greedy order is computed either way and reported as `improved_from`,
+    because the honest question about any optimiser is what it bought over the
+    cheap thing.
+
+    ⚠️ **This orders picks, it does not verify them.** Whether a route exists is
+    `mission.Planner`'s job and it stays there — this model is a cheap geometric
+    proxy that runs in milliseconds on positions from a camera, and the planner
+    is a kinematic replay that runs in ~150 ms on the real scene. Using the
+    proxy to decide a pick is safe would be exactly the mistake `mission.py`
+    exists to prevent. "Optimal" here means optimal *under the proxy*, and the
+    only thing that settles whether that is worth anything is `week4_order.py`,
+    which flies both orders.
+    """
+    import time
+
+    from mission import PARK
+
+    positions = {n: (s.est if isinstance(s, Seen) else np.asarray(s, float))
+                 for n, s in survey.items()}
+    if not positions:
+        return OrderedPlan(optimal=True)
+    start = np.asarray(PARK if start is None else start, float)
+
+    names = sorted(positions)
+    t0 = time.perf_counter()
+    greedy = tuple(_greedy(names, positions, start))
+
+    # Stage 1: the relaxation, solved exactly where that is affordable.
+    use_exact = (len(names) <= EXACT_MAX) if exact is None else exact
+    seeds = [list(greedy)]
+    relaxed = None
+    if use_exact:
+        relaxed, _s = _solve_exact(names, positions, start)
+        seeds.append(list(relaxed))
+
+    # Stage 2: refine against the **true** objective, in which a refused pick
+    # leaves its fruit standing. `_solve_exact` cannot see that — its whole
+    # speed comes from the state being a set — so the exact answer is a very
+    # good starting point rather than the finish line. Both seeds are refined
+    # and the better one wins, which costs microseconds and means the result is
+    # never worse than either stage alone.
+    best, best_cost = None, np.inf
+    for seed in seeds:
+        cand = _local_search(seed, positions, start) if improve else seed
+        c = _sequence_cost(cand, positions, start)["cost"]
+        if c < best_cost:
+            best, best_cost = cand, c
+    order = best
+    solve_s = time.perf_counter() - t0
+
+    # ⚠️ "Optimal" is claimed only when the exact stage ran **and** refining it
+    # against the true objective changed nothing. That is the honest reading:
+    # the relaxation's optimum is also a local optimum of the real thing. If
+    # refinement moved it, the exact answer was optimal for a problem this is
+    # not, and saying so would be worse than saying nothing.
+    proved = bool(use_exact and relaxed is not None
+                  and tuple(order) == tuple(relaxed))
+    plan = OrderedPlan(improved_from=greedy, optimal=proved, solve_s=solve_s)
+    # The per-step table is read straight off the true walk, so what it prints
+    # is what the optimiser was scored on — including a refused fruit still
+    # counting against everything after it.
     s = _sequence_cost(order, positions, start)
+    here = start
+    for w in s["steps"]:
+        n = w["fruit"]
+        others = {m for m in order if m != n}
+        unblocks = sum(_pair_risk(positions[m], positions[n]) for m in others)
+        plan.steps.append(Step(fruit=n, pos=positions[n], risk=w["crowd"],
+                               unblocks=unblocks, travel=w["travel"],
+                               remaining=w["standing"], block=w["block"]))
+        here = positions[n]
     plan.total_risk = s["total_risk"]
     plan.worst_risk = s["worst_risk"]
     plan.travel_m = s["travel_m"]
+    plan.lost = s["lost"]
+    plan.cost = s["cost"]
     return plan
 
 
@@ -693,25 +1383,41 @@ def _assert_inert(args):
         if (abs(base.body_mass[i] - both.body_mass[j]) > 1e-12
                 or not np.allclose(base.body_inertia[i], both.body_inertia[j])):
             moved.append(name)
-    ok = base_coll == both_coll and not moved
 
-    print(f"\n  --- the housings change nothing but the picture ---")
+    # ⚠️ **The DOF count is the load-bearing assertion now that the head moves.**
+    # `mink.Configuration` in `reach.Reacher` is built over the whole model, so
+    # a pan-tilt built from hinge joints would hand the IK solver two extra
+    # joints it has no reason to leave anywhere in particular — and the coupling
+    # between "where the arm is reaching" and "where the camera is pointing"
+    # would show up only as a survey quietly missing fruit. A mocap body has no
+    # DOFs. If this line ever moves, the head has been rebuilt from joints and
+    # every survey in the repo is suspect.
+    dofs_ok = (base.nq, base.nv) == (both.nq, both.nv)
+    ok = base_coll == both_coll and not moved and dofs_ok
+
+    print(f"\n  --- the cameras change nothing but the picture ---")
     print(f"  drawn geoms      {base.ngeom} -> {both.ngeom}  "
           f"(+{both.ngeom - base.ngeom})")
     print(f"  collidable geoms {base_coll} -> {both_coll}"
           f"{'' if base_coll == both_coll else '   <-- CHANGED'}")
     print(f"  total mass       {base.body_mass.sum():.6f} -> "
           f"{both.body_mass.sum():.6f} kg")
+    print(f"  nq / nv          {base.nq}/{base.nv} -> {both.nq}/{both.nv}"
+          f"{'' if dofs_ok else '   <-- THE HEAD HAS DOFs, SEE ABOVE'}")
+    print(f"  mocap bodies     {base.nmocap} -> {both.nmocap}  "
+          f"(the head is the new one, appended last so the stems keep "
+          f"indices 0..{base.nmocap - 1})")
     i = both.body("wrist3_link").id
     print(f"  wrist3_link      {both.body_mass[i]:.6f} kg, inertia "
           f"{both.body_inertia[i].round(8)}")
+    print(f"  deck_head        {both.body('deck_head').mass[0]:.6f} kg")
     print(f"  bodies whose mass or inertia moved: {moved or 'none'}")
     print(f"  {'ok' if ok else 'FAIL — a camera has become part of the physics'}")
     return ok
 
 
 def gate(args):
-    """Does one frame from the chassis find the row? And where does it fail?"""
+    """Does the mast find the row? And where does it fail?"""
     import mujoco
 
     from week4_place import Crop, auto_layout
@@ -770,25 +1476,43 @@ def gate(args):
         for y, z in cluster:
             crop.place(y, z, quiet=True)
         mujoco.mj_forward(model, data)
-        seen2, rep2 = survey.look(data, names)
         print(f"\n  --- {len(crop.placed)} fruit, four of them clustered at "
               f"70 mm pitch ---")
-        print(f"  found {len(seen2)}/{len(crop.placed)}  "
-              f"({len(rep2['usable'])} usable blobs for "
-              f"{len(crop.placed)} fruit)")
-        print(f"  ⚠️ a deck camera cannot separate touching fruit at 1.3 m. "
-              f"That is the")
-        print(f"     limit of this sensor and the reason the wrist camera "
-              f"still goes in —")
-        print(f"     it is not a bug to be tuned out at this range.")
-        for line in rep2["log"]:
+
+        seen2, rep2 = survey.look(data, names)
+        print(f"  bolted down, one frame:   found {len(seen2)}/"
+              f"{len(crop.placed)}  ({len(rep2['usable'])} usable blobs)")
+
+        # The same cluster, with the head allowed to move. This is the pair of
+        # numbers the articulation exists for, and printing them side by side is
+        # the only way the claim stays honest as either half changes.
+        head = DeckHead(model, data)
+        seen3, rep3 = survey.scan(data, names, head=head)
+        head.home(data)
+        mujoco.mj_forward(model, data)
+        print(f"  head scan, {len(rep3['poses'])} poses:      found "
+              f"{len(seen3)}/{len(crop.placed)}  "
+              f"({len(rep3['clusters'])} fused clusters, "
+              f"{rep3['slew_s']:.1f} s of head slew, arm still parked)")
+        gained = sorted(set(seen3) - set(seen2))
+        if gained:
+            print(f"  the scan recovered: {', '.join(gained)}")
+        print(f"  ⚠️ a deck camera still cannot separate *touching* fruit at "
+              f"1.3 m, from any")
+        print(f"     angle — moving the viewpoint 90 mm does not undo a 70 mm "
+              f"separation at")
+        print(f"     1300 mm. That is the limit of this sensor and the reason "
+              f"the wrist camera")
+        print(f"     still goes in; the head widens the band, it does not "
+              f"remove the floor.")
+        for line in rep3["log"]:
             print(f"    {line}")
     finally:
         survey.close()
 
     print(f"\n{'=' * 78}")
     print(f"  DECK GATE: {'PASS' if ok else 'FAIL'} — a spread row is found "
-          f"whole in one frame")
+          f"whole from the mast")
     return 0 if ok else 1
 
 
@@ -889,15 +1613,28 @@ def vs_sweep(args):
     truth = {n: data.body(n).xpos.copy() for n in crop.placed}
     detector = HSVDetector()
 
-    # --- the deck: one frame, arm stationary ---------------------------------
+    # --- the deck: a head scan, arm stationary -------------------------------
+    #
+    # ⚠️ Both halves of this are reported, because the head does cost *something*
+    # and folding it into "free" would be the same kind of quiet arithmetic this
+    # module exists to undo. The claim is not that the survey is free — it is
+    # that it costs no **arm** seconds, which is the quantity a cycle time is
+    # made of and the quantity the wrist sweep spends 24 of.
     survey = DeckSurvey(model, detector=HSVDetector())
     try:
-        seen, _rep = survey.look(data, list(crop.placed))
+        one, _rep1 = survey.look(data, list(crop.placed))
+        head = DeckHead(model, data)
+        seen, rep = survey.scan(data, list(crop.placed), head=head)
+        head.home(data)
+        mujoco.mj_forward(model, data)
     finally:
         survey.close()
-    print(f"\n  --- one deck frame ---")
-    print(f"  {len(seen)}/{len(crop.placed)} found · arm moved 0.000 m · "
-          f"0.00 s of arm time")
+    print(f"\n  --- from the mast, arm stationary ---")
+    print(f"  one frame, head fixed   {len(one)}/{len(crop.placed)} found · "
+          f"arm moved 0.000 m · 0.00 s of arm time")
+    print(f"  {len(rep['poses'])}-pose head scan     "
+          f"{len(seen)}/{len(crop.placed)} found · arm moved 0.000 m · "
+          f"0.00 s of arm time, {rep['slew_s']:.2f} s of head slew")
 
     # --- the wrist: a sweep --------------------------------------------------
     # The wrist camera sees 0.31 x 0.23 m at the 0.28 m staging distance
@@ -1138,7 +1875,284 @@ def shot(args):
         path = out_dir / "deck_cam_mast.png"
         cv2.imwrite(str(path), cv2.cvtColor(r.render(), cv2.COLOR_RGB2BGR))
         written.append(path.name)
+
+        # The head itself, at the two extremes of the scan. Two stills rather
+        # than one because articulation is the thing a still cannot show — the
+        # only way to make "it looks around" visible in a static image is to
+        # take the image twice and let the yoke be somewhere different.
+        head = DeckHead(model, data)
+        close = mujoco.MjvCamera()
+        close.lookat[:] = [DECK_PAN_AXIS_X + 0.05, 0.0, DECK_MOUNT[2]]
+        close.distance, close.azimuth, close.elevation = 0.75, -50.0, -8.0
+        for tag, (pan, tilt) in (("home", (0.0, 0.0)),
+                                 ("panned", SCAN_POSES[-1])):
+            head.aim(data, pan, tilt)
+            mujoco.mj_forward(model, data)
+            r.update_scene(data, camera=close)
+            path = out_dir / f"deck_cam_head_{tag}.png"
+            cv2.imwrite(str(path), cv2.cvtColor(r.render(), cv2.COLOR_RGB2BGR))
+            written.append(path.name)
+        head.home(data)
+        mujoco.mj_forward(model, data)
     print("  wrote " + ", ".join(written))
+    print(f"  deck_cam_head_home.png / _panned.png are the same hardware at "
+          f"pan 0 and pan {SCAN_POSES[-1][0]:+.0f}, tilt "
+          f"{SCAN_POSES[-1][1]:+.0f} — the yoke is what moves the lens, and "
+          f"moving the lens is the whole reason the head is there.")
+
+
+def _cluster_row(n, seed, tight=0.10):
+    """A layout with fruit deliberately packed, for testing what a scan sees.
+
+    The old 200 mm placement minimum made this arrangement impossible, which is
+    why the fixed camera was never pushed on it. It is now the normal case.
+    """
+    from week4_place import GUARANTEED_HALF_Y, GUARANTEED_Z
+
+    rng = np.random.default_rng(seed)
+    y_half, (z_lo, z_hi) = GUARANTEED_HALF_Y, GUARANTEED_Z
+
+    out, tries = [], 0
+    while len(out) < n and tries < 4000:
+        tries += 1
+        # Mostly grow the cluster off an existing fruit, so the layout is packed
+        # rather than merely random — a uniform scatter over this box would put
+        # almost nothing inside the band being tested.
+        if out and rng.random() < 0.6:
+            base = out[rng.integers(len(out))]
+            a = rng.uniform(0, 2 * np.pi)
+            d = rng.uniform(0.072, tight)
+            y, z = base[0] + d * np.cos(a), base[1] + d * np.sin(a)
+        else:
+            y, z = rng.uniform(-y_half, y_half), rng.uniform(z_lo, z_hi)
+        if not (-y_half <= y <= y_half and z_lo <= z <= z_hi):
+            continue
+        # 72 mm is just past touching; closer than that and they interpenetrate.
+        if any(np.hypot(y - a, z - b) < 0.072 for a, b in out):
+            continue
+        out.append((y, z))
+    return out
+
+
+# Candidate scan patterns, in (pan, tilt) degrees from home. The head is on a
+# 100 mm yoke, so each of these is also a viewpoint 0-90 mm from the last one.
+SCAN_PATTERNS = {
+    "fixed (1 pose)": ((0.0, 0.0),),
+    "pan +-20 (3)": ((0.0, 0.0), (-20.0, 0.0), (20.0, 0.0)),
+    "pan +-35 (3)": ((0.0, 0.0), (-35.0, 0.0), (35.0, 0.0)),
+    "pan +-35 (5)": ((0.0, 0.0), (-18.0, 0.0), (18.0, 0.0),
+                     (-35.0, 0.0), (35.0, 0.0)),
+    "cross (5)": ((0.0, 0.0), (-25.0, 0.0), (25.0, 0.0),
+                  (0.0, -12.0), (0.0, 12.0)),
+    "box (5)": ((0.0, 0.0), (-25.0, -10.0), (25.0, -10.0),
+                (-25.0, 10.0), (25.0, 10.0)),
+}
+
+
+def scan_cmd(args):
+    """Is looking around worth it? Count what each pattern finds.
+
+    ⚠️ **The thing to be sceptical about is whether articulation buys anything
+    at all**, and the reason is geometric: a camera rotating about its own
+    optical centre sees a different part of the room but has exactly the same
+    view of everything it can still see. Occlusions do not move, blobs that
+    merge still merge. Panning alone is worth nothing here, because one fixed
+    frame already covers the whole placement band with room to spare — that is
+    what `DECK_FOVY` was chosen for.
+
+    What can be worth something is the 100 mm yoke, which turns pan into
+    *translation*. This measures whether it does, on the layouts that actually
+    hurt: clusters at 72-100 mm centres, which the old spacing rule made
+    impossible and which `week4_order`'s 75 mm row showed the fixed camera
+    losing three fruit of six to.
+    """
+    import mujoco
+
+    from week4_place import Crop
+
+    model, names = _scene()
+    survey = DeckSurvey(model)
+    print(f"\n  --- what looking around finds, {args.n} clustered fruit x "
+          f"{args.trials} layouts ---")
+    print(f"  fruit are placed 72-100 mm apart on purpose: that is the band the "
+          f"old\n  200 mm rule forbade, and the band the fixed camera loses "
+          f"fruit in.\n")
+    print(f"  {'pattern':<16} {'poses':>6} {'found':>9} {'err mm':>8} "
+          f"{'worst mm':>9} {'phantom':>8} {'slew s':>8}")
+
+    for label, poses in SCAN_PATTERNS.items():
+        tot = seen_n = phantom = 0
+        errs = []
+        slew = 0.0
+        for t in range(args.trials):
+            data, q, row = _fresh(model, names)
+            crop = Crop(model, data, row, names)
+            crop.park_all()
+            for y, z in _cluster_row(args.n, seed=args.seed + t):
+                crop.place(y, z, quiet=True)
+            mujoco.mj_forward(model, data)
+            standing = list(crop.placed)
+            head = DeckHead(model, data)
+            seen, rep = survey.scan(data, standing, head=head, poses=poses)
+            head.home(data)
+            mujoco.mj_forward(model, data)
+            tot += len(standing)
+            seen_n += len(seen)
+            slew += rep["slew_s"]
+            errs += [s.err_mm for s in seen.values()]
+            # A cluster that matched no truss is a fruit the survey invented.
+            phantom += sum(1 for line in rep["log"] if "UNASSOCIATED" in line)
+        print(f"  {label:<16} {len(poses):>6} {seen_n:>4}/{tot:<4} "
+              f"{np.mean(errs):>8.1f} {max(errs):>9.1f} {phantom:>8} "
+              f"{slew / args.trials:>8.2f}")
+
+    print(f"\n  `found` is the count that matters — a fruit the survey never "
+          f"separates\n  is a fruit the arm is never sent to. `phantom` is the "
+          f"opposite failure and\n  is the one to watch when adding poses: two "
+          f"sightings of one fruit that\n  fail to fuse become two commands to "
+          f"pick the same tomato.")
+    print(f"\n  ⚠️ The arm does not move for any of this. `slew s` is the head's "
+          f"own\n  travel at DECK_SLEW_DEG_S={DECK_SLEW_DEG_S:.0f} deg/s — "
+          f"compare it against the\n  24.14 s of *arm* motion a wrist sweep "
+          f"costs in `--vs-sweep`.")
+
+
+def eclipse_cmd(args):
+    """Can the head see round the arm? The survey's one hard precondition.
+
+    `parked()` refuses to survey unless the arm is at park, because staged
+    mid-row the arm eclipses a fruit and the survey comes back one short with
+    nothing to say so. That rule costs a re-park every time the crop changes.
+    A head that can look from a different position is the first thing that could
+    honestly relax it — but only if the yoke's translation is enough to see past
+    an arm that is much closer to the camera than the fruit are.
+    """
+    import mujoco
+
+    from camera import stage
+    from mission import STAGE_X
+    from week4_place import Crop, auto_layout
+
+    model, names = _scene()
+    survey = DeckSurvey(model)
+    print(f"\n  --- can the head see round the arm? ---")
+    print(f"  {'arm':<22} {'pattern':<16} {'found':>9} {'err mm':>8}")
+
+    for arm_label, staged_at in (("parked", None), ("staged mid-row", 0.0),
+                                 ("staged high", 0.30)):
+        for label, poses in (("fixed (1 pose)", SCAN_PATTERNS["fixed (1 pose)"]),
+                             ("pan +-35 (5)", SCAN_PATTERNS["pan +-35 (5)"])):
+            data, q, row = _fresh(model, names)
+            crop = Crop(model, data, row, names)
+            crop.apply(auto_layout(args.n, seed=args.seed))
+            mujoco.mj_forward(model, data)
+            if staged_at is not None:
+                stage(model, data, q,
+                      np.array([STAGE_X, staged_at, 0.60]), row=row,
+                      speed=0.5, reset="arm")
+            standing = list(crop.placed)
+            head = DeckHead(model, data)
+            seen, _rep = survey.scan(data, standing, head=head, poses=poses)
+            errs = [s.err_mm for s in seen.values()] or [float("nan")]
+            print(f"  {arm_label:<22} {label:<16} {len(seen):>4}/"
+                  f"{len(standing):<4} {np.mean(errs):>8.1f}")
+    print(f"\n  If the scan recovers what the fixed camera loses to the arm, "
+          f"`parked()`\n  has an alternative. If it does not, the rule stands "
+          f"and the head's value\n  is elsewhere — say so either way.")
+
+
+def optimal_cmd(args):
+    """How far from optimal was the old hill-climb? And what does exact cost?
+
+    ⚠️ **"Optimal" here means optimal under the proxy and nothing more.** The
+    only thing that settles whether a better order harvests more tomatoes is
+    `week4_order.py`, which flies both. What this measures is the search, not
+    the model: given the cost function, how much was being left on the table by
+    stopping at a local minimum.
+    """
+    import time
+
+    from mission import PARK
+
+    start = np.asarray(PARK, float)
+    rng = np.random.default_rng(args.seed)
+    print(f"\n  --- exact against the hill-climb, {args.trials} layouts each ---")
+    print(f"  cost is expected fruit lost (W_LOST) + crowding + travel; lower "
+          f"is better.\n  `lost` is the part that is whole tomatoes.\n")
+    print(f"  {'n':>3} {'method':<22} {'cost':>8} {'lost':>7} {'tour m':>8} "
+          f"{'ms':>8} {'beaten':>8}")
+
+    for n in args.sizes:
+        rows = {"placement order": [], "greedy": [], "greedy + hill-climb": [],
+                "exact on relaxation": [], "exact + refined (ships)": []}
+        times = {k: 0.0 for k in rows}
+        beaten = {k: 0 for k in rows}
+        for t in range(args.trials):
+            pos = {}
+            for i in range(n):
+                # Clustered, not uniform: a scattered row has no ordering
+                # problem to solve and every method ties.
+                if pos and rng.random() < 0.5:
+                    base = pos[list(pos)[rng.integers(len(pos))]]
+                    a = rng.uniform(0, 2 * np.pi)
+                    d = rng.uniform(0.075, 0.16)
+                    y, z = base[1] + d * np.cos(a), base[2] + d * np.sin(a)
+                    y = float(np.clip(y, -0.37, 0.37))
+                    z = float(np.clip(z, 0.50, 0.70))
+                else:
+                    y, z = rng.uniform(-0.37, 0.37), rng.uniform(0.50, 0.70)
+                pos[f"p{i:02d}"] = np.array([ROW_X, y, z])
+
+            names = sorted(pos)
+            orders = {}
+            t0 = time.perf_counter()
+            orders["placement order"] = list(names)
+            times["placement order"] += time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            g = _greedy(names, pos, start)
+            times["greedy"] += time.perf_counter() - t0
+            orders["greedy"] = g
+
+            t0 = time.perf_counter()
+            orders["greedy + hill-climb"] = _local_search(g, pos, start)
+            times["greedy + hill-climb"] += time.perf_counter() - t0
+
+            ex, secs = _solve_exact(names, pos, start)
+            times["exact on relaxation"] += secs
+            orders["exact on relaxation"] = ex
+
+            t0 = time.perf_counter()
+            orders["exact + refined (ships)"] = _local_search(ex, pos, start)
+            times["exact + refined (ships)"] += secs + time.perf_counter() - t0
+
+            best = min(_sequence_cost(o, pos, start)["cost"]
+                       for o in orders.values())
+            for k, o in orders.items():
+                s = _sequence_cost(o, pos, start)
+                rows[k].append(s)
+                if s["cost"] > best + 1e-9:
+                    beaten[k] += 1
+
+        for k in ("placement order", "greedy", "greedy + hill-climb",
+                  "exact on relaxation", "exact + refined (ships)"):
+            rs = rows[k]
+            print(f"  {n:>3} {k:<22} {np.mean([r['cost'] for r in rs]):>8.3f} "
+                  f"{np.mean([r['lost'] for r in rs]):>7.3f} "
+                  f"{np.mean([r['travel_m'] for r in rs]):>8.2f} "
+                  f"{1000 * times[k] / args.trials:>8.1f} "
+                  f"{beaten[k]:>4}/{args.trials:<3}")
+        print()
+
+    print("  `beaten` counts layouts where that method did not reach the best")
+    print("  cost any method found.")
+    print()
+    print("  ⚠️ **`exact on relaxation` is expected to lose rows here, and that")
+    print("  is the finding rather than a bug.** It is optimal for the problem")
+    print("  where every attempt removes its fruit; the column it is scored in")
+    print("  is the real one, where a refused pick leaves the fruit standing and")
+    print("  blocking. The gap between those two rows is the cost of that one")
+    print("  assumption — see `_sequence_cost`.")
 
 
 def main():
@@ -1147,6 +2161,17 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--optimal", action="store_true",
+                    help="exact solver against the hill-climb it replaced")
+    ap.add_argument("--sizes", type=int, nargs="+",
+                    default=[6, 9, 12, 15],
+                    help="row sizes for --optimal")
+    ap.add_argument("--scan", action="store_true",
+                    help="score scan patterns — sets SCAN_POSES")
+    ap.add_argument("--eclipse", action="store_true",
+                    help="can the head see round a staged arm?")
+    ap.add_argument("--trials", type=int, default=6,
+                    help="layouts per pattern for --scan")
     ap.add_argument("--pairs", action="store_true",
                     help="sweep what a neighbour costs the planner")
     ap.add_argument("--corridor", action="store_true",
@@ -1170,7 +2195,9 @@ def main():
     os.environ.setdefault("MUJOCO_GL", "egl")
     for flag, fn in (("pairs", pairs), ("corridor", corridor),
                      ("mounts", mounts), ("sweep", sweep),
-                     ("vs_sweep", vs_sweep), ("shot", shot)):
+                     ("vs_sweep", vs_sweep), ("shot", shot),
+                     ("scan", scan_cmd), ("eclipse", eclipse_cmd),
+                     ("optimal", optimal_cmd)):
         if getattr(args, flag):
             return fn(args) or 0
     return gate(args)

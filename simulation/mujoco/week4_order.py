@@ -1,39 +1,79 @@
 #!/usr/bin/env python3
 """Does picking in the deck camera's order beat picking in placement order?
 
-`deck_cam.plan_order` produces a number — total risk — and a number a model
-produces about itself is not evidence. This flies the same layouts twice, once
-in the order the deck camera chose and once in the order the fruit happen to be
-named, and reports what actually came out of the crate.
+`deck_cam.plan_order` produces a number — expected refusals — and a number a
+model produces about itself is not evidence. This flies the same layouts twice,
+once in the order the deck camera chose and once in the order the fruit happen
+to be named, and reports what actually came out of the crate.
 
     ./.venv/bin/python simulation/mujoco/week4_order.py
-    ./.venv/bin/python simulation/mujoco/week4_order.py --layouts 6 --fruit 10
+    ./.venv/bin/python simulation/mujoco/week4_order.py --band blocked
+    ./.venv/bin/python simulation/mujoco/week4_order.py --band loose
     ./.venv/bin/python simulation/mujoco/week4_order.py --spread   # easy rows
 
-⚠️ **The layouts are deliberately clustered, and that is the point.** On a row
-whose closest pair is 220 mm every order is the same order — the pair sweep in
-`deck_cam` shows a neighbour costs nothing past 170 mm, so there is nothing to
-optimise and this script would measure noise. `cluster_layout` builds rows with
-pairs in the 90-150 mm band where the sweep says a neighbour decides whether a
-pick is refused. Those rows were **impossible to build at all** until the 200 mm
-placement minimum was removed, which is the other reason this file is new.
+⚠️ **The answer depends on how tight the row is, and a single "clustered"
+number hides that.** On a row whose closest pair is 220 mm every order is the
+same order — the pair sweep in `deck_cam` shows a neighbour costs nothing past
+170 mm. On a row where everything is inside 95 mm, every order is also the same
+order, for the opposite reason: there is no sequence that saves a fruit which is
+blocked whatever you do. Ordering can only earn anything in between. `BANDS`
+names the three regimes and `--band` selects one; rows in any of them were
+**impossible to build at all** until the 200 mm placement minimum was removed,
+which is the other reason this file is new.
 
-⚠️ **Both arms of the comparison get the deck camera's positions.** The only
-thing that differs is the *order*. Handing the placement-order arm ground truth
-instead would be comparing two changes at once and neither number would mean
-anything.
+⚠️ **Both arms get the deck camera's positions, and the code did not always do
+that.** The control arm is `deck_order=False`, not `deck=None`. Passing
+`deck=None` — which is what this file did first — also switches that arm's
+staging poses over to `crop.placed`, the operator's ground truth, so the control
+would be running with *better* position knowledge than the arm under test. Two
+changes at once, and the better-informed one is the baseline.
 
-What it produced on 3 layouts x 6 fruit at speed 0.15, 18 attempts per arm:
+⚠️ **Two results were thrown away getting here, and both were thrown away for
+the same reason: the row was not what the label said.** The first ran the
+control on ground truth (above). The second fixed that and still came back null
+— 19 refusals against 19 — because `cluster_layout` aimed pairs at 90-150 mm
+without enforcing a floor on the *incidental* pairs eight fruit make in a small
+envelope, so rows labelled "clustered" had closest pairs of 76-97 mm. That is
+the blocked band, where by construction no order helps, reported as though it
+were the contested one. The floor is now checked pair by pair; see
+`cluster_layout`.
 
-    order              clean    crated   refused   disturbed
-    deck-planned       11/18       11         2           0
-    placement order    10/18       10         6           0
+An earlier 3-layout run at 6 fruit, before either fix, produced 2 refusals
+against 6. That number is **not** quoted as a result here because the run that
+produced it had the ground-truth control, and a measurement taken against a
+baseline that was handed the answer is not a measurement.
 
-**Refusals are the signal, not the clean rate.** One fruit of difference on n=18
-is noise; 2 refusals against 6 is the mechanism the pair sweep predicts. And the
-per-layout split matters more than the total — at 112 mm the two orders tied,
-because that spacing costs a fallback route but never a refusal, so there was
-nothing for an ordering to win.
+**What it produced once both were fixed** — `--band contested`, 4 layouts x 8
+fruit, 32 attempts per arm:
+
+    order              clean    crated   refused   disturbed   forecast
+    deck-planned       19/32       19        12         0        0.00
+    placement order    18/32       18        12         0          —
+
+**A tie — and the corrected cost model predicted the tie exactly.** Its forecast
+gain was 0.00 fruit on every one of the four layouts, and the measured refusal
+difference was 0. The *old* model, on these same layouts, forecast a 3.33-fruit
+gain that never appeared. So the value of the rewrite is not that the robot
+harvests more; it is that the planner stopped claiming it would.
+
+The reason it forecasts zero is in `deck_cam.BLOCKED_M`: `_pair_risk` is a
+function of the separation vector and therefore symmetric, so at 100 mm it
+scores both fruit of a pair as blocked — while the sweep it was fitted to says
+*one of them plans fine*. The model cannot express the asymmetry the ordering
+exists to exploit, so it finds no ordering worth having, and `deck_cam
+--optimal` shows exactly that: every method from placement order to the exact
+solver produces an identical expected loss.
+
+⚠️ So this file is currently doing its job by returning a negative. The
+machinery is right, the search is near-exact, and the thing it is optimising has
+no ordering signal in it. The next measurement is `--pairs` recording *which* of
+a close pair gets refused rather than just that one does.
+
+⚠️ **Unexplained, and left in rather than tidied away:** the deck-ordered arm
+ran a 16.3 s mean cycle against 21.0 s, holding direction on three layouts of
+four. That should be impossible — `mission.park_arm` teleports between picks, so
+tour length cannot reach the clock. Route complexity is the plausible mechanism
+and the per-layout magnitudes are too big for it. Not traced, not claimed.
 """
 
 from __future__ import annotations
@@ -49,16 +89,40 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def cluster_layout(n, seed=0, tries=4000):
-    """`n` fruit with several pairs inside the band where order matters.
+# The tightness bands, in metres, centre to centre. Named because the answer
+# turns out to depend on which one you sample, and a single "clustered" number
+# hides that completely — see `main`.
+#
+#   blocked    everything is inside BLOCKED_M of something. Both orders lose the
+#              same fruit because there is no order that saves them.
+#   contested  straddles the 120 mm at which a square-on pick starts being
+#              refused. This is the band the pair sweep says order decides.
+#   loose      outside CROWDED_M. Nothing blocks anything; the control.
+BANDS = {
+    "blocked": (0.075, 0.095),
+    "contested": (0.100, 0.150),
+    "loose": (0.175, 0.260),
+}
+
+
+def cluster_layout(n, seed=0, tries=4000, band="contested"):
+    """`n` fruit with several pairs inside `band`, and none tighter.
 
     Half the fruit are seeded anywhere in the measured envelope; the rest are
-    hung deliberately close to one already placed — 90 to 150 mm, which
-    straddles the 120 mm at which a square-on pick starts being refused.
-    """
-    from week4_place import (MARGINAL_HALF_Y, MARGINAL_Z, check, zone)
-    from plant_row import ROW_X
+    hung deliberately close to one already placed.
 
+    ⚠️ **The floor is enforced, not assumed.** `week4_place.check` only refuses
+    fruit closer than 70 mm (touching), so a generator that merely *aims* at
+    90-150 mm still produces incidental pairs far tighter once eight fruit are
+    in the envelope. The first six-layout A/B was run this way and came back
+    with closest pairs of 76-97 mm on rows labelled "90-150" — which is the
+    blocked band, where by construction no order can help, reported as though it
+    were the contested one. Every pair is now checked against the band's floor.
+    """
+    from plant_row import ROW_X
+    from week4_place import MARGINAL_HALF_Y, MARGINAL_Z, check, zone
+
+    lo, hi = BANDS[band] if isinstance(band, str) else band
     rng = np.random.default_rng(seed)
     placed = {}
     out = []
@@ -66,6 +130,10 @@ def cluster_layout(n, seed=0, tries=4000):
     def put(y, z):
         ok, _why, _zn = check(y, z, placed)
         if not ok or zone(y, z) is None:
+            return False
+        # The floor. Applies to every pair in the row, not just the one being
+        # aimed at, which is the whole point.
+        if any(np.hypot(y - p[1], z - p[2]) < lo - 1e-9 for p in placed.values()):
             return False
         name = f"p{len(out):02d}"
         placed[name] = np.array([ROW_X, y, z])
@@ -83,7 +151,7 @@ def cluster_layout(n, seed=0, tries=4000):
             break
         anchor = placed[list(placed)[rng.integers(len(placed))]]
         theta = float(rng.uniform(0, 2 * np.pi))
-        d = float(rng.uniform(0.090, 0.150))
+        d = float(rng.uniform(lo, hi))
         put(float(anchor[1] + d * np.cos(theta)),
             float(anchor[2] + d * np.sin(theta)))
     return out
@@ -124,8 +192,10 @@ def run_one(layout, ordered, args):
     planner's warm-started IK configuration from the first into the second. That
     is a real difference and it is not the one being measured.
     """
+    import mujoco
+
     from camera import SensorCamera
-    from deck_cam import DeckSurvey, plan_order, score_order
+    from deck_cam import DeckHead, DeckSurvey, plan_order, score_order
     from week3_perceive import build_detector
     from week4_place import harvest_placed, pool_trusses
 
@@ -143,14 +213,28 @@ def run_one(layout, ordered, args):
     # the order differs. The survey is also what scores the two orders against
     # the geometric model, so the prediction and the outcome come from the same
     # frame.
-    seen_map, _rep = deck.look(data, list(crop.placed))
+    # ⚠️ `scan`, not `look`, and it has to match what `harvest_placed` does or
+    # the prediction is scored against a survey the arm never used. The two
+    # surveys do not see the same fruit on a clustered row — that is the whole
+    # point of the head — so a one-frame prediction next to a scanned harvest
+    # would be comparing two different rows.
+    head = DeckHead(model, data)
+    seen_map, _rep = deck.scan(data, list(crop.placed), head=head)
+    head.home(data)
+    mujoco.mj_forward(model, data)
     predicted = plan_order(seen_map)
     baseline = score_order([n for n in crop.placed if n in seen_map], seen_map)
 
     try:
+        # ⚠️ **`deck` for both arms, always.** The control differs by
+        # `deck_order` and by nothing else. Passing `deck=None` here — which is
+        # what this file did first — also hands the control arm `crop.placed`,
+        # the operator's ground truth, so it would be running with *better*
+        # position knowledge than the arm under test. The first six-layout
+        # result was collected that way and had to be thrown out.
         rows = harvest_placed(model, data, row, crop, park_q, speed=args.speed,
                               sensor=sensor, detector=detector, seed=0,
-                              deck=deck if ordered else None)
+                              deck=deck, deck_order=ordered)
     finally:
         deck.close()
         if sensor is not None:
@@ -192,21 +276,37 @@ def main():
     ap.add_argument("--spread", action="store_true",
                     help="use auto_layout's spread rows instead of clustered "
                          "ones — the control, where order should NOT matter")
+    ap.add_argument("--band", default="contested", choices=sorted(BANDS),
+                    help="how tight the clustered rows are. 'contested' is the "
+                         "band the pair sweep says order decides; 'blocked' is "
+                         "tighter than any order can fix; 'loose' is the "
+                         "second control")
     ap.add_argument("--seen", action="store_true",
                     help="wrist perception in the loop as well")
     ap.add_argument("--detector", default="hsv", choices=["hsv", "yolo"])
-    # ⚠️ 0.15, the speed every pick rate in this repo was taken at. Raising it
-    # past mission.CARRY_SPEED's 0.25 cliff makes fruit fly out of the gripper,
-    # which would swamp the ordering effect with a payload-retention effect.
+    # ⚠️ 0.15, the speed every pick rate in this repo was taken at.
+    #
+    # This used to carry a warning that raising it past `mission.CARRY_SPEED`'s
+    # 0.25 would make fruit fly out of the gripper and swamp the ordering effect
+    # with a payload-retention one. That was true and is now much less so:
+    # `greenhouse.PAD_SOLREF` was the cause and `week4_grip.py` fixed it. The
+    # remaining `turn`-leg instability does not scale with speed either — 2.07
+    # m/s at 0.40 against 2.06 at 0.25. Raising this to shorten a run is now a
+    # defensible trade rather than a way to corrupt the measurement, but the
+    # default stays where every other number was taken.
     ap.add_argument("--speed", type=float, default=0.15)
     args = ap.parse_args()
 
-    make = spread_layout if args.spread else cluster_layout
+    make = (spread_layout if args.spread
+            else lambda n, seed: cluster_layout(n, seed=seed, band=args.band))
+    lo, hi = BANDS[args.band]
     print(f"\n{'=' * 78}")
     print(f"  ORDERING A/B — {args.layouts} layouts x {args.fruit} fruit, "
-          f"{'spread' if args.spread else 'clustered'}, "
+          f"{'spread' if args.spread else f'{args.band} band '
+             f'({lo * 1000:.0f}-{hi * 1000:.0f} mm)'}, "
           f"{'perception' if args.seen else 'told'}, speed {args.speed}")
     print(f"  every layout flown twice: deck-planned order vs placement order")
+    print(f"  ⚠️ both arms get the deck survey — only the order differs")
 
     t0 = time.perf_counter()
     agg = {"deck": [], "placed": []}
@@ -224,8 +324,12 @@ def main():
             rows, predicted, baseline = run_one(layout, ordered, args)
             agg[arm].extend(rows)
             if arm == "deck":
-                predictions.append((predicted.total_risk,
-                                    baseline["total_risk"], closest))
+                # ⚠️ `lost` — expected refusals, in fruit — not `total_risk`.
+                # It is what `plan_order` now minimises, and it is the column
+                # that can be checked against the `refused` count printed two
+                # lines down. A prediction in units nothing else is measured in
+                # cannot be right or wrong.
+                predictions.append((predicted.lost, baseline["lost"], closest))
             s = summarise(rows)
             print(f"    {arm:<7} clean {s['clean']}/{s['n']} · crated "
                   f"{s['crated']} · refused {s['refused']} · unseen "
@@ -269,10 +373,21 @@ def main():
     # Did the geometric proxy predict the direction of the measured difference?
     # It is a cheap model standing in for a 150 ms kinematic replay, so it is
     # worth knowing whether it is worth anything at all.
-    print(f"\n  the model's own prediction, per layout:")
-    print(f"  {'closest pair':>13} {'deck risk':>10} {'placed risk':>12}")
+    print(f"\n  the model's own prediction, per layout — expected refusals, "
+          f"in fruit:")
+    print(f"  {'closest pair':>13} {'deck order':>11} {'placement':>11} "
+          f"{'predicted gain':>15}")
     for deck_r, placed_r, closest in predictions:
-        print(f"  {closest * 1000:12.0f}  {deck_r:>10.2f} {placed_r:>12.2f}")
+        print(f"  {closest * 1000:12.0f}  {deck_r:>11.2f} {placed_r:>11.2f} "
+              f"{placed_r - deck_r:>15.2f}")
+    if predictions:
+        gain = sum(p - d for d, p, _c in predictions)
+        print(f"  the proxy expects the deck order to save {gain:.2f} fruit "
+              f"across these layouts.")
+        print(f"  ⚠️ Compare that against the measured `refused` difference "
+              f"below, not against\n     the clean rate — refusals are what "
+              f"this model claims to predict, and the only\n     thing it can "
+              f"be held to.")
 
     d, p = summarise(agg["deck"]), summarise(agg["placed"])
     if d["n"] and p["n"]:

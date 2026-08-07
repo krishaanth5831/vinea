@@ -262,6 +262,8 @@ class Thoughts:
         # loud rather than showing an empty ordering line.
         self.survey_n = None
         self.risk = None
+        self.block = None
+        self.scan_poses = None
 
     # --- latched from harvest_placed -----------------------------------------
 
@@ -270,6 +272,7 @@ class Thoughts:
             self.phase = "SURVEY"
             self.survey_n = len(info.get("survey", {}))
             self.plan = info.get("plan")
+            self.scan_poses = info.get("poses")
         elif kind == "select":
             self.phase, self.target = "SELECT", info["fruit"]
             self.queue = info.get("queue", [])
@@ -280,6 +283,7 @@ class Thoughts:
                          if s.fruit == self.target),
                         None) if getattr(self, "plan", None) else None
             self.risk = step.risk if step is not None else None
+            self.block = step.block if step is not None else None
         elif kind == "scan":
             self.phase = "SCAN"
         elif kind == "seen":
@@ -334,11 +338,22 @@ class Thoughts:
         if left:
             out.append((f"  then    {' '.join(left[:6])}", (150, 150, 150)))
         if self.survey_n is not None:
+            how = (f"in {len(self.scan_poses)} head poses" if self.scan_poses
+                   else "in one frame")
             out.append((f"  deck saw {self.survey_n}/{len(self.crop.placed)} "
-                        f"in one frame", (120, 230, 255)))
-            if self.risk is not None:
-                out.append((f"  order by risk+unblock: this one scores "
-                            f"{self.risk:.2f}", (120, 120, 120)))
+                        f"{how}", (120, 230, 255)))
+            plan = getattr(self, "plan", None)
+            if plan is not None:
+                out.append((f"  order minimises expected refusals: "
+                            f"{plan.lost:.2f} fruit"
+                            + ("  (proved optimal)" if plan.optimal else ""),
+                            (120, 120, 120)))
+            if self.block is not None:
+                # ⚠️ `block` and not `risk`: block is the one that decides
+                # whether this pick gets refused, which is what the operator
+                # watching wants to know about the fruit the arm is going for.
+                out.append((f"  this one: worst neighbour {self.block:.2f}, "
+                            f"crowding {self.risk:.2f}", (120, 120, 120)))
         else:
             out.append(("  (placement order - deck camera off)", (120, 120, 120)))
 

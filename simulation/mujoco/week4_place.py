@@ -32,7 +32,8 @@ chain with fifteen fruit and a planner behind it.
 --- how it works, and the four things that are not obvious -------------------
 
 **The deck camera chooses the order and aims the wrist camera.** Before anything
-moves, one frame from the chassis mast (`deck_cam.py`) surveys the whole row;
+moves, the chassis mast (`deck_cam.py`) sweeps its pan-tilt head across five
+poses and fuses what they saw into one survey of the whole row;
 `deck_cam.plan_order` turns that into the sequence to work it in, and the wrist
 camera is sent to *measured* positions rather than to `crop.placed`. Both matter
 and neither is cosmetic — see `harvest_placed`. `--no-deck` puts the old
@@ -511,7 +512,7 @@ def diff_maps(before, after, moved_mm=30.0):
 def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
                    sensor=None, detector=None, log=None, verbose=False,
                    add_at=None, add_layout=None, seed=0, on_tick=None,
-                   on_event=None, deck=None):
+                   on_event=None, deck=None, deck_order=True):
     """Plan and pick every placed fruit. Returns the log rows.
 
     `sensor`/`detector` given -> perception in the loop ("seen"). Absent -> the
@@ -538,6 +539,15 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
     ⚠️ **The survey runs with the arm parked, always.** `deck_cam.parked`
     enforces it; the reason is in `DECK_MOUNT` — staged mid-row the arm eclipses
     a fruit and the survey comes back one short with nothing to say so.
+
+    `deck_order=False` keeps the survey and throws away only the *order*,
+    working the row in placement order instead. That combination exists for one
+    caller — `week4_order.py` — and it is the difference between an A/B and an
+    anecdote. Passing `deck=None` for the control arm looks equivalent and is
+    not: it also hands that arm `crop.placed`, i.e. ground truth, so the control
+    would be running with better position knowledge than the treatment and the
+    comparison would be measuring two things at once. It was written that way
+    first, and the first six-layout result was collected before anyone noticed.
     """
     import time as _time
 
@@ -574,9 +584,9 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
     surveyed_at = None
 
     def resurvey(why):
-        """One deck frame, arm parked. Refreshes the map and the order."""
+        """Sweep the deck head, arm parked. Refreshes the map and the order."""
         nonlocal survey, plan, surveyed_at
-        from deck_cam import parked, plan_order
+        from deck_cam import DeckHead, parked, plan_order
 
         park_arm(model, data, park_q)
         mujoco.mj_forward(model, data)
@@ -591,13 +601,24 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
         # include a fruit that has already been picked.
         standing = [n for n in crop.pool if n in crop.placed and row.attached(n)
                     and n not in {r["fruit"] for r in rows}]
-        seen, rep = deck.look(data, standing)
+
+        # ⚠️ The head is a mocap body, so it does not persist across a
+        # `park_arm`; it is rebuilt per survey and returned home afterwards.
+        # Left pointing at the last scan pose, `--deck-camera deck` would show a
+        # view nobody asked for and every later still would be off-axis.
+        head = DeckHead(model, data)
+        seen, rep = deck.scan(data, standing, head=head)
+        head.home(data)
+        mujoco.mj_forward(model, data)
+
         survey = {n: s.est for n, s in seen.items()}
         plan = plan_order(seen)
         surveyed_at = crop.version
         missed = [n for n in standing if n not in survey]
         errs = [s.err_mm for s in seen.values()]
-        print(f"\n  --- deck survey ({why}) — one frame, arm parked ---")
+        poses, slew = len(rep["poses"]), rep["slew_s"]
+        print(f"\n  --- deck survey ({why}) — {poses} head poses, "
+              f"{slew:.1f} s of head slew, arm parked ---")
         print(f"  {len(survey)}/{len(standing)} found"
               + (f", missed {', '.join(missed)}" if missed else "")
               + (f" · position error mean {np.mean(errs):.1f} mm, "
@@ -608,7 +629,8 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
                   f"the two are different failures.")
         if plan.steps:
             print(plan.table())
-        say("survey", survey=dict(survey), plan=plan, missed=missed)
+        say("survey", survey=dict(survey), plan=plan, missed=missed,
+            poses=rep["poses"], slew_s=slew)
         return plan
 
     if deck is not None:
@@ -625,7 +647,7 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
     targets = list(crop.placed)
     print(f"\n{'=' * 78}\n  HARVEST — {len(targets)} fruit placed, "
           f"{'perception' if per else 'told'}, "
-          f"{'deck-planned order' if deck is not None else 'placement order'}, "
+          f"{('deck-planned order' if deck_order else 'placement order, deck survey') if deck is not None else 'placement order'}, "
           f"clearance {clearance * 1000:.0f} mm, crop v{crop.version}")
 
     done = 0
@@ -645,7 +667,16 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
         else:
             if crop.version != surveyed_at:
                 resurvey(f"crop moved to v{crop.version}")
-            queue = [n for n in plan.order if n in remaining]
+            if deck_order:
+                queue = [n for n in plan.order if n in remaining]
+            else:
+                # The control arm: same survey, same positions, same fruit
+                # visible — only the sequence thrown away. Restricted to what
+                # the survey saw so both arms attempt exactly the same set, and
+                # the ones it did not see fall through to `not_detected` below
+                # for both. Equal denominators are checked in `week4_order`.
+                queue = [n for n in crop.placed
+                         if n in remaining and n in survey]
             if not queue:
                 # Everything left was invisible to the deck camera — a fused
                 # cluster, most likely. Do NOT fall back to placement order:
@@ -735,7 +766,9 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
         rec = {"fruit": name, "seen": True, "err_mm": None,
                "zone": crop.zones.get(name), "n_fruit": len(crop.placed),
                "crop_version": crop.version, "seed": seed,
-               "ordered_by": "deck" if deck is not None else "placement",
+               "ordered_by": ("deck" if deck_order else "placement")
+                             if deck is not None else "placement",
+               "surveyed_by": "deck" if deck is not None else "ground_truth",
                "order_index": len(rows)}
         if deck is not None:
             step = next((s for s in plan.steps if s.fruit == name), None)
