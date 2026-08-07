@@ -607,9 +607,20 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
         # Left pointing at the last scan pose, `--deck-camera deck` would show a
         # view nobody asked for and every later still would be off-axis.
         head = DeckHead(model, data)
-        seen, rep = deck.scan(data, standing, head=head)
+        # ⚠️ Announced *before* the sweep, not after. Every other event here
+        # reports something that has finished; this one has to arrive first or a
+        # live panel sits on the previous phase for the whole three seconds the
+        # head is actually moving — which is precisely the part worth watching.
+        say("survey_start", head=head, why=why, standing=list(standing))
+        # ⚠️ `on_tick` is what makes the sweep visible. Without it the head
+        # teleports between the five poses inside one call and a viewer renders
+        # nothing until the survey is over. With it the head walks, at its rated
+        # slew, and the panel follows it round.
+        seen, rep = deck.scan(data, standing, head=head, on_pose=on_tick)
         head.home(data)
         mujoco.mj_forward(model, data)
+        if on_tick is not None:
+            on_tick()
 
         survey = {n: s.est for n, s in seen.items()}
         plan = plan_order(seen)

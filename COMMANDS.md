@@ -313,6 +313,7 @@ The deck camera surveys the whole row **with the arm parked** and does two jobs 
 ```bash
 # 📝 the gate: does the mast find the row, and what does the head add?
 ./.venv/bin/python simulation/mujoco/deck_cam.py
+./.venv/bin/python simulation/mujoco/deck_cam.py -n 12   # verifies the head + inert-geometry checks
 ./.venv/bin/python simulation/mujoco/deck_cam.py -n 15
 
 # 📝 what looking around is worth — sets SCAN_POSES
@@ -446,14 +447,20 @@ Week 3's OpenCV window with Week 4's free placement in front of it. **This is th
 
 ```
 PHASE   PICK
-  fruit 0/2 attempted
+  fruit 0/8 attempted
   target  p00
-  then    p01
-  (order as placed - not optimised)
+  head  pan    +0  tilt   +0  ----------|----------   <- live
+  then    p03 p05 p01
+  deck saw 8/8 in 5 head poses
+  plan expects 1.24 refusals  (proved optimal)
+  this one: clear  (worst neighbour 0.00)
 
   nearest crop   243 mm (p01)      <- live, every frame
   tool [+0.32 -0.54 +0.52]         <- live
+  GRIP  fruit   2.8 mm off the pinch                  <- live
+        [......................]
   fruit peak 0.52 m/s while held   <- live
+  pads  L  11.4 N  R  11.3 N       <- live
 
 PLAN lane 'direct' clears 71 mm
   checked in 0.82 s
@@ -465,9 +472,15 @@ PLAN lane 'direct' clears 71 mm
    carry
 ```
 
-It moves through **SELECT → SCAN → PLAN → PICK → DONE**, and the phase is also burned across the top of every panel. During PLAN it shows the lane the planner chose and the clearance it verified; during PICK it names the current leg, explains in words what that leg is for, and reports the closest fruit the arm is *not* picking — the number the guard is watching.
+It moves through **SURVEY → SELECT → SCAN → PLAN → PICK → DONE**, and the phase is also burned across the top of every panel. During PLAN it shows the lane the planner chose and the clearance it verified; during PICK it names the current leg, explains in words what that leg is for, and reports the closest fruit the arm is *not* picking — the number the guard is watching.
 
-⚠️ **The pick order is as-placed and is labelled as such.** There is no "which tomato is most optimal" selection yet; the panel says so rather than implying one exists.
+**Three things to watch for, one per change made in Week 4:**
+
+- **`head pan/tilt` sweeps during SURVEY.** The deck camera is on a pan-tilt head and the survey visits five poses, so the top-left panel *swings* and the mast in the scene panel rotates. The angles are read back out of `mjData`, not from the commanded value. The head walks at its rated slew rather than teleporting, so this takes the ~2.9 s it claims to.
+- **`GRIP  fruit N mm off the pinch`, with a gauge, while carrying.** This is the gripper bug made watchable: the tomato was never flung at the pluck, it *crept* out of a closed gripper during the carry and fell off the edge of the pad. Green under 15 mm, amber while slipping, red past 40 mm — where it is gone. It should now sit at 3–20 mm the whole way to the crate.
+- **`this one: clear / crowded / BLOCKED`.** Why this fruit is next, and what the cost model expects of it. When it says BLOCKED and the pick is then refused, that is the model being right rather than the robot failing at something it thought it could do.
+
+⚠️ **The pick order is the deck camera's, and the panel says what it expects to lose.** `--no-deck` puts back the old as-placed order, and the panel labels that too rather than implying an optimisation happened.
 
 **Clicking is ray-cast, not guessed.** The pixel is turned into a ray through that camera's pinhole — the same `camera.pixel_ray` the Week 3 deprojection gate is built on — and intersected with the board plane. Verified exact to **0.000 mm** at four points from two different camera angles, so the tomato lands under the cursor regardless of which camera you are looking through.
 

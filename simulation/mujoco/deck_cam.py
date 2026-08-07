@@ -452,6 +452,17 @@ class DeckHead:
         mujoco.mju_mulQuat(out, qp, qt)
         return out
 
+    def slew_seconds(self, pan_deg, tilt_deg):
+        """How long a real unit would take to get there from where it is now.
+
+        Separate from `aim` so a caller that wants to *animate* the move can ask
+        the cost of the whole thing first and then walk there in steps — asking
+        `aim` per step would return the cost of each step instead, and the sum
+        of those is the same number only by accident.
+        """
+        swing = max(abs(pan_deg - self.pan), abs(tilt_deg - self.tilt))
+        return swing / DECK_SLEW_DEG_S
+
     def aim(self, data, pan_deg, tilt_deg):
         """Command the head. Returns the seconds a real unit would take to slew.
 
@@ -461,13 +472,36 @@ class DeckHead:
         one failure here that produces plausible wrong numbers rather than an
         error.
         """
-        swing = max(abs(pan_deg - self.pan), abs(tilt_deg - self.tilt))
+        secs = self.slew_seconds(pan_deg, tilt_deg)
         data.mocap_quat[self.mocap] = self._quat(pan_deg, tilt_deg)
         self.pan, self.tilt = float(pan_deg), float(tilt_deg)
-        return swing / DECK_SLEW_DEG_S
+        return secs
 
     def home(self, data):
         return self.aim(data, 0.0, 0.0)
+
+    def current(self, data):
+        """(pan, tilt) read back out of `mjData`, not out of this object.
+
+        `self.pan`/`self.tilt` are what was last *commanded*; this is where the
+        head actually is. They agree today because a mocap body goes exactly
+        where it is put — but a panel that reports a commanded angle while
+        claiming to show the robot is the kind of display that keeps looking
+        right after the thing behind it has stopped working.
+        """
+        import mujoco
+
+        mat = np.zeros(9)
+        mujoco.mju_quat2Mat(mat, data.mocap_quat[self.mocap])
+        v = mat.reshape(3, 3) @ self.fwd0
+
+        def az_el(u):
+            return (np.degrees(np.arctan2(u[1], u[0])),
+                    np.degrees(np.arcsin(u[2] / np.linalg.norm(u))))
+
+        az, el = az_el(v)
+        az0, el0 = az_el(self.fwd0)
+        return float(az - az0), float(el - el0)
 
     def camera_pos(self, pan_deg=None, tilt_deg=None):
         """Where the lens ends up at that pose, without touching `mjData`."""
@@ -610,12 +644,26 @@ class DeckSurvey:
 
     # --- looking around ------------------------------------------------------
 
-    def scan(self, data, names, head=None, poses=None, truth=True):
+    def scan(self, data, names, head=None, poses=None, truth=True,
+             on_pose=None):
         """Sweep the head across `poses` and fuse what every pose saw.
 
         Returns the same `(map, report)` shape as `look`, so a caller can be
         handed either and not care. The report gains `poses`, `slew_s` and a
         per-pose breakdown.
+
+        `on_pose` is a no-argument callback for anything watching — a viewer's
+        render pump, typically. Given one, the head is **walked** between poses
+        rather than teleported, at `DECK_SLEW_DEG_S`, one control period per
+        step, with the callback fired at each. Without one nothing is
+        interpolated and the scan runs at full speed, so a measurement run costs
+        exactly what it did before.
+
+        ⚠️ The interpolation is cosmetic and deliberately so: renders and
+        detections still happen only at the listed poses. Detecting from the
+        in-between frames would quietly turn a five-pose scan into a
+        fifty-pose one and every number in `SCAN_POSES` would stop meaning what
+        it says.
 
         ⚠️ **Detections are fused in world coordinates, not in the image.** Each
         pose deprojects to metres before anything is compared, which is what
@@ -636,8 +684,20 @@ class DeckSurvey:
 
         found, per_pose, slew = [], [], 0.0
         for k, (pan, tilt) in enumerate(poses):
-            slew += head.aim(data, pan, tilt)
-            mujoco.mj_forward(self.model, data)   # see DeckHead.aim
+            move_s = head.slew_seconds(pan, tilt)
+            slew += move_s
+            if on_pose is None:
+                head.aim(data, pan, tilt)
+                mujoco.mj_forward(self.model, data)   # see DeckHead.aim
+            else:
+                from reach import CTRL_DT
+
+                p0, t0 = head.pan, head.tilt
+                for i in range(1, max(1, round(move_s / CTRL_DT)) + 1):
+                    f = i / max(1, round(move_s / CTRL_DT))
+                    head.aim(data, p0 + (pan - p0) * f, t0 + (tilt - t0) * f)
+                    mujoco.mj_forward(self.model, data)
+                    on_pose()
             rgb, depth = self.sensor.both(data)
             R, C = self.sensor.pose(data)
             dets = [estimate(d, depth, self.intr, R, C)

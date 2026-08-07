@@ -23,6 +23,36 @@ RGBD camera on the mast behind the arm, which you can see in the scene panel.
 So the top-left tile is genuinely what the robot's survey saw, and the plan
 drawn over it was made from that viewpoint.
 
+**You can watch the head sweep.** The deck camera sits on a pan-tilt head, and
+the survey visits five poses — so the top-left panel *swings*, and the mast in
+the scene panel physically rotates while it does. That needed plumbing rather
+than luck: the survey happens between picks, where nothing was pumping frames,
+so the whole sweep used to complete behind a single frozen frame. `DeckSurvey.
+scan` now takes an `on_pose` callback and, when given one, walks the head
+between poses at its rated slew instead of teleporting. The stats panel shows
+live pan and tilt read **back out of `mjData`** rather than from the commanded
+value, on a little dial.
+
+⚠️ The interpolation is cosmetic and only cosmetic: renders and detections
+still happen at the five listed poses only. Detecting from the in-between
+frames would quietly make it a fifty-pose scan and every number in
+`deck_cam.SCAN_POSES` would stop meaning what it says.
+
+**You can watch the grip.** While the arm is carrying, the panel shows the
+fruit's distance from the pinch centre with a gauge against the 40 mm at which
+it is off the edge of the pad, plus the live pad forces. That number is the
+Week 4 gripper bug made watchable: the tomato was never flung at the pluck, it
+*crept* out of a closed gripper during the carry and fell. Nothing on screen was
+showing the one quantity that said so. Now it is the biggest thing in the panel
+while a fruit is in the pads — green while held, amber while slipping, red once
+it has gone. See `week4_grip.py`.
+
+**You can see why this fruit is next.** The panel reports what the pick-order
+plan expects to lose, whether the solver proved it optimal, and the verdict on
+the fruit being attempted — `clear`, `crowded`, or `BLOCKED - expect a refusal`.
+When it says BLOCKED and the pick is then refused, that is the cost model being
+right, not the robot failing at something it thought it could do.
+
 **Clicking works by ray-casting, not by guessing.** A click in the deck panel is
 turned into a ray through that camera's pinhole (`camera.pixel_ray`, the same
 maths Week 3's deprojection gate is built on) and intersected with the board
@@ -53,6 +83,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# The legs where the fruit is supposed to be in the pads, so a drift reading
+# means "slipping" rather than "not picked up yet" or "let go on purpose".
+# Imported rather than restated: two lists that mean the same thing and are
+# allowed to drift apart is how a panel starts lying.
+from carrytrace import HELD as HOLDING_LEGS  # noqa: E402
 from deck_cam import DECK_NAME, DeckSurvey  # noqa: E402
 from week4_place import (Crop, GUARANTEED_HALF_Y, GUARANTEED_Z,  # noqa: E402
                          MAX_FRUIT, PLACE_BOARD, auto_layout, check,
@@ -264,12 +299,32 @@ class Thoughts:
         self.risk = None
         self.block = None
         self.scan_poses = None
+        self.plan = None
+        # The head, latched at `survey_start` so the panel can read its pose
+        # live while it sweeps. None outside a survey and with --no-deck.
+        self.head = None
+        self.scanning = False
+        self.standing = []
+        # Live grasp state. `drift` is the fruit's distance from the pinch
+        # centre — the number the Week 4 gripper bug lived in, and the one that
+        # tells you at a glance whether this pick is being held or is on its way
+        # out of the pads. See `week4_grip.py`.
+        self.target_bid = None
+        self.drift_mm = None
 
     # --- latched from harvest_placed -----------------------------------------
 
     def event(self, kind, **info):
-        if kind == "survey":
+        if kind == "survey_start":
+            # Fires before the head moves, so the panel is already on SURVEY
+            # while the sweep is happening rather than after it finished.
             self.phase = "SURVEY"
+            self.scanning = True
+            self.head = info.get("head")
+            self.standing = info.get("standing", [])
+        elif kind == "survey":
+            self.phase = "SURVEY"
+            self.scanning = False
             self.survey_n = len(info.get("survey", {}))
             self.plan = info.get("plan")
             self.scan_poses = info.get("poses")
@@ -278,10 +333,14 @@ class Thoughts:
             self.queue = info.get("queue", [])
             self.mission = self.trace = self.guard = None
             self.err_mm = self.refused = self.t_plan = None
+            self.drift_mm = None
             self.ov.mission = None
-            step = next((s for s in getattr(self, "plan", None).steps
-                         if s.fruit == self.target),
-                        None) if getattr(self, "plan", None) else None
+            try:
+                self.target_bid = self.model.body(self.target).id
+            except KeyError:
+                self.target_bid = None
+            step = next((s for s in self.plan.steps
+                         if s.fruit == self.target), None) if self.plan else None
             self.risk = step.risk if step is not None else None
             self.block = step.block if step is not None else None
         elif kind == "scan":
@@ -319,6 +378,20 @@ class Thoughts:
     def _leg(self):
         return getattr(self.trace, "leg", "") if self.trace else ""
 
+    @staticmethod
+    def _bar(value, full, width=22):
+        """A little text gauge. Fuller is worse, for every caller here."""
+        n = int(max(0.0, min(1.0, value / full)) * width)
+        return "[" + "#" * n + "." * (width - n) + "]"
+
+    @staticmethod
+    def _dial(pan, span=40.0, width=21):
+        """Where the head is pointing, as a mark on a left-right scale."""
+        mid = width // 2
+        i = int(round(mid + max(-1.0, min(1.0, pan / span)) * mid))
+        return "".join("|" if k == i else ("+" if k == mid else "-")
+                       for k in range(width))
+
     def lines(self):
         import numpy as np
 
@@ -331,6 +404,17 @@ class Thoughts:
         if self.target:
             out.append((f"  target  {self.target}", (240, 210, 140)))
 
+        # --- the deck head, live while it sweeps ------------------------------
+        if self.head is not None:
+            try:
+                pan, tilt = self.head.current(self.data)
+                bar = self._dial(pan)
+                c = (250, 200, 90) if self.scanning else (150, 150, 150)
+                out.append((f"  head  pan {pan:+5.0f}  tilt {tilt:+4.0f}  {bar}",
+                            c))
+            except Exception:
+                pass
+
         # What it is choosing between, and — since the deck camera arrived —
         # *why* that is the order. The old version of this line said "order as
         # placed - not optimised", which was true and is not any more.
@@ -342,25 +426,39 @@ class Thoughts:
                    else "in one frame")
             out.append((f"  deck saw {self.survey_n}/{len(self.crop.placed)} "
                         f"{how}", (120, 230, 255)))
-            plan = getattr(self, "plan", None)
-            if plan is not None:
-                out.append((f"  order minimises expected refusals: "
-                            f"{plan.lost:.2f} fruit"
-                            + ("  (proved optimal)" if plan.optimal else ""),
+            if self.plan is not None:
+                out.append((f"  plan expects {self.plan.lost:.2f} refusals"
+                            + ("  (proved optimal)" if self.plan.optimal
+                               else "  (refined)"),
                             (120, 120, 120)))
             if self.block is not None:
                 # ⚠️ `block` and not `risk`: block is the one that decides
                 # whether this pick gets refused, which is what the operator
                 # watching wants to know about the fruit the arm is going for.
-                out.append((f"  this one: worst neighbour {self.block:.2f}, "
-                            f"crowding {self.risk:.2f}", (120, 120, 120)))
+                verdict = ("BLOCKED - expect a refusal" if self.block >= 0.99
+                           else "crowded" if self.block >= 0.5 else "clear")
+                c = ((110, 110, 250) if self.block >= 0.99
+                     else (120, 230, 255) if self.block >= 0.5
+                     else (140, 250, 150))
+                out.append((f"  this one: {verdict}  (worst neighbour "
+                            f"{self.block:.2f})", c))
         else:
             out.append(("  (placement order - deck camera off)", (120, 120, 120)))
 
         if self.phase == "SURVEY":
             out.append(("", (0, 0, 0)))
-            out.append(("deck camera: one frame from the mast,", (250, 200, 90)))
-            out.append(("arm parked. Finds the row and orders it.", (250, 200, 90)))
+            if self.scanning:
+                out.append(("deck camera: SWEEPING the pan-tilt head",
+                            (250, 200, 90)))
+                out.append((f"across {len(self.standing)} standing fruit, arm "
+                            f"parked.", (250, 200, 90)))
+                out.append(("the yoke offset is what sees round things.",
+                            (200, 200, 200)))
+            else:
+                out.append(("deck camera: swept the mast head, arm",
+                            (250, 200, 90)))
+                out.append(("parked. Found the row and ordered it.",
+                            (250, 200, 90)))
         if self.phase == "SCAN":
             out.append(("", (0, 0, 0)))
             out.append(("wrist cam: driving to where the DECK", (250, 200, 90)))
@@ -390,11 +488,38 @@ class Thoughts:
             tool = self.data.site_xpos[self.tool_site]
             out.append((f"  tool [{tool[0]:+.2f} {tool[1]:+.2f} {tool[2]:+.2f}]",
                         (170, 170, 170)))
+
+            # --- is it actually holding the tomato? ---------------------------
+            #
+            # ⚠️ This is the Week 4 gripper bug made watchable. The fruit was
+            # never flung at the pluck — it *crept* out of a closed gripper
+            # during the carry, ~30 mm, and fell off the edge of the pad. The
+            # only number that showed it was its distance from the pinch centre,
+            # and nothing on screen was showing that. Now it is the biggest
+            # thing in the panel while the arm is carrying.
+            leg = self._leg()
+            if self.target_bid is not None and leg in HOLDING_LEGS:
+                drift = float(np.linalg.norm(
+                    self.data.xpos[self.target_bid] - tool)) * 1000
+                self.drift_mm = drift
+                c = ((140, 250, 150) if drift < 15
+                     else (120, 230, 255) if drift < 30
+                     else (110, 110, 250))
+                mark = ("" if drift < 15
+                        else "  slipping" if drift < 40 else "  OUT OF THE PADS")
+                out.append((f"  GRIP  fruit {drift:5.1f} mm off the pinch"
+                            f"{mark}", c))
+                out.append((f"        {self._bar(drift, 40.0)}", c))
+
             if self.trace is not None:
                 held = self.trace.peak_held()
                 if held:
                     c = (110, 110, 250) if held > 1.0 else (170, 170, 170)
                     out.append((f"  fruit peak {held:.2f} m/s while held", c))
+                pads = self.trace.samples[-1] if self.trace.samples else None
+                if pads is not None and (pads.f_left or pads.f_right):
+                    out.append((f"  pads  L {pads.f_left:5.1f} N  "
+                                f"R {pads.f_right:5.1f} N", (170, 170, 170)))
 
         if self.mission is not None:
             m = self.mission
