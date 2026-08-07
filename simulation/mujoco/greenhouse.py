@@ -51,6 +51,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fr5 import add_crate, build_fr5_spec  # noqa: E402
 from plant_row import ROW_X, SUPPORT_Z, add_row  # noqa: E402
 
+# --- the one contact number that decides whether a pick survives -------------
+#
+# How compliant the 2F85's finger pads are, as MuJoCo solref
+# [timeconst, dampratio]. Softer holds the peduncle together at the close;
+# stiffer holds the *fruit* through the carry. See the long note in
+# `build_scene`, which carries both sweeps — this is the value they meet at.
+#
+# Named rather than inlined because `week4_grip.py` sweeps around it and the
+# sweep has to be able to say what the shipped value is.
+PAD_SOLREF = (0.006, 1.0)
+
 # --- the house ---------------------------------------------------------------
 ROW_PITCH = 1.60        # centre to centre; the arm works the row at ROW_X
 GUTTER_Z = 0.32         # top of the substrate gutter
@@ -532,19 +543,57 @@ def build_scene(greenhouse=True, leafy=True, bin_pos=None, bin_half=None,
     # None keeps the five-truss default, so every earlier caller is untouched.
     add_row(spec) if trusses is None else add_row(spec, trusses=trusses)
 
-    # Soften the finger pads. Menagerie ships them at solref [0.004, 1] — five
-    # times stiffer than MuJoCo's own default — which suits the rigid objects
-    # their benchmarks grip and does not suit a tomato.
+    # Soften the finger pads a little. Menagerie ships them at solref
+    # [0.004, 1] — five times stiffer than MuJoCo's own default — which suits
+    # the rigid objects their benchmarks grip and does not suit a tomato.
     #
     # ⚠️ The pads carry `priority=1`, and priority does not only decide
     # friction: on any pad contact *all* of the pads' contact parameters win and
     # the fruit's are ignored outright. Softening solref on the fruit geom
     # therefore changes nothing — measured, the close transient stayed at
     # 26.01 N across an 8x sweep of fruit solref. The pads are the geom to
-    # soften, and doing it takes that transient to 11.05 N.
+    # soften.
+    #
+    # ⚠️ **This number is a two-sided trade and both sides are measured.** It
+    # sat at 0.02 for two weeks, which is soft enough that the fruit *creeps out
+    # of the closed gripper under its own weight* — a soft contact does not hold
+    # a tangential load indefinitely, it drifts. Traced substep by substep the
+    # fruit was still centred (2.3 mm off the tool site) when the peduncle
+    # parted, then walked ~30 mm out through pads still squeezing at 80 N during
+    # `extract`, lost contact, and fell at 9.8 m/s². On video that reads as the
+    # gripper plucking the tomato and dropping it.
+    #
+    # Swept over 8 layouts, one full pick each — `week4_grip.py --solref`:
+    #
+    #   pad solref     crated    peak grip N    fruit creep
+    #   [0.002, 1]      8/8         10.1          280 mm
+    #   [0.004, 1]      8/8         10.1          280 mm
+    #   [0.006, 1]      8/8          7.0           34 mm      <- here
+    #   [0.008, 1]      6/8          6.2         1519 mm
+    #   [0.012, 1]      5/8          6.1         1227 mm
+    #   [0.020, 1]      5/8          6.0         1486 mm      <- was here
+    #
+    # A creep over ~40 mm is the fruit leaving the pads; the millimetre figures
+    # past that are just where it came to rest on the floor.
+    #
+    # ⚠️ **The reason 0.02 was chosen no longer applies, and that is why this
+    # can move.** The softening was picked to keep the *closing* transient off
+    # the peduncle, back when the grip was a step input. `reach.Gripper.ramp`
+    # arrived later and does that job far better. Closing on a hanging fruit and
+    # reading the stem (`week4_grip.py --close`):
+    #
+    #   pad solref     step close        ramped close (what ships)
+    #   [0.004, 1]     97.94 N  SNAPS      9.54 N  survives
+    #   [0.006, 1]     62.08 N  SNAPS      6.47 N  survives
+    #   [0.020, 1]     16.97 N  SNAPS      5.16 N  survives
+    #
+    # Read the step column: **softening never fixed that failure either** — 0.02
+    # still snapped, at 16.97 N against a SNAP_N of 12.0. The ramp is what fixed
+    # it, and it fixes it at every stiffness in the sweep. So the softening has
+    # been buying nothing and costing three picks in eight.
     for geom in spec.geoms:
         if "pad" in geom.name:
-            geom.solref = [0.02, 1.0]
+            geom.solref = list(PAD_SOLREF)
 
     add_crate(spec, name="bin", pos=bin_pos, half=bin_half, wall=bin_wall)
 
