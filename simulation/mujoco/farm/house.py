@@ -97,6 +97,16 @@ PIPE_D = 0.051            # 51 mm OD heating pipe — the industry standard
 RAIL_CTC = 0.550          # centre to centre; the common Venlo tomato gauge
 RAIL_Z = 0.10             # pipe centreline above the concrete
 
+# Roof pane width along the row. A Venlo bay is glazed in panes about 1.0-1.2 m
+# wide between aluminium glazing bars; 1.10 m is the common figure and it is what
+# sets the visible rhythm of the roof from underneath. Drawing only, like every
+# structural dimension in this file.
+PANE_Y = 1.10
+
+# Height of the concrete upstand the side glazing sits on. Real houses have one
+# so the glass does not meet the floor, and the outermost gutter drains onto it.
+UPSTAND_Z = 0.55
+
 # Where the arm sits relative to the trolley's centreline. See the note above:
 # this is what preserves the 600 mm standoff every Week 1-4 number was taken at.
 ARM_OFFSET = 0.20
@@ -241,6 +251,49 @@ def _structure(spec):
             _decor(body, f"fh_glass_{j}_{side}", mujoco.mjtGeom.mjGEOM_BOX,
                    fromto=[x0, 0, eaves, mid, 0, ridge],
                    size=[0.004, HOUSE_HALF_Y + 1.2, 0], rgba=gh.GLASS)
+            # Glazing bars — the aluminium astragals the panes sit between,
+            # running ridge-to-gutter every PANE_Y. They are the single most
+            # recognisable thing about a Venlo roof from underneath, which is
+            # the only angle any camera in this scene ever sees it from: a
+            # continuous sheet of glass reads as a warehouse skylight, and a
+            # barcode of thin bars reads as a glasshouse.
+            for k, yy in enumerate(np.arange(-HOUSE_HALF_Y - 1.2,
+                                             HOUSE_HALF_Y + 1.21, PANE_Y)):
+                _decor(body, f"fh_bar_{j}_{side}_{k}",
+                       mujoco.mjtGeom.mjGEOM_CAPSULE,
+                       fromto=[x0, float(yy), eaves, mid, float(yy), ridge],
+                       size=[0.013, 0, 0], rgba=gh.STEEL)
+
+    # Side walls. The gables close the ends of the bay (`_gables`); without
+    # these the *sides* run out into open sky, which is visible in any wide
+    # shot and in the deck camera whenever it faces the outermost row. Glass to
+    # the eaves, on a post grid, with a solid concrete upstand at the bottom —
+    # a real house has one, and it is what the outermost gutter drains onto.
+    for side, wx in (("l", x_lo - 0.8), ("r", x_hi + 0.8)):
+        _decor(body, f"fh_wall_{side}", mujoco.mjtGeom.mjGEOM_BOX,
+               pos=[wx, 0, (UPSTAND_Z + eaves) / 2],
+               size=[0.004, HOUSE_HALF_Y + 1.2, (eaves - UPSTAND_Z) / 2],
+               rgba=gh.GLASS)
+        _decor(body, f"fh_upstand_{side}", mujoco.mjtGeom.mjGEOM_BOX,
+               pos=[wx, 0, UPSTAND_Z / 2],
+               size=[0.06, HOUSE_HALF_Y + 1.2, UPSTAND_Z / 2],
+               rgba=[0.72, 0.72, 0.70, 1.0])
+        for k, yy in enumerate(np.arange(-HOUSE_HALF_Y - 1.2,
+                                         HOUSE_HALF_Y + 1.21, PANE_Y)):
+            _decor(body, f"fh_wallbar_{side}_{k}",
+                   mujoco.mjtGeom.mjGEOM_CAPSULE,
+                   fromto=[wx, float(yy), UPSTAND_Z, wx, float(yy), eaves],
+                   size=[0.016, 0, 0], rgba=gh.STEEL)
+
+    # The energy-screen rail: a wire run just under the gutters that a thermal
+    # screen is drawn along at night. Every Dutch house has one and it is the
+    # thing that reads as "this is a climate-controlled building" rather than a
+    # shed with plants in it.
+    for j, x in enumerate(np.arange(x_lo, x_hi + 0.01, ROW_PITCH)):
+        _decor(body, f"fh_screenwire_{j}", mujoco.mjtGeom.mjGEOM_CAPSULE,
+               fromto=[float(x), -HOUSE_HALF_Y - 1.2, eaves - 0.12,
+                       float(x), HOUSE_HALF_Y + 1.2, eaves - 0.12],
+               size=[0.005, 0, 0], rgba=gh.STEEL)
 
     # ⚠️ No floor here. `_lighting` lays a textured plane sized to the whole
     # house; a box floor on top of it z-fights with the plane and reads as a
@@ -285,22 +338,42 @@ def _lighting(spec):
         name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE,
         pos=[mid_x, 0, 0], size=[span, span, 0.05], material="concrete")
 
-    # Overhead daylight, one lamp per ~3 m of bay so the far end is lit too.
+    # Overhead daylight on a **grid**, two across the house by three along it,
+    # so each pair of rows has a lamp roughly above it rather than all four rows
+    # sharing a line of lamps down the middle. The old layout put every lamp at
+    # `mid_x`, which lit the two inner rows well and the outer two obliquely —
+    # visible as a darker far side of the aisle in the deck camera at pan 180.
+    #
     # ⚠️ Six, not more: MuJoCo's default renderer takes a limited number of
     # lights and quietly ignores the rest, so "add one every metre" produces a
     # scene that is dark at one end for no visible reason.
-    for i, y in enumerate(np.linspace(-HOUSE_HALF_Y, HOUSE_HALF_Y, 4)):
-        spec.worldbody.add_light(
-            pos=[mid_x, float(y), 3.7], dir=[0, 0, -1],
-            diffuse=[0.50, 0.50, 0.48], specular=[0.04, 0.04, 0.04],
-            castshadow=False)
-    # Two low side fills, so the crop wall facing the aisle is not a silhouette
-    # against the bright floor — which is exactly what the deck camera looks at.
-    for i, x in enumerate((ROW_X0 - 1.4, row_x(N_ROWS - 1) + 1.4)):
-        spec.worldbody.add_light(
-            pos=[float(x), 0.0, 2.4], dir=[1 if i == 0 else -1, 0, -0.35],
-            diffuse=[0.30, 0.30, 0.29], specular=[0.02, 0.02, 0.02],
-            castshadow=False)
+    #
+    # ⚠️ **And the obvious accompanying change — raising the ambient term to
+    # model diffuse light through glass — makes detection strictly worse.** That
+    # was measured, not assumed, because the reasoning for it was good: a Venlo
+    # roof really does scatter light, and the ripeness bands have a minimum
+    # *value* of 55-60, so shadowed fruit should drop out of them. What that
+    # argument misses is that the same bands have a minimum **saturation** of
+    # 95-100, and ambient light washes saturation out everywhere at once.
+    # Three houses, both rows, 168 fruit:
+    #
+    #     lighting                          found      phantoms
+    #     line of 4 + 2 side fills (old)    101/168        7
+    #     grid of 6 + ambient 0.32           91/168       14     <- the "fix"
+    #     grid of 6, ambient untouched      104/168        5     <- shipped
+    #     grid of 6 + 2 side fills          102/168        6
+    #
+    # So the grid is kept and the ambient is not. Lifting the shadows cost ten
+    # fruit and doubled the phantom rate.
+    xs = np.linspace(ROW_X0 + ROW_PITCH / 2,
+                     row_x(N_ROWS - 1) - ROW_PITCH / 2, 2)
+    for i, y in enumerate(np.linspace(-HOUSE_HALF_Y + 1.0,
+                                      HOUSE_HALF_Y - 1.0, 3)):
+        for j, x in enumerate(xs):
+            spec.worldbody.add_light(
+                pos=[float(x), float(y), 3.7], dir=[0, 0, -1],
+                diffuse=[0.50, 0.50, 0.48], specular=[0.04, 0.04, 0.04],
+                castshadow=False)
     return spec
 
 

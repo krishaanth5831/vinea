@@ -57,6 +57,12 @@ class Shift:
     pick_s: float = 0.0
     drive_m: float = 0.0
     ripe_truth: int = 0
+    # The house as it actually was. Carried so a miss can be attributed to a
+    # *fruit* rather than only to an attempt: a ripe tomato the scout never
+    # mapped never becomes a row in `rows`, so counting rows alone reports a
+    # clean shift while fruit are left on the plant. See `farm/misses.py`.
+    trusses: list = field(default_factory=list)
+    aisle: int = 0
 
     @property
     def crated(self):
@@ -142,7 +148,8 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
 
     left, right = house.serves(aisle)
     shift = Shift(ripe_truth=sum(1 for t in trusses
-                                 if t.ripe and t.row == right))
+                                 if t.ripe and t.row == right),
+                  trusses=list(trusses), aisle=aisle)
 
     # --- 1. scout ------------------------------------------------------------
     t0 = _time.perf_counter()
