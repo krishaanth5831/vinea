@@ -300,7 +300,13 @@ def main():
             out[name] = cv2.cvtColor(rs[name].render(), cv2.COLOR_RGB2BGR)
         # The ripeness call, drawn where it is made. Same classifier the mapping
         # pass uses — see `farm.overlay` for why it must not be a better one.
-        overlay.tally(out["wrist"], overlay.annotate(out["wrist"]))
+        #
+        # ⚠️ Counts go into this panel's own caption rather than through
+        # `overlay.tally`. Tally draws its own footer bar across the bottom 30
+        # px, which is exactly where `_label` writes, so the two stack and the
+        # caption reads as corrupted. `eyes.py` has room for both; a sixth of
+        # this window does not.
+        wrist_counts = overlay.annotate(out["wrist"])
         ty = float(data.body(trolley.TROLLEY).xpos[1])
         tgt = None
         if thoughts.target:
@@ -316,7 +322,9 @@ def main():
                          _label(out["aisle"], "down the aisle"),
                          _label(out["house"], "the house")])
         bot = np.hstack([m, stats,
-                         _label(out["wrist"], "wrist cam - what it picks")])
+                         _label(out["wrist"],
+                                f"wrist cam - HSV: ripe {wrist_counts['ripe']}"
+                                f", unripe {wrist_counts['unripe']}")])
         return np.vstack([top, bot])
 
     def tick(_t=None):
