@@ -293,8 +293,8 @@ def robot_geoms(model, prefix="") -> list[int]:
 
     ⚠️ This function reports **one arm's own geometry** and has never done
     anything else — it is the "what am I" half, not the "what must I avoid"
-    half. The other arm being an obstacle is `ArmObstacles`' job; see
-    `docs/BUG_LOG.md` F2 for the period when nothing did it at all.
+    half. The other arm being an obstacle is `ArmObstacles`' job; see the Bug
+    Log entry 43 for the period when nothing did it at all.
     """
     ids = []
     links = {prefix + b for b in LINKS}

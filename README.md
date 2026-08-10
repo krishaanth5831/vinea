@@ -369,7 +369,7 @@ The whole cycle for one full row — map, plan, travel, pick, crate — with two
 
 ⚠️ **The arms are serialised — one flies while the other stows — and this is forced rather than chosen.** `armframe`'s global rebinding above is per-arm, so two arms mid-mission at once is not currently expressible in this codebase. It is stated on screen and in the run's own report.
 
-**Building it found four bugs that had been shipping since the second arm was fitted**, all recorded in [`docs/BUG_LOG.md`](docs/BUG_LOG.md): the two arms were **parked 83 mm inside each other** (forearm through forearm, on every two-armed scene ever built); nothing checked arm against arm, so the clash was in nobody's obstacle set; `week2_pick.execute` scored arm B's grasps against **arm A's gripper**, returning `grasped: False` on picks that had worked; and the planner previewed routes with 13 free DOF that the executor flew with 6. The first one is the instructive one — it had been visible in every render since the arm was added, and nothing was looking.
+**Building it found four bugs that had been shipping since the second arm was fitted**, all recorded in the Bug Log (entries 43, 54, 55, 56): the two arms were **parked 83 mm inside each other** (forearm through forearm, on every two-armed scene ever built); nothing checked arm against arm, so the clash was in nobody's obstacle set; `week2_pick.execute` scored arm B's grasps against **arm A's gripper**, returning `grasped: False` on picks that had worked; and the planner previewed routes with 13 free DOF that the executor flew with 6. The first one is the instructive one — it had been visible in every render since the arm was added, and nothing was looking.
 
 ## What this does not prove
 
