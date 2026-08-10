@@ -152,7 +152,10 @@ def _run_leg(leg, reacher, gripper, row, target, tick, say):
     if abs(reacher.speed - leg.speed) > 1e-9:
         reacher.set_speed(leg.speed)
 
-    goal = (reacher.data.site(TOOL_SITE).xpos.copy() if leg.goal is None
+    # ⚠️ `reacher.tool_site`, not the bare `TOOL_SITE`. On a two-armed machine
+    # the constant is arm a's, so a leg with no goal flown by arm b would hold
+    # position at *arm a's* tool. See the note in `execute`.
+    goal = (reacher.data.site(reacher.tool_site).xpos.copy() if leg.goal is None
             else np.asarray(leg.goal, dtype=float))
 
     if leg.kind == "move":
@@ -229,8 +232,24 @@ def _run_leg(leg, reacher, gripper, row, target, tick, say):
 
 def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
             verbose=False):
-    """Fly a planned mission. Returns what happened, including what it cost."""
+    """Fly a planned mission. Returns what happened, including what it cost.
+
+    ⚠️ **Which arm this is comes from the `reacher`, never from `TOOL_SITE`.**
+    That constant is `"tool0"`, which on a two-armed machine is arm a's — arm a
+    is deliberately the unprefixed one (`trolley.ARM_PREFIX`) so Weeks 1-4 keep
+    working. Every site lookup here used to use it directly, and the consequence
+    was not a crash but a quiet wrong answer for arm b:
+
+        held = |fruit.xpos - data.site("tool0").xpos|
+
+    is the grasp check at the end of `extract`, and for an arm b pick it measured
+    the fruit against **arm a's** gripper, parked half a machine away. It
+    returned ~1 m every time, so `grasped` came back False on picks that had
+    worked, `outcomes.classify` binned them as drops, and arm b would have looked
+    like an arm that cannot hold a tomato.
+    """
     data = reacher.data
+    tool_site = reacher.tool_site
     target = mission.target
     fruit = data.body(target)
     clock = [0.0]
@@ -253,7 +272,7 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
 
     def say(state, note=""):
         if verbose:
-            p = data.site(TOOL_SITE).xpos
+            p = data.site(tool_site).xpos
             print(f"    {state:<9} tool [{p[0]:+.2f} {p[1]:+.2f} {p[2]:+.2f}]"
                   f"   {note}")
 
@@ -285,7 +304,7 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
                     guard.armed = True
             elif leg.name == "extract":
                 held = float(np.linalg.norm(fruit.xpos
-                                            - data.site(TOOL_SITE).xpos))
+                                            - data.site(tool_site).xpos))
                 grasped[0] = held < FRUIT_R * 2.0
                 say("check", f"fruit {held * 1000:.0f} mm from the tool — "
                              f"{'holding' if grasped[0] else 'DROPPED'}")
@@ -297,7 +316,7 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
         # from the crop, then park. The guard stays off for it: it has already
         # fired, and re-firing during the escape would strand the arm in the row.
         guard.armed = False
-        here = data.site(TOOL_SITE).xpos.copy()
+        here = data.site(tool_site).xpos.copy()
         reacher.set_orientation_cost(ORIENTATION_COST)
         reacher.approach = INTO_ROW
         reacher.drive_to(np.array([mission.stage_x, here[1], here[2]]),

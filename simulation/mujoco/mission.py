@@ -291,10 +291,10 @@ def robot_geoms(model, prefix="") -> list[int]:
     body that is not the one it is about to fly, reports a clearance in
     millimetres, and is describing the wrong arm.
 
-    ⚠️ It also means the *other* arm is not in anybody's obstacle set. Arm b is
-    not scenery and it moves, but nothing here treats it as an obstacle — see
-    the known gap recorded in the Bug Log. This function reports one arm's own
-    geometry and has never done anything else.
+    ⚠️ This function reports **one arm's own geometry** and has never done
+    anything else — it is the "what am I" half, not the "what must I avoid"
+    half. The other arm being an obstacle is `ArmObstacles`' job; see
+    `docs/BUG_LOG.md` F2 for the period when nothing did it at all.
     """
     ids = []
     links = {prefix + b for b in LINKS}
@@ -707,7 +707,8 @@ class Planner:
     """Turns a target fruit into a checked route, without moving the arm."""
 
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
-                 park_q=None, speed=DEFAULT_SPEED, prefix="", others=()):
+                 park_q=None, speed=DEFAULT_SPEED, prefix="", others=(),
+                 pin=()):
         import mink
 
         self.model = model
@@ -733,6 +734,32 @@ class Planner:
         # plan around. Empty is Weeks 1-4. See `ArmObstacles`.
         self.others = tuple(others)
         self.tool_site = prefix + TOOL_SITE
+
+        # ⚠️ **The preview has to be pinned exactly like the executor, or the
+        # planner verifies routes the arm cannot fly.** `mink.Configuration`
+        # spans the whole model, so the preview QP below is free to reach by
+        # driving the trolley and folding the *other* arm — neither of which the
+        # executor will do, because `reach.Reacher.step` writes six actuators and
+        # `farm.armframe.pin_base` pins the rest.
+        #
+        # This is `pin_base`'s bug on the planning side, and it is worse there:
+        # `pin_base` produces legs that arrive short, which at least shows up in
+        # the leg report. An unpinned *preview* produces a route that was checked
+        # in a posture the arm will never adopt, so the clearance it reports is a
+        # measurement of a different machine. With one arm it was only the slide
+        # joint and the drift was small enough to pass for noise; with two it can
+        # fold a whole second arm out of the way and call the route clear.
+        #
+        # Named explicitly by the caller rather than guessed from the model, the
+        # same contract `park_posture` already uses — `farm.duo` passes the drive
+        # joint and every other arm's six.
+        self.pin = tuple(pin)
+        self._limits = None
+        if self.pin:
+            import mink as _mink
+
+            self._limits = [_mink.VelocityLimit(model,
+                                                {j: 0.0 for j in self.pin})]
         self._cfg = mink.Configuration(model)
         self._task = mink.FrameTask(
             frame_name=self.tool_site, frame_type="site", position_cost=1.0,
@@ -1002,7 +1029,8 @@ class Planner:
                     else:
                         self._task.set_target(mink.SE3.from_translation(p))
                     for _ in range(PREVIEW_ITERS):
-                        vel = mink.solve_ik(cfg, tasks, PREVIEW_DT, "daqp", 1e-3)
+                        vel = mink.solve_ik(cfg, tasks, PREVIEW_DT, "daqp",
+                                            1e-3, limits=self._limits)
                         cfg.integrate_inplace(vel, PREVIEW_DT)
                     measure(leg)
             elif leg.goal is not None:
