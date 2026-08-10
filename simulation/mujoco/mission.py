@@ -263,19 +263,33 @@ class Mission:
         return head
 
 
-def robot_geoms(model) -> list[int]:
+def robot_geoms(model, prefix="") -> list[int]:
     """Every collision geom that belongs to the arm or the gripper.
 
     Visual geoms carry contype=0 and cannot hit anything, so they are excluded —
     checking them would report the arm colliding with its own decoration.
+
+    ⚠️ `prefix` picks *which* arm, and getting it wrong is silent. The filter is
+    a name match against `LINKS` and `GRIPPER_PREFIX`, both of which are the
+    bare Week 1-4 names — so on a two-armed trolley, a clearance model built for
+    arm b without this returns **arm a's** spheres. The planner then checks a
+    body that is not the one it is about to fly, reports a clearance in
+    millimetres, and is describing the wrong arm.
+
+    ⚠️ It also means the *other* arm is not in anybody's obstacle set. Arm b is
+    not scenery and it moves, but nothing here treats it as an obstacle — see
+    the known gap recorded in the Bug Log. This function reports one arm's own
+    geometry and has never done anything else.
     """
     ids = []
+    links = {prefix + b for b in LINKS}
+    grip = prefix + GRIPPER_PREFIX
     for i in range(model.ngeom):
         g = model.geom(i)
         if g.contype[0] == 0 and g.conaffinity[0] == 0:
             continue
         body = model.body(g.bodyid[0]).name
-        if body in LINKS or body.startswith(GRIPPER_PREFIX):
+        if body in links or body.startswith(grip):
             ids.append(i)
     return ids
 
@@ -413,10 +427,12 @@ def _sphere_count(pts, max_k=MAX_SPHERES_PER_GEOM):
 class RobotSpheres:
     """A conservative sphere cover of the arm and gripper, posed from mjData."""
 
-    def __init__(self, model, geom_ids=None, max_k=MAX_SPHERES_PER_GEOM):
+    def __init__(self, model, geom_ids=None, max_k=MAX_SPHERES_PER_GEOM,
+                 prefix=""):
         self.model = model
         centres, radii, bodies, labels = [], [], [], []
-        for gid in (robot_geoms(model) if geom_ids is None else geom_ids):
+        for gid in (robot_geoms(model, prefix) if geom_ids is None
+                    else geom_ids):
             pts, pad = _hull_points(model, gid)
             k = _sphere_count(pts, max_k)
             body = int(model.geom(gid).bodyid[0])
@@ -497,8 +513,11 @@ class CropObstacles:
 class ClearanceModel:
     """How close the robot is to the crop, in metres, right now."""
 
-    def __init__(self, model, row, target=None):
-        self.spheres = RobotSpheres(model)
+    def __init__(self, model, row, target=None, prefix=""):
+        # `prefix` picks which arm's geometry is being checked. See
+        # `robot_geoms` — the wrong one here is silent and plausible.
+        self.prefix = prefix
+        self.spheres = RobotSpheres(model, prefix=prefix)
         self.crop = CropObstacles(model, row, target)
 
     def per_obstacle(self, data):
@@ -533,9 +552,13 @@ class Guard:
     is not planned twice.
     """
 
-    def __init__(self, model, data, row, target, stop=GUARD_STOP):
+    def __init__(self, model, data, row, target, stop=GUARD_STOP, prefix=""):
         self.data = data
-        self.clearance = ClearanceModel(model, row, target)
+        # ⚠️ The guard watches *one* arm — the one named by `prefix`. It does
+        # not watch the other arm on a two-armed machine, in either direction.
+        # See the arm-vs-arm gap in the Bug Log.
+        self.prefix = prefix
+        self.clearance = ClearanceModel(model, row, target, prefix=prefix)
         self.stop = stop
         self.min_seen = np.inf
         self.tripped = None      # (leg, distance, robot geom, crop geom)
@@ -595,9 +618,15 @@ class Route:
         `far` leans almost all the way — which is also what a person does,
         pulling the fruit toward themselves rather than toward the floor.
         """
+        # ⚠️ The x components are "back out of the canopy", not "toward -x".
+        # They are signed by INTO_ROW so a mirrored arm leans out of its own
+        # row rather than further into it — see `farm.armframe._MIRROR`. For
+        # the unmirrored arm INTO_ROW[0] is +1 and these are the Week 2
+        # numbers unchanged.
+        back = -INTO_ROW[0]
         return {
-            "out": np.array([-0.09, 0.0, -PULL_DOWN]),
-            "far": np.array([-0.17, 0.0, -0.06]),
+            "out": np.array([back * 0.09, 0.0, -PULL_DOWN]),
+            "far": np.array([back * 0.17, 0.0, -0.06]),
         }.get(self.pull, np.array([0.0, 0.0, -PULL_DOWN]))
 
 
@@ -605,7 +634,7 @@ class Planner:
     """Turns a target fruit into a checked route, without moving the arm."""
 
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
-                 park_q=None, speed=DEFAULT_SPEED):
+                 park_q=None, speed=DEFAULT_SPEED, prefix=""):
         import mink
 
         self.model = model
@@ -625,9 +654,12 @@ class Planner:
         # and must not be touched: writing qpos into it to test a pose would
         # teleport the real arm mid-cycle.
         self._scratch = None
+        # Which arm this planner routes. See `reach.Reacher.prefix`.
+        self.prefix = prefix
+        self.tool_site = prefix + TOOL_SITE
         self._cfg = mink.Configuration(model)
         self._task = mink.FrameTask(
-            frame_name=TOOL_SITE, frame_type="site", position_cost=1.0,
+            frame_name=self.tool_site, frame_type="site", position_cost=1.0,
             orientation_cost=[ORIENTATION_COST, ORIENTATION_COST, ROLL_COST],
             lm_damping=1.0)
         self._posture = mink.PostureTask(model, cost=1e-2)
@@ -641,7 +673,7 @@ class Planner:
         are the ones that were added after something broke.
         """
         sx = route.stage_x
-        start = self.data.site(TOOL_SITE).xpos.copy()
+        start = self.data.site(self.tool_site).xpos.copy()
         lane_z = self._lane_z(route, target)
         pull_to = target + route.pull_vector()
         out_z = float(pull_to[2])
@@ -672,8 +704,10 @@ class Planner:
 
         legs += [
             # 3. Drive in along +x. The only leg that crosses the staging plane.
+            # Held back along the approach axis, which is -INTO_ROW rather
+            # than -x: a mirrored arm stands off on its own side of the fruit.
             Leg("approach", "move",
-                target + np.array([-route.approach_gap, 0, 0]), INTO_ROW),
+                target - INTO_ROW * route.approach_gap, INTO_ROW),
             # 4. tool0 sits between the fingertips, so "go to the fruit" puts
             #    the pads either side of it.
             Leg("insert", "move", target.copy(), INTO_ROW, contact_ok=True),
@@ -811,7 +845,8 @@ class Planner:
         if self._scratch is None:
             self._scratch = mujoco.MjData(self.model)
 
-        clearance = ClearanceModel(self.model, self.row, name)
+        clearance = ClearanceModel(self.model, self.row, name,
+                                   prefix=self.prefix)
         # Required gap per obstacle. Lessons raise it for a fruit that has been
         # knocked off before, which is the whole mechanism by which a mistake
         # changes the next route. See lessons.advise.
@@ -837,7 +872,7 @@ class Planner:
             self._scratch.qpos[:] = self.data.qpos
             self._scratch.qpos[: len(q)] = q
             mujoco.mj_forward(self.model, self._scratch)
-            tool = self._scratch.site(TOOL_SITE).xpos.copy()
+            tool = self._scratch.site(self.tool_site).xpos.copy()
             path.append(tool)
 
             for obstacle, (d, part) in clearance.per_obstacle(
@@ -860,7 +895,7 @@ class Planner:
         for leg in legs:
             if leg.kind in ("move", "pull"):
                 here = cfg.get_transform_frame_to_world(
-                    TOOL_SITE, "site").translation()
+                    self.tool_site, "site").translation()
                 goal = np.asarray(leg.goal, dtype=float)
                 n_steps = max(2, int(np.linalg.norm(goal - here) / PREVIEW_STEP) + 1)
                 self._task.set_orientation_cost(
@@ -959,7 +994,7 @@ class Planner:
             yield route
 
 
-def park_posture(model, iters=600):
+def park_posture(model, iters=600, prefix="", pin=(), hold=None):
     """Arm joint angles that put the tool at PARK, facing the row.
 
     Solved once at startup and reused as the pose every attempt begins and ends
@@ -977,6 +1012,23 @@ def park_posture(model, iters=600):
 
     from fr5 import JOINTS, reset_home
 
+    # ⚠️ `prefix` names which arm on a machine carrying more than one. Bare
+    # names are arm a and every single-armed scene keeps them. Without it the
+    # solve runs against arm a's joints while claiming to be arm b's park
+    # posture, and the caller gets six plausible numbers for the wrong arm.
+    joints = [prefix + j for j in JOINTS]
+    tool = prefix + TOOL_SITE
+
+    # ⚠️ `pin` names every joint in the model that this solve must **not**
+    # use, and on a multi-armed machine it is not optional. `mink.Configuration`
+    # spans the whole model, so with two arms and a trolley the QP has 13 free
+    # DOF to put one tool at one point — it will happily fold the other arm and
+    # drive the base. Only `joints` is copied back out, so the answer is a
+    # posture for six joints solved on the assumption that seven others moved
+    # too. It fails loudly here ("park posture missed by 1950 mm") only because
+    # the error is checked; see `farm.armframe.pin_base` for the same bug
+    # failing quietly.
+
     # ⚠️ Seed from HOME, not from whatever the caller happens to have in mjData.
     # A fresh MjData is all zeros, and all zeros is the arm standing straight up
     # — a singular configuration where the Jacobian loses rank and IK converges
@@ -985,9 +1037,22 @@ def park_posture(model, iters=600):
     scratch = mujoco.MjData(model)
     reset_home(model, scratch)
 
+    # ⚠️ `hold` puts joints the caller cares about back where the *live* scene
+    # has them before the solve. It exists because PARK is a world point: on a
+    # trolley it is computed from where the machine is standing now, while this
+    # scratch is a fresh MjData with the drive joint at zero. Solve the two
+    # together and the arm is asked to reach a park pose several metres down
+    # the row — 1668 mm, on the run that found this, and only visible because
+    # the error is checked. It was latent with one arm: the single caller
+    # happened to run before the trolley had ever moved.
+    for jname, value in (hold or {}).items():
+        scratch.joint(jname).qpos[0] = value
+    if hold:
+        mujoco.mj_forward(model, scratch)
+
     cfg = mink.Configuration(model)
     cfg.update(scratch.qpos[: model.nq].copy())
-    task = mink.FrameTask(frame_name=TOOL_SITE, frame_type="site",
+    task = mink.FrameTask(frame_name=tool, frame_type="site",
                           position_cost=1.0,
                           orientation_cost=[ORIENTATION_COST, ORIENTATION_COST,
                                             ROLL_COST],
@@ -997,17 +1062,21 @@ def park_posture(model, iters=600):
     task.set_target(mink.SE3.from_rotation_and_translation(
         mink.SO3.from_matrix(approach_rotation(INTO_ROW)), PARK))
 
+    limits = None
+    if pin:
+        limits = [mink.VelocityLimit(model, {j: 0.0 for j in pin})]
     for _ in range(iters):
-        vel = mink.solve_ik(cfg, [task, posture], PREVIEW_DT, "daqp", 1e-3)
+        vel = mink.solve_ik(cfg, [task, posture], PREVIEW_DT, "daqp", 1e-3,
+                            limits=limits)
         cfg.integrate_inplace(vel, PREVIEW_DT)
 
-    adr = [model.joint(j).qposadr[0] for j in JOINTS]
+    adr = [model.joint(j).qposadr[0] for j in joints]
     q = np.array([cfg.q[a] for a in adr])
 
     for a, v in zip(adr, q):
         scratch.qpos[a] = v
     mujoco.mj_forward(model, scratch)
-    err = float(np.linalg.norm(scratch.site(TOOL_SITE).xpos - PARK))
+    err = float(np.linalg.norm(scratch.site(tool).xpos - PARK))
     if err > 0.02:
         raise RuntimeError(
             f"park posture missed by {err * 1000:.0f} mm — PARK may be "
@@ -1015,7 +1084,7 @@ def park_posture(model, iters=600):
     return q
 
 
-def reset_park(model, data, q):
+def reset_park(model, data, q, prefix=""):
     """Reset the scene with the arm parked outside the canopy, not inside it.
 
     ⚠️ **This resets the *whole world*, not just the arm.** `mj_resetData`
@@ -1030,13 +1099,13 @@ def reset_park(model, data, q):
     from fr5 import JOINTS
 
     mujoco.mj_resetData(model, data)
-    for value, jname in zip(q, JOINTS):
+    for value, jname in zip(q, (prefix + j for j in JOINTS)):
         data.joint(jname).qpos[0] = value
         data.ctrl[model.actuator(f"{jname}_pos").id] = value
     mujoco.mj_forward(model, data)
 
 
-def park_arm(model, data, q):
+def park_arm(model, data, q, prefix=""):
     """Put the arm back at the park posture, leaving the world alone.
 
     The counterpart to `reset_park`, and the one a **sequence harvest** needs.
@@ -1065,13 +1134,13 @@ def park_arm(model, data, q):
 
     from fr5 import GRIPPER_OPEN, JOINTS, gripper_ctrl
 
-    for value, jname in zip(q, JOINTS):
+    for value, jname in zip(q, (prefix + j for j in JOINTS)):
         joint = data.joint(jname)
         joint.qpos[0] = value
         joint.qvel[0] = 0.0
         data.ctrl[model.actuator(f"{jname}_pos").id] = value
 
-    grip = gripper_ctrl(model)
+    grip = gripper_ctrl(model, prefix)
     if grip is not None:
         data.ctrl[grip] = GRIPPER_OPEN
     mujoco.mj_forward(model, data)

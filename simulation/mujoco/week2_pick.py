@@ -123,7 +123,7 @@ def anchor_posture(reacher, model, data, park_q):
     return reacher
 
 
-def make_reacher(model, data, speed=DEFAULT_SPEED):
+def make_reacher(model, data, speed=DEFAULT_SPEED, prefix=""):
     """A Reacher configured for reaching into a row.
 
     ⚠️ mocap=None matters. The row's stems *are* mocap bodies, and the Reacher
@@ -138,7 +138,7 @@ def make_reacher(model, data, speed=DEFAULT_SPEED):
     return Reacher(model, data, speed=speed, standoff=0.0,
                    max_reach=MAX_REACH_GRIPPER, reached_mm=REACHED_MM_LOADED,
                    orientation_cost=ORIENTATION_COST, roll_cost=ROLL_COST,
-                   approach=INTO_ROW, mocap=None, reset=False)
+                   approach=INTO_ROW, mocap=None, reset=False, prefix=prefix)
 
 
 def _run_leg(leg, reacher, gripper, row, target, tick, say):

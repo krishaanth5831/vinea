@@ -265,8 +265,32 @@ def build_fr5_spec(with_scene: bool = True, gripper: bool = False):
     return spec
 
 
+def arm_prefixes(model):
+    """Every FR5 in this model, by name prefix. `[""]` for the usual one arm.
+
+    Found by looking for a `j1` rather than by being told, so it cannot drift
+    from what was actually built. A two-armed trolley returns `["", "b_"]`.
+    """
+    out = []
+    for i in range(model.njnt):
+        name = model.joint(i).name
+        if name.endswith(JOINTS[0]):
+            prefix = name[: -len(JOINTS[0])]
+            if all(_has_joint(model, prefix + j) for j in JOINTS):
+                out.append(prefix)
+    return out
+
+
+def _has_joint(model, name):
+    try:
+        model.joint(name)
+        return True
+    except KeyError:
+        return False
+
+
 def reset_home(model, data):
-    """Put the arm at its home posture and everything else at its spawn pose.
+    """Put every arm at its home posture and everything else at its spawn pose.
 
     Prefer this over mj_resetDataKeyframe for any scene with objects in it.
     `qpos0` is built by the compiler from where each body was actually declared,
@@ -274,13 +298,22 @@ def reset_home(model, data):
     is then overwritten with HOME on top of it.
 
     The gripper is left where qpos0 puts it, which is fully open.
+
+    ⚠️ **Every arm, not just the unprefixed one.** `mj_resetData` leaves qpos at
+    `qpos0`, which for an FR5 is all zeros — the arm standing straight up, a
+    singular configuration where the Jacobian loses rank. Homing only arm a left
+    arm b sitting in that singularity in every scene that resets, and the first
+    thing to trip over it was `mission.park_posture`, which seeds from here and
+    reported arm b's park pose as "missed by 1667 mm". It reads as a park point
+    outside the arm's reach and is a solver started somewhere it cannot leave.
     """
     import mujoco
 
     mujoco.mj_resetData(model, data)
-    for value, jname in zip(HOME, JOINTS):
-        data.joint(jname).qpos[0] = value
-        data.ctrl[model.actuator(f"{jname}_pos").id] = value
+    for prefix in arm_prefixes(model):
+        for value, jname in zip(HOME, (prefix + j for j in JOINTS)):
+            data.joint(jname).qpos[0] = value
+            data.ctrl[model.actuator(f"{jname}_pos").id] = value
     mujoco.mj_forward(model, data)
 
 
@@ -329,15 +362,22 @@ def _attach_gripper(spec):
                              bodyname1=link, bodyname2=GRIPPER_PREFIX + part)
 
 
-def gripper_ctrl(model):
+def gripper_ctrl(model, prefix=""):
     """Index into `data.ctrl` for the gripper, or None if none is mounted.
 
     Everything else in this repo drives the arm; this is the one control that
     is not a joint angle. Command GRIPPER_OPEN or GRIPPER_CLOSED, or anything
     between for a partial close.
+
+    ⚠️ `prefix` names *which* gripper on a machine carrying more than one. It
+    defaults to "" — the bare Week 1-4 names — so a single-armed scene is
+    unaffected. On the two-armed trolley the second arm is attached with a
+    `b_` prefix, and without this the second gripper is unreachable while
+    `gripper_ctrl` silently hands back the first one's index: both arms would
+    open and close together and neither would report an error.
     """
     for i in range(model.nu):
-        if model.actuator(i).name == GRIPPER_ACTUATOR:
+        if model.actuator(i).name == prefix + GRIPPER_ACTUATOR:
             return i
     return None
 

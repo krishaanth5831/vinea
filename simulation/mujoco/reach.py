@@ -148,12 +148,30 @@ class Reacher:
     def __init__(self, model, data, speed=DEFAULT_SPEED, standoff=STANDOFF,
                  max_reach=MAX_REACH, reached_mm=REACHED_MM, mocap=0,
                  orientation_cost=0.0, approach=None, roll=0.0,
-                 roll_cost=0.0, reached_deg=REACHED_DEG, reset=True):
+                 roll_cost=0.0, reached_deg=REACHED_DEG, reset=True,
+                 prefix=""):
         import mink
 
         self.model = model
         self.data = data
         self.speed = speed
+        # ⚠️ Which arm this Reacher drives, on a machine carrying more than one.
+        # "" is the bare Week 1-4 naming and every single-armed scene keeps it,
+        # so nothing measured before this parameter existed can move.
+        #
+        # Names only. It does **not** make the solver ignore the other arm —
+        # `mink.Configuration` is built over the whole model, so a second arm's
+        # joints are inside this one's optimisation and the QP will happily use
+        # them to help the tool reach, then never command them. That is the
+        # `farm.armframe.pin_base` bug with a second arm in place of the
+        # trolley, and it is fixed the same way, by `pin_base(..., others=)`.
+        self.prefix = prefix
+        self.joints = [prefix + j for j in JOINTS]
+        self.tool_site = prefix + TOOL_SITE
+        # `JOINT_VELOCITY` is keyed by the bare names, because it describes the
+        # FR5 rather than any particular one bolted to anything. Re-key it once
+        # here so the velocity limits can be built from `self.joints` directly.
+        self.joint_velocity = {prefix + j: v for j, v in JOINT_VELOCITY.items()}
         self.standoff = standoff
         self.max_reach = max_reach
         self.reached_mm = reached_mm
@@ -214,13 +232,13 @@ class Reacher:
         # gripper made `ctrl[:nu] = q[:nu]` write a finger's *joint angle* into
         # the gripper's 0-255 command — silently, and the arm still moved.
         self.arm_ctrl = np.array(
-            [model.actuator(f"{j}_pos").id for j in JOINTS])
+            [model.actuator(f"{j}_pos").id for j in self.joints])
         self.arm_qpos = np.array(
-            [model.joint(j).qposadr[0] for j in JOINTS])
+            [model.joint(j).qposadr[0] for j in self.joints])
 
         self.config = mink.Configuration(model)
         self.task = mink.FrameTask(
-            frame_name=TOOL_SITE, frame_type="site",
+            frame_name=self.tool_site, frame_type="site",
             position_cost=1.0,
             # Per-axis, in the tool's own frame: x and y tilt the finger axis,
             # z spins about it. See roll_cost above.
@@ -236,7 +254,7 @@ class Reacher:
         # the solver finds the best joint motion it can *given* the cap, so the
         # path stays sensible instead of just being replayed in slow motion.
         self.limits = [mink.VelocityLimit(
-            model, {j: JOINT_VELOCITY[j] * speed for j in JOINTS})]
+            model, {j: self.joint_velocity[j] * speed for j in self.joints})]
 
         # ⚠️ Constructing a Reacher *moves the arm*, and that has already cost
         # this repo one silent bug. `reset()` calls `reset_home`, which calls
@@ -288,7 +306,7 @@ class Reacher:
 
         self.speed = speed
         self.limits = [mink.VelocityLimit(
-            self.model, {j: JOINT_VELOCITY[j] * speed for j in JOINTS})]
+            self.model, {j: self.joint_velocity[j] * speed for j in self.joints})]
 
     def reset(self):
         """Put the arm at its home posture and sync the solver to it."""
@@ -320,14 +338,14 @@ class Reacher:
         gripper pointing at the floor, 90° is horizontal. Week 1 sat at 47-52°
         at every sweep position without ever being asked to do otherwise.
         """
-        axis = self.data.site(TOOL_SITE).xmat.reshape(3, 3)[:, 2]
+        axis = self.data.site(self.tool_site).xmat.reshape(3, 3)[:, 2]
         return float(np.degrees(np.arccos(np.clip(-axis[2], -1.0, 1.0))))
 
     def tool_axis_error_deg(self, ball, direction=None):
         """How far the fingers actually point from where they were told to."""
         want = np.asarray(self.finger_axis(ball, direction), dtype=float)
         want = want / np.linalg.norm(want)
-        got = self.data.site(TOOL_SITE).xmat.reshape(3, 3)[:, 2]
+        got = self.data.site(self.tool_site).xmat.reshape(3, 3)[:, 2]
         return float(np.degrees(np.arccos(np.clip(float(want @ got), -1.0, 1.0))))
 
     def step(self, ball, direction=None):
@@ -376,9 +394,9 @@ class Reacher:
                 self.on_substep()
 
         ik_pos = self.config.get_transform_frame_to_world(
-            TOOL_SITE, "site").translation()
+            self.tool_site, "site").translation()
         ik_err = float(np.linalg.norm(ik_pos - goal))
-        arm_err = float(np.linalg.norm(self.data.site(TOOL_SITE).xpos - goal))
+        arm_err = float(np.linalg.norm(self.data.site(self.tool_site).xpos - goal))
         return ik_err, arm_err
 
     def drive_to(self, ball, direction=None, on_tick=None):
@@ -439,11 +457,14 @@ class Gripper:
     to arrive. See hold().
     """
 
-    def __init__(self, model, data):
+    def __init__(self, model, data, prefix=""):
         self.data = data
-        self.index = gripper_ctrl(model)
+        self.prefix = prefix
+        self.index = gripper_ctrl(model, prefix)
         if self.index is None:
-            raise RuntimeError("no gripper in this model — build with gripper=True")
+            raise RuntimeError(
+                f"no gripper named {prefix}gr_fingers_actuator in this model — "
+                f"build with gripper=True")
 
     def set(self, value):
         self.data.ctrl[self.index] = value

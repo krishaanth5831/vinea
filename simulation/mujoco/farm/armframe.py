@@ -57,6 +57,7 @@ import plant_row  # noqa: E402
 import week2_pick  # noqa: E402
 import week4_place  # noqa: E402
 from farm import house, trolley  # noqa: E402
+from fr5 import JOINTS as _JOINTS  # noqa: E402
 
 # ⚠️ **Every module that did `from mission import BIN_POS` holds its own
 # binding, and rebinding `mission.BIN_POS` does not touch it.** `from X import
@@ -82,7 +83,25 @@ _HOLDERS = {
     "BIN_POS": [(mission, "BIN_POS"), (week2_pick, "BIN_POS")],
     "ROW_X": [(mission, "ROW_X"), (plant_row, "ROW_X"),
               (week2_pick, "ROW_X"), (week4_place, "ROW_X")],
+    "INTO_ROW": [(mission, "INTO_ROW"), (week2_pick, "INTO_ROW")],
 }
+
+# ⚠️ **Arm b is not a translation of arm a, it is a reflection, and translating
+# it is the bug this constant exists to stop.** The two arms work rows on
+# opposite sides of the aisle, so arm b is bolted down turned 180° about z (see
+# `trolley.ARM_YAW`). Weeks 1-4 are written in world coordinates that assume the
+# row is at *larger* x than the arm — `INTO_ROW` is `[+1, 0, 0]`, `ROW_X` is
+# `STAGE_X + 0.28`, `PARK` is on the -y side. Every one of those has the wrong
+# sign for arm b.
+#
+# Applied naively, with translation only, `park_posture` for arm b aims at a
+# point 1.20 m through the crop on the far side of its row and reports "park
+# posture missed by 1841 mm". That is the *good* failure. The quiet one is
+# `INTO_ROW`, which would have arm b approach every fruit from behind.
+#
+# diag(-1, -1, 1): a half turn about z. x and y flip, height does not.
+_MIRROR = {"a": np.array([1.0, 1.0, 1.0]),
+           "b": np.array([-1.0, -1.0, 1.0])}
 
 # The Week 1-4 values, captured at import so a nested or aborted `at_trolley`
 # can always restore the truth rather than whatever the last caller left.
@@ -91,6 +110,7 @@ _BASE = {
     "STAGE_X": float(mission.STAGE_X),
     "BIN_POS": np.array(mission.BIN_POS, dtype=float),
     "ROW_X": float(mission.ROW_X),
+    "INTO_ROW": np.array(mission.INTO_ROW, dtype=float),
 }
 
 
@@ -114,12 +134,16 @@ def offsets(model, data, tag="a"):
     """
     base = arm_base(model, data, tag)
     aisle = _aisle_of(model, data)
+    m = _MIRROR[tag]
     return {
         "arm_base": base,
-        "PARK": _BASE["PARK"] + base,
-        "STAGE_X": _BASE["STAGE_X"] + base[0],
-        "BIN_POS": trolley.crate_pos(model, data),
+        # Reflect about the arm's own base, then translate. See `_MIRROR`.
+        "PARK": m * _BASE["PARK"] + base,
+        "STAGE_X": m[0] * _BASE["STAGE_X"] + base[0],
+        "BIN_POS": trolley.crate_pos(model, data, tag),
         "ROW_X": house.row_x(_worked_row(aisle, tag)),
+        # A direction, so it reflects but does not translate.
+        "INTO_ROW": m * _BASE["INTO_ROW"],
     }
 
 
@@ -200,8 +224,17 @@ def at_trolley(model, data, tag="a", verbose=False):
             setattr(mod, attr, value)
 
 
-def pin_base(reacher):
+def pin_base(reacher, others=()):
     """Stop the IK solver from planning motion the base will never make.
+
+    `others` names the *other* arms on the machine, by prefix — `("b_",)` when
+    this Reacher drives arm a of a two-armed trolley. Their six joints are
+    pinned alongside the drive joint, for exactly the same reason and against
+    exactly the same failure: see the note on `Reacher.prefix`. A Reacher built
+    for arm a has arm b inside its `mink.Configuration`, so the QP is free to
+    "reach" by folding the other arm, and `step` then writes only arm a's six
+    actuators. The tool lands short and the pick reads as an arm that cannot
+    reach.
 
     ⚠️ **This is the bug the mocap deck head was designed to avoid, arriving by
     the front door.** `reach.Reacher` builds `mink.Configuration(model)` over
@@ -241,11 +274,13 @@ def pin_base(reacher):
     import mink
 
     from fr5 import JOINTS
-    from reach import JOINT_VELOCITY
 
     def apply(speed):
-        caps = {j: JOINT_VELOCITY[j] * speed for j in JOINTS}
+        caps = {j: reacher.joint_velocity[j] * speed for j in reacher.joints}
         caps[trolley.DRIVE_JOINT] = 0.0
+        for p in others:
+            for j in JOINTS:
+                caps[p + j] = 0.0
         reacher.limits = [mink.VelocityLimit(reacher.model, caps)]
 
     inner = reacher.set_speed
@@ -259,17 +294,35 @@ def pin_base(reacher):
     return reacher
 
 
-def park_posture(model, data, tag="a", **kw):
+def park_posture(model, data, tag="a", arms=None, **kw):
     """`mission.park_posture`, solved in the arm's actual frame.
 
-    ⚠️ Also has to pin the base, and cannot use `pin_base` to do it — it builds
-    its own `mink.Configuration` internally rather than taking a `Reacher`. It
-    happens to get away with it: it starts from `reset_home`, where the trolley
-    is at zero, and the posture task holds the whole configuration near its seed
-    — so the drift is small. `check_park` below measures it rather than assuming.
+    ⚠️ Has to pin everything the solve must not use, and cannot use `pin_base`
+    to do it — it builds its own `mink.Configuration` internally rather than
+    taking a `Reacher`. With one arm it got away with not pinning at all: the
+    solve starts from `reset_home` with the trolley at zero and the posture task
+    holds the configuration near its seed, so the drift was small enough that
+    `check_park` measured it as noise.
+
+    ⚠️ **With two arms it stops being noise.** The QP gets 13 free DOF for one
+    tool point and only six are read back, which came out as "park posture
+    missed by 1950 mm" for arm b — the correct frame, solved against the wrong
+    set of joints. `arms` names every arm fitted so the others can be pinned;
+    it defaults to just this one, which is the single-armed behaviour.
     """
+    fitted = (tag,) if arms is None else tuple(arms)
+    pin = [trolley.DRIVE_JOINT]
+    for p in trolley.other_arms(tag, fitted):
+        pin += [p + j for j in _JOINTS]
+    # ⚠️ And the scratch has to stand where the machine stands. `PARK` below is
+    # a world point derived from this trolley's current y; solving it against a
+    # fresh MjData, where the drive joint is zero, asks the arm to park wherever
+    # the trolley happened to start. See `mission.park_posture`'s `hold`.
+    hold = {trolley.DRIVE_JOINT:
+            float(data.qpos[model.joint(trolley.DRIVE_JOINT).qposadr[0]])}
     with at_trolley(model, data, tag):
-        return mission.park_posture(model, **kw)
+        return mission.park_posture(model, prefix=trolley.ARM_PREFIX[tag],
+                                    pin=tuple(pin), hold=hold, **kw)
 
 
 def check(model, data, tag="a"):

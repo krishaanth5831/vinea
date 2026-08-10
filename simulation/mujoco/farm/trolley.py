@@ -101,6 +101,42 @@ DRIVE_ACT = "trolley_y_pos"
 # Arm mounts, in trolley-local x. See `house.ARM_OFFSET`.
 ARM_X = {"a": +house.ARM_OFFSET, "b": -house.ARM_OFFSET}
 
+# The name prefix each arm's joints, actuators, sites, links and cameras carry.
+#
+# ⚠️ **Arm "a" is deliberately unprefixed**, and this is the whole reason a
+# two-armed machine did not require rewriting Weeks 1-4. `mission`, `reach`,
+# `week2_pick` and `carrytrace` all look up `j1`, `tool0`, `wrist3_link` and
+# `gr_fingers_actuator` by bare name; give arm a a prefix and every one of them
+# raises `KeyError` on a name that used to exist. Arm b takes `b_` and every
+# module that has to address a specific arm takes a `prefix` argument
+# defaulting to "".
+ARM_PREFIX = {"a": "", "b": "b_"}
+
+# Which way each arm faces, in degrees of yaw about the deck's z axis.
+#
+# ⚠️ **Arm b is bolted down turned round, and this is mechanical rather than
+# cosmetic.** The two arms work rows on opposite sides of the aisle: arm a
+# reaches toward +x, arm b toward -x. An FR5 mounted facing +x and asked to work
+# a row behind it has to fold back over its own shoulder — the postures that
+# reach at all are wound up, near singular, and nothing Weeks 1-4 measured
+# applies to them. Turned 180°, arm b's *own* frame sees exactly what arm a's
+# does: a row 600 mm ahead at the same heights. That is the whole reason the
+# second arm needed no new manipulation numbers.
+#
+# `farm.armframe` has to apply the same rotation to the Week 1-4 planning
+# constants, which are world-frame. See `_MIRROR` there.
+ARM_YAW = {"a": 0.0, "b": 180.0}
+
+
+def other_arms(tag, arms):
+    """Prefixes of the arms on this machine that are *not* `tag`.
+
+    What `farm.armframe.pin_base` needs: one Reacher's IK has every other arm's
+    joints inside its own `mink.Configuration`, and they have to be pinned or
+    the solver plans with them and the executor never moves them.
+    """
+    return tuple(ARM_PREFIX[t] for t in arms if t != tag)
+
 CHASSIS = [0.36, 0.38, 0.42, 1.0]
 DECKTOP = [0.58, 0.60, 0.63, 1.0]
 
@@ -192,7 +228,8 @@ def add_trolley(spec, aisle=0, arms=("a",), crate=True, y0=0.0):
                rgba=[0.30, 0.32, 0.35, 1.0], mass=0.0)
 
     if crate:
-        _add_crate(spec, body)
+        for tag in arms:
+            _add_crate(spec, body, tag)
 
     for tag in arms:
         _mount_arm(spec, body, tag)
@@ -228,10 +265,22 @@ def add_trolley(spec, aisle=0, arms=("a",), crate=True, y0=0.0):
 # BIN_POS is [0.30, -0.52, 0.0] relative to an arm at the origin, and Weeks 1-4
 # flew that carry a few hundred times. So the crate goes at the arm's mount plus
 # that offset and the whole carry-and-release geometry comes across proven.
-CRATE_LOCAL = np.array([ARM_X["a"] + 0.30, -0.52, DECK_Z + 0.016])
+# ⚠️ One crate **per arm**, mirrored with the arm that feeds it. Arm b is
+# bolted round 180° (see ARM_YAW), so the offset that puts a crate within
+# arm a's proven carry puts it *behind* arm b. Sharing arm a's crate would ask
+# arm b for a 0.70 m reach across the deck in exactly the direction the carry
+# leg is worst at — the 923 mm stall described above, again.
+def _crate_local(tag):
+    """Where arm `tag`'s crate sits, in trolley-local coordinates."""
+    sign = 1.0 if ARM_YAW[tag] == 0.0 else -1.0
+    return np.array([ARM_X[tag] + sign * 0.30, sign * -0.52,
+                     DECK_Z + 0.016])
 
 
-def _add_crate(spec, body):
+CRATE_LOCAL = _crate_local("a")
+
+
+def _add_crate(spec, body, tag="a"):
     """The container the fruit go into, riding on the deck behind the arms.
 
     ⚠️ **Collidable, unlike everything else on the trolley, and it has to be.**
@@ -250,23 +299,24 @@ def _add_crate(spec, body):
 
     from mission import BIN_HALF, BIN_WALL
 
-    crate = body.add_body(name="crate", pos=list(CRATE_LOCAL))
+    name = "crate" if tag == "a" else f"{ARM_PREFIX[tag]}crate"
+    crate = body.add_body(name=name, pos=list(_crate_local(tag)))
     grey = [0.30, 0.33, 0.38, 1.0]
     t = 0.008
-    crate.add_geom(name="crate_floor", type=mujoco.mjtGeom.mjGEOM_BOX,
+    crate.add_geom(name=f"{name}_floor", type=mujoco.mjtGeom.mjGEOM_BOX,
                    size=[BIN_HALF, BIN_HALF, t], pos=[0, 0, t], rgba=grey)
     for tag, p, s in (
             ("x+", [BIN_HALF, 0, BIN_WALL / 2], [t, BIN_HALF, BIN_WALL / 2]),
             ("x-", [-BIN_HALF, 0, BIN_WALL / 2], [t, BIN_HALF, BIN_WALL / 2]),
             ("y+", [0, BIN_HALF, BIN_WALL / 2], [BIN_HALF, t, BIN_WALL / 2]),
             ("y-", [0, -BIN_HALF, BIN_WALL / 2], [BIN_HALF, t, BIN_WALL / 2])):
-        crate.add_geom(name=f"crate_{tag}", type=mujoco.mjtGeom.mjGEOM_BOX,
+        crate.add_geom(name=f"{name}_{tag}", type=mujoco.mjtGeom.mjGEOM_BOX,
                        size=s, pos=p, rgba=grey)
     return crate
 
 
-def crate_pos(model, data):
-    """Where the crate is *now*, in world coordinates.
+def crate_pos(model, data, tag="a"):
+    """Where arm `tag`'s crate is *now*, in world coordinates.
 
     ⚠️ The crate rides on the trolley, so it moves. `mission.BIN_POS` is a
     module constant and every Week 1-4 caller reads it as one; a mission planned
@@ -274,7 +324,8 @@ def crate_pos(model, data):
     at a patch of floor several metres behind the machine. Anything that drops
     fruit has to ask rather than remember.
     """
-    return data.body("crate").xpos.copy()
+    return data.body("crate" if tag == "a"
+                     else f"{ARM_PREFIX[tag]}crate").xpos.copy()
 
 
 def _mount_arm(spec, body, tag):
@@ -295,12 +346,11 @@ def _mount_arm(spec, body, tag):
     for k in list(arm.keys):
         arm.delete(k)
 
-    frame = body.add_frame(pos=[ARM_X[tag], 0.0, DECK_Z + 0.016])
-    # ⚠️ Prefix only the second arm. Arm "a" keeps the bare joint, link and site
-    # names — `JOINTS`, `TOOL_SITE`, `LINKS` — that every Week 1-4 module looks
-    # up by name, so `mission`, `reach` and `week2_pick` drive it unchanged. Give
-    # it a prefix and all of them raise KeyError on a name that used to exist.
-    spec.attach(arm, prefix="" if tag == "a" else f"{tag}_", frame=frame)
+    yaw = np.radians(ARM_YAW[tag])
+    frame = body.add_frame(pos=[ARM_X[tag], 0.0, DECK_Z + 0.016],
+                           quat=[np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+    # See ARM_PREFIX for why arm "a" is the unprefixed one.
+    spec.attach(arm, prefix=ARM_PREFIX[tag], frame=frame)
     return frame
 
 
@@ -339,7 +389,12 @@ def build(aisle=0, arms=("a",), crate=True, wrist_cam=False, deck_cam=False,
     if wrist_cam:
         from camera import add_wrist_camera
 
-        add_wrist_camera(spec)
+        # One eye per arm, named for the arm. `arms` is the truth about what is
+        # fitted, so a scene built with one arm gets one wrist camera and the
+        # panel that renders `b_wrist` fails loudly rather than showing arm a's
+        # view under arm b's label.
+        for tag in arms:
+            add_wrist_camera(spec, prefix=ARM_PREFIX[tag])
     if deck_cam:
         from farm.scout import add_deck_camera
 
@@ -412,7 +467,7 @@ class Drive:
 
 # --- the gate ----------------------------------------------------------------
 
-def reach_gate(seed=1, verbose=True):
+def reach_gate(seed=1, verbose=True, arms=("a",)):
     """Can the arm on the trolley still reach the crop it is parked beside?
 
     ⚠️ **This is the check that says whether Weeks 1-4 carry over.** The whole
@@ -425,6 +480,12 @@ def reach_gate(seed=1, verbose=True):
     A failure here does not mean the arm is broken. It means the machine has
     been built in a place the arm cannot work from, which is a chassis bug
     wearing a manipulation bug's clothes.
+
+    ⚠️ With `arms=("a", "b")` it flies the same check for **both** arms, each
+    against its own row. That is the claim the second arm rests on: arm b is not
+    a mirror of arm a by assertion, it is a mirror because `ARM_OFFSET` puts it
+    the same 600 mm off a row on the other side of the aisle. Either that
+    reproduces Week 1-4's geometry or it does not, and this is where it shows.
     """
     import mujoco
 
@@ -434,55 +495,65 @@ def reach_gate(seed=1, verbose=True):
     from plant_row import Row
 
     trusses = fcrop.spawn(n_per_row=10, rows=[0, 1], seed=seed)
-    model = build(aisle=0, arms=("a",), trusses=trusses, seed=seed)
+    model = build(aisle=0, arms=arms, trusses=trusses, seed=seed)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
 
-    # ⚠️ Solved in the arm's own frame, not the world's. `mission.park_posture`
-    # aims at the constant `PARK`, which is 196 mm outside this arm's reach
-    # because this arm is not at the origin. See `farm.armframe`.
-    park_q = armframe.park_posture(model, data)
-    reset_park(model, data, park_q)
-
     names = [t.name for t in trusses]
-    row = Row(model, data, names=names,
-              homes={t.name: t.pos for t in trusses})
-    mujoco.mj_forward(model, data)
-
-    drive = Drive(model, data)
-    # Arm A works the row on the +x side of the aisle, which is row 1.
-    _left, right = house.serves(0)
-    mine = [t for t in trusses if t.row == right]
-
-    rows = []
-    for t in mine:
-        drive.park_at(float(np.clip(t.y, *y_limits())))
-        park_arm(model, data, park_q)
-        mujoco.mj_forward(model, data)
-        with armframe.at_trolley(model, data):
-            planner = Planner(model, data, row, lessons=None, clearance=0.040,
-                              park_q=park_q, speed=0.4)
-            m = planner.plan(t.name)
-        rows.append((t, m))
-
-    ok = sum(1 for _t, m in rows if m.ok)
+    total_ok = total_n = 0
     if verbose:
-        print(f"\n  --- can the arm work the crop from the trolley? ---")
-        print(f"  aisle a0 at x={house.aisle_x(0):.2f}, arm A at "
-              f"x={house.aisle_x(0) + house.ARM_OFFSET:.2f}, "
-              f"row r{right} at x={house.row_x(right):.2f}")
-        print(f"  standoff {house.WORK_STANDOFF * 1000:.0f} mm — the Week 1-4 "
-              f"figure\n")
-        print(f"  {'fruit':<8} {'y':>7} {'z':>7} {'stage':<9} {'planned':>8} "
-              f"{'clearance':>10}  route")
-        for t, m in rows:
-            print(f"  {t.name:<8} {t.y:>7.2f} {t.z:>7.2f} {t.stage:<9} "
-                  f"{str(m.ok):>8} "
-                  f"{m.clearance * 1000 if m.ok else float('nan'):>10.0f}  "
-                  f"{(m.tried[-1] if m.tried else m.lane) if m.ok else m.breaches[0] if m.breaches else 'no route'}")
-        print(f"\n  planned {ok}/{len(rows)}")
-        print(f"  {'PASS' if ok == len(rows) else 'FAIL'}")
-    return ok, len(rows)
+        print("\n  --- can the arms work the crop from the trolley? ---")
+
+    for tag in arms:
+        prefix = ARM_PREFIX[tag]
+        # ⚠️ Solved in the arm's own frame, not the world's. `mission.park_posture`
+        # aims at the constant `PARK`, which is 196 mm outside this arm's reach
+        # because this arm is not at the origin. See `farm.armframe`.
+        park_q = armframe.park_posture(model, data, tag, arms=arms)
+        reset_park(model, data, park_q, prefix=prefix)
+
+        row = Row(model, data, names=names,
+                  homes={t.name: t.pos for t in trusses})
+        mujoco.mj_forward(model, data)
+
+        drive = Drive(model, data)
+        worked = armframe._worked_row(0, tag)
+        mine = [t for t in trusses if t.row == worked]
+
+        rows = []
+        for t in mine:
+            drive.park_at(float(np.clip(t.y, *y_limits())))
+            park_arm(model, data, park_q, prefix=prefix)
+            mujoco.mj_forward(model, data)
+            with armframe.at_trolley(model, data, tag):
+                planner = Planner(model, data, row, lessons=None,
+                                  clearance=0.040, park_q=park_q, speed=0.4,
+                                  prefix=prefix)
+                m = planner.plan(t.name)
+            rows.append((t, m))
+
+        ok = sum(1 for _t, m in rows if m.ok)
+        total_ok += ok
+        total_n += len(rows)
+        if verbose:
+            base = armframe.arm_base(model, data, tag)
+            print(f"\n  arm {tag.upper()} at x={base[0]:.2f} works row "
+                  f"r{worked} at x={house.row_x(worked):.2f} — standoff "
+                  f"{house.WORK_STANDOFF * 1000:.0f} mm, the Week 1-4 figure\n")
+            print(f"  {'fruit':<8} {'y':>7} {'z':>7} {'stage':<9} "
+                  f"{'planned':>8} {'clearance':>10}  route")
+            for t, m in rows:
+                print(f"  {t.name:<8} {t.y:>7.2f} {t.z:>7.2f} {t.stage:<9} "
+                      f"{str(m.ok):>8} "
+                      f"{m.clearance * 1000 if m.ok else float('nan'):>10.0f}  "
+                      f"{(m.tried[-1] if m.tried else m.lane) if m.ok else m.breaches[0] if m.breaches else 'no route'}")
+            print(f"  planned {ok}/{len(rows)}")
+
+    if verbose:
+        print(f"\n  planned {total_ok}/{total_n} across "
+              f"{len(arms)} arm{'s' if len(arms) > 1 else ''}")
+        print(f"  {'PASS' if total_ok == total_n else 'FAIL'}")
+    return total_ok, total_n
 
 
 def main():
@@ -501,7 +572,8 @@ def main():
 
     print(__doc__)
     if args.reach:
-        ok, n = reach_gate(seed=args.seed)
+        ok, n = reach_gate(seed=args.seed,
+                           arms=("a", "b")[: args.arms])
         return 0 if ok == n else 1
 
     os.environ.setdefault("MUJOCO_GL", "egl" if args.shot else "glfw")
