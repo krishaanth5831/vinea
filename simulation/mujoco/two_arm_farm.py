@@ -471,12 +471,27 @@ class Windows:
                                           max_geom=30000)
         self.aisle_cam = AisleCam(model, data, aisle=state.aisle)
 
+        # ⚠️ **Window titles are ASCII only, and this is a hard constraint of the
+        # backend rather than a style choice.** OpenCV 5's Qt highgui keys its
+        # window registry by the title string, and a non-ASCII one does not
+        # round-trip: `namedWindow` appears to succeed, the window is never
+        # registered, and the very next `setMouseCallback` dies with
+        #
+        #     error: (-27:Null pointer) NULL window handler
+        #
+        # These two titles used an em dash, to match this repo's prose. Every
+        # other `Sink` title in the repo happens to use a plain hyphen, so
+        # nothing had ever exercised the failure. Verified directly: the same
+        # call with `-` succeeds and with `—` raises.
+        #
+        # Panel *captions* are unaffected — `cv2.putText` renders an em dash
+        # fine — so the dashes inside the frames stay.
         self.sensors = Sink(live=out is None, out=None if out is None
                             else f"{out}_sensors.mp4", fps=fps,
-                            title="vinea — SENSORS  (2 wrist + 2 deck)")
+                            title="vinea - SENSORS (2 wrist + 2 deck)")
         self.mission = Sink(live=out is None, out=None if out is None
                             else f"{out}_mission.mp4", fps=fps,
-                            title="vinea — MISSION  (map, aisle, pipeline)")
+                            title="vinea - MISSION (map, aisle, pipeline)")
 
     def close(self):
         for r in self.r.values():
