@@ -355,8 +355,16 @@ def _mount_arm(spec, body, tag):
 
 
 def build(aisle=0, arms=("a",), crate=True, wrist_cam=False, deck_cam=False,
-          leafy=True, pitch=0.32, seed=0, trusses=None):
-    """The whole thing: house, trolley, arm(s), optionally cameras and crop."""
+          leafy=True, pitch=0.32, seed=0, trusses=None, arm_decks=False):
+    """The whole thing: house, trolley, arm(s), optionally cameras and crop.
+
+    `deck_cam` fits the shared centreline scouting head (`farm.scout`), which
+    turns 180° to serve both rows from one lens. `arm_decks` fits **one head per
+    arm** instead (`farm.decks`), each over its own arm's plate and scanning only
+    its own row. They are not exclusive — a scene may carry both, and
+    `two_arm_farm.py` does not, because two eyes per row is two answers to the
+    same question and the map would have to arbitrate between them.
+    """
     import mujoco
 
     spec = mujoco.MjSpec()
@@ -399,6 +407,13 @@ def build(aisle=0, arms=("a",), crate=True, wrist_cam=False, deck_cam=False,
         from farm.scout import add_deck_camera
 
         add_deck_camera(spec, aisle=aisle)
+    if arm_decks:
+        from farm.decks import add_arm_deck_cameras
+
+        # One per *fitted* arm, so a one-armed scene gets one head and the panel
+        # that renders `deck_b` fails loudly rather than showing arm a's view
+        # under arm b's label — the same rule `wrist_cam` follows above.
+        add_arm_deck_cameras(spec, aisle=aisle, arms=arms)
 
     # ⚠️ The pads again — same reason as `greenhouse.build_scene`, and it has to
     # be repeated because that function is not the one building this scene.
