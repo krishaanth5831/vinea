@@ -110,15 +110,19 @@ def main():
 
     # Park every fitted arm, each in its own frame. An unparked arm sits at
     # HOME, which points its wrist camera at the ceiling.
-    for tag in arms:
-        q = armframe.park_posture(model, data, tag, arms=arms)
-        reset_park(model, data, q, prefix=trolley.ARM_PREFIX[tag])
-    for tag in arms:
-        from mission import park_arm
+    #
+    # ⚠️ Solve all the postures first, then reset **once**, then place each arm.
+    # `reset_park` is `mj_resetData` underneath, so calling it per arm throws
+    # away the arm parked on the previous pass — arm A would end up back at HOME
+    # with only arm B parked, and the panel would show it staring at the roof.
+    from mission import park_arm
 
-        park_arm(model, data, armframe.park_posture(model, data, tag,
-                                                    arms=arms),
-                 prefix=trolley.ARM_PREFIX[tag])
+    parks = {tag: armframe.park_posture(model, data, tag, arms=arms)
+             for tag in arms}
+    reset_park(model, data, parks[arms[0]],
+               prefix=trolley.ARM_PREFIX[arms[0]])
+    for tag in arms:
+        park_arm(model, data, parks[tag], prefix=trolley.ARM_PREFIX[tag])
     mujoco.mj_forward(model, data)
 
     cams = {tag: (trolley.ARM_PREFIX[tag] + "wrist") for tag in arms}
