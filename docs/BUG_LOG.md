@@ -253,7 +253,43 @@ bar, and a dark grey outline on it is invisible.
 background" are one CSS value apart, and only looking at the render tells them
 apart.
 
-### F8 — The stale claim that the chassis never moves
+### F8 — The map could only show outcomes when handed the answer
+
+**Repro (before the fix).** Run `two_arm_farm.py` *without* `--truth` and watch
+the map: dots appear and are coloured by believed ripeness, but none is ever
+crossed out as picked or marked refused. Run it *with* `--truth` and they are.
+
+**Cause.** The outcome sets are keyed by truss name. A `scout.Sighting` is a
+position and a stage; under `--truth` it carries a `truth` back-reference, but on
+a real mapping pass it carries nothing, and the name link is made per stop inside
+`duo.associate` and then dropped on the floor.
+
+**Fix.** `DuoState.named` keeps the `id(sighting) -> truss name` link that
+`associate` establishes. The panel prefers `truth` where it exists.
+
+**Lesson.** The map is the artifact that proves the robot mapped before it
+picked; one that only works when handed the answer is not that artifact. A
+feature that works on the debug path and not the default path is untested on the
+path that matters.
+
+### F9 — The ripeness overlay blinked at one frame in three
+
+**Repro (before the fix).** `two_arm_farm.py --fps 10 --hsv-hz 3` and watch a
+wrist panel: boxes appear, vanish for two frames, reappear.
+
+**Cause.** The detector is deliberately run below the panel rate — it costs more
+than the renders do — but the first cut cached only the *counts* and drew the
+boxes from a live detection, so intervening frames had none.
+
+**Fix.** `overlay.find` / `overlay.draw` split, so the calls are cached and
+re-drawn every frame; `draw(stale=True)` thins the box and the caption reads "HSV
+held" rather than "HSV live".
+
+**Lesson.** A box drawn over a moving frame is a claim about *that* frame unless
+it is labelled otherwise — the labelling is what makes a cheaper cadence honest
+rather than merely faster.
+
+### F10 — The stale claim that the chassis never moves
 
 **Repro.** `README.md`, "What this does not prove": *"The chassis never moves.
 Every number here is measured with the arm bolted in one place."*
