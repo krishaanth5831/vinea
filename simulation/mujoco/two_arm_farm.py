@@ -434,6 +434,10 @@ class Windows:
         self.detector = None
         self._boxes = {}
         self.frames = 0
+        self._phase = {}
+        import time as _t2
+
+        self._last = _t2.perf_counter()
 
         from reach import CTRL_DT
 
@@ -528,8 +532,13 @@ class Windows:
                      else (0.0, 0.0))
         _title(img, f"{st.name.upper()} DECK  —  row r{st.row}  —  "
                     f"pan {pan:+.0f}deg", ARM_COL[tag])
-        cv2.putText(img, f"{st.phase}", (8, SENS_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, DIM, 1, cv2.LINE_AA)
+        # On its own strip rather than floated over the render — text at
+        # `SENS_H - 10` sits on the tile seam and the descenders are clipped by
+        # the `vstack` below it.
+        cv2.rectangle(img, (0, SENS_H - 22), (img.shape[1], SENS_H),
+                      (24, 24, 24), -1)
+        cv2.putText(img, f"{st.phase}  {st.detail}"[:52], (8, SENS_H - 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, DIM, 1, cv2.LINE_AA)
         return img
 
     def compose_sensors(self, fresh):
@@ -572,6 +581,25 @@ class Windows:
         fresh = (self._panel_n % self.hsv_every) == 0
         self.sensors.push(self.compose_sensors(fresh))
         self.mission.push(self.compose_mission())
+        # ⚠️ Booked per phase, not as one average. The mapping pass renders two
+        # 1280x960 depth+RGB sensor pairs per scan pose on top of the panels,
+        # and the harvest does not — so a single mean over the whole run is a
+        # number that describes neither. See `rates`.
+        import time as _t2
+
+        now = _t2.perf_counter()
+        ph = self.state.phase
+        book = self._phase.setdefault(ph, [0, 0.0])
+        book[0] += 1
+        book[1] += now - self._last
+        self._last = now
+
+    def rates(self):
+        """(phase, frames, seconds, fps) per phase, busiest first."""
+        out = [(ph, n, s, n / s if s > 0 else float("nan"))
+               for ph, (n, s) in self._phase.items()]
+        out.sort(key=lambda r: -r[2])
+        return out
 
     def flush(self, n=1):
         for _ in range(n):
@@ -742,9 +770,17 @@ def main():
         wall = time.perf_counter() - t0
         if windows is not None:
             n = windows._panel_n
-            print(f"\n  {n} composed frames in {wall:.0f} s wall — "
-                  f"{n / max(wall, 1e-9):.1f} panel fps "
-                  f"(2 windows, {2 * n} pushed)")
+            print(f"\n  --- frame rate ---")
+            print(f"  {n} composed frames in {wall:.0f} s wall — "
+                  f"{n / max(wall, 1e-9):.1f} panel fps overall "
+                  f"({2 * n} window pushes across 2 windows)")
+            print(f"\n  {'phase':<10} {'frames':>7} {'seconds':>9} {'fps':>7}")
+            for ph, fr, secs, fps in windows.rates():
+                print(f"  {ph:<10} {fr:>7} {secs:>9.0f} {fps:>7.1f}")
+            print(f"\n  ⚠️ The mapping pass renders two 1280x960 RGB+depth "
+                  f"sensor pairs per\n     scan pose on top of the four panels; "
+                  f"the harvest renders panels only.\n     One mean over both "
+                  f"describes neither — read the per-phase rates.")
             windows.close()
         else:
             print(f"\n  {wall:.0f} s wall, no windows")
