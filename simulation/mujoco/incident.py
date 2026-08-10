@@ -128,12 +128,19 @@ class Blackbox:
     reading history.
     """
 
-    def __init__(self, model, data, row, target, snap_n=None):
+    def __init__(self, model, data, row, target, snap_n=None, prefix=""):
         self.model = model
         self.data = data
         self.row = row
         self.target = target
         self.snap_n = row.snap_n if snap_n is None else snap_n
+        # ⚠️ Which arm's tool an incident is recorded against. Bare is arm a
+        # (`farm.trolley.ARM_PREFIX`); on a two-armed machine an incident logged
+        # while arm b was flying would otherwise carry arm a's tool position as
+        # the "where the arm was" evidence, which is the one field an incident
+        # report exists to get right.
+        self.prefix = prefix
+        self.tool_site = prefix + "tool0"
 
         self.leg = "?"
         self.t = 0.0
@@ -266,7 +273,7 @@ class Blackbox:
             victim=victim, leg=self.leg, cause=cause, detached=detached,
             culprit=culprit, force_n=float(self.row.peak[victim]),
             moved_mm=moved, gap_ms=gap if fresh else float("nan"),
-            tool=self.data.site("tool0").xpos.copy(),
+            tool=self.data.site(self.tool_site).xpos.copy(),
             victim_at=self.row.pos(victim).copy(), target=self.target)
 
     def sweep(self):

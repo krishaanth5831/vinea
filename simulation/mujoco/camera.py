@@ -296,7 +296,7 @@ def _quat_to_mat(quat):
 
 
 def add_wrist_camera(spec, name=CAM_NAME, mount=CAM_MOUNT, aim=CAM_AIM,
-                     fovy=45.0, housing=True):
+                     fovy=45.0, housing=True, prefix=""):
     """Bolt the sensor camera to wrist3_link. Call before `spec.compile()`.
 
     `fovy` matches the three cinematic cameras so the intrinsics story is one
@@ -307,8 +307,15 @@ def add_wrist_camera(spec, name=CAM_NAME, mount=CAM_MOUNT, aim=CAM_AIM,
     because an invisible camera is one nobody can check, and it is a flag at all
     because it is drawing — see `add_camera_housing` for why it changes no
     physics either way.
+
+    ⚠️ `prefix` picks which arm's wrist to bolt it to, and the camera is named
+    for that arm too — `wrist` for the first, `b_wrist` for the second. Without
+    it, `spec.body("wrist3_link")` resolves to the *first* arm on a two-armed
+    machine and the second arm has no eye at all, while a caller asking for the
+    `wrist` camera gets a plausible picture from the wrong arm.
     """
-    wrist = spec.body("wrist3_link")
+    name = prefix + name
+    wrist = spec.body(prefix + "wrist3_link")
     xyaxes = _xyaxes_towards(mount, aim)
     wrist.add_camera(name=name, pos=list(mount), fovy=fovy, xyaxes=xyaxes)
     if housing:

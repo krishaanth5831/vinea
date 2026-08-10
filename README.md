@@ -324,11 +324,60 @@ The arm no longer parks at its home posture — it parks on the staging plane, o
 
 The plant row is sized to exactly the band this arm can work: a 31×24 grid over the board was driven point by point, and the panel is the largest rectangle that fits inside the result with margin. Every click on it is pickable.
 
+---
+
+## Week 5 — a whole house: scout it, plan it, harvest it
+
+Everything above works **one row, from a base bolted to the floor**. That answers a manipulation question. `simulation/mujoco/farm/` asks the logistics one: four rows, eight metres, and a machine that has to drive to reach any of it.
+
+```bash
+./.venv/bin/python simulation/mujoco/farm/watch.py     # the whole shift, six panels
+```
+
+    +-------------------+-------------------+-------------------+
+    | scout cam         | down the aisle    | the house         |
+    +-------------------+-------------------+-------------------+
+    | THE MAP           | the robot's shift | wrist cam         |
+    +-------------------+-------------------+-------------------+
+
+**A shift, with nothing handed to it.** The robot is told the house exists and which aisle it is in. It is not told where a single tomato is. It drives the aisle mapping as it goes, decides which fruit are ripe, plans where to stop, and takes them: on a 48-fruit house, **4 crated of the 5 ripe fruit on its row**, 1 refused (a real neighbour 30 mm from the pad), 2 never detected. 20 s scouting, 33 s driving, 76 s picking.
+
+**The pipe rail is the finding.** There is no off-the-shelf mobile base for the FR5 and no public URDF for one, and the open-source bases that do ship URDFs are laptop-shelf research platforms. But a free-roaming AMR is the wrong machine anyway: **Dutch glasshouses already have a rail network in every aisle** — the heating pipes, 51 mm OD at 550 mm centres, which every trolley in the industry runs on. That makes the base a **1-DOF robot**. No localisation, no drift, no navigation margin, and it physically cannot wander into a crop row. An AMR would be solving SLAM to reproduce a constraint the building gives away free.
+
+**The 1.60 m row pitch is what forces two arms**, and the arithmetic is worth following. A trolley in the aisle sits 800 mm from the crop either side — reachable, and *not* where any Week 1–4 number was measured, which was a **600 mm** standoff. Mount the arms ±200 mm off the centreline and they are back at 600 mm exactly, every measured clearance and cycle time carried over unchanged. The 200 mm on the other side is then the second arm's mount. A one-armed trolley drives every aisle twice.
+
+**Ripeness works where it matters and fails where it is interesting.** The hue separation was measured before the detector was designed, not after:
+
+| stage | hue | vs the canopy | recall |
+|---|---|---|---|
+| red | 2 | clear | **100%**, and 100% correctly banded |
+| turning | 14 | clear | 100% |
+| breaker | 29 | clear | 100% |
+| green | 49 | **a stem is 55, a leaf is 62** | **33%** |
+
+⚠️ **That costs the harvest nothing and would cost a scouting product a great deal.** Only red is picked, and red is the band that works — a green fruit the map misses is one nobody was going to touch. But Vinea's second module is *scouting*, whose output is a yield forecast, and a forecast built on "we counted the fruit we could see" is wrong in the direction that flatters it. Green recall is the number to quote there, not the average.
+
+**Two gaps, stated rather than papered over.** ~~The scout camera looks one way, so the second arm's row maps **0/14**~~ — **fixed twice over**: the shared head was made to articulate and turn 180° (0/14 → 8/14), and then given up in favour of **one head per arm** (`farm/decks.py`), each over its own arm's plate at the Week 1–4 standoff of 0.60 m, scanning only its own row and never crossing the aisle. And `farm/armframe.py` rebinds other modules' globals, because `mission.py` is written in absolute world coordinates and that breaks the moment the arm rides a moving base; it is confined to one context manager that asserts it restores all 8 bindings across 4 modules, but the real fix is for `mission` to plan in the arm's frame, which means re-taking every clearance number above to prove nothing moved.
+
+### Both arms, one row, two windows
+
+```bash
+./.venv/bin/python simulation/mujoco/two_arm_farm.py   # or: python 2armfarm.py
+```
+
+The whole cycle for one full row — map, plan, travel, pick, crate — with two arms and two live windows: a **SENSORS** window (both wrist cams with the HSV ripeness overlay, both deck cams with their live pan angles) and a **MISSION** window (the map, a tracking aisle shot, the live pipeline state per arm, and per-arm pick times with a running mean). See [COMMANDS.md](COMMANDS.md).
+
+⚠️ **The arms are serialised — one flies while the other stows — and this is forced rather than chosen.** `armframe`'s global rebinding above is per-arm, so two arms mid-mission at once is not currently expressible in this codebase. It is stated on screen and in the run's own report.
+
+**Building it found four bugs that had been shipping since the second arm was fitted**, all recorded in the Bug Log (entries 43, 54, 55, 56): the two arms were **parked 83 mm inside each other** (forearm through forearm, on every two-armed scene ever built); nothing checked arm against arm, so the clash was in nobody's obstacle set; `week2_pick.execute` scored arm B's grasps against **arm A's gripper**, returning `grasped: False` on picks that had worked; and the planner previewed routes with 13 free DOF that the executor flew with 6. The first one is the instructive one — it had been visible in every render since the arm was added, and nothing was looking.
+
 ## What this does not prove
 
 Worth saying before anyone else says it:
 
 - **Sim contact is not real contact.** A MuJoCo grasp rate is not a field grasp rate. A real tomato is soft, wet, and bruises.
+- **The Week 5 ripeness signal is a colour the scene file sets.** `farm/crop.py` hangs fruit across the real horticultural stages so there *is* something to classify — which answers `ripeness.py`'s objection that uniform red spheres carry no signal — but the hue comes straight out of an `rgba`, with no calyx, no shoulder, no ribbing, no bloom and no lighting variation. A classifier that reads it perfectly has demonstrated the **pipeline**, not the perception. The honest claim is "the robot can carry a ripeness decision through mapping, routing and picking"; the number that means anything is how many ripe fruit reached the crate, not the classifier's accuracy.
+- **One aisle, one arm, one pass.** The Week 5 shift works a single aisle with arm A. The second arm is mounted and its geometry is proven, but nothing drives it; the house is four rows and a shift covers one of them properly.
 - **The stem's break force is invented.** No force gauge has been near a real peduncle for this project. It is set to 12 N by the *simulator* — gripping an attached fruit loads the stem 6-8.6 N by itself, so anything under ~9 N detaches on contact.
   **It does not, however, decide whether picks succeed.** Swept 9 / 12 / 16 / 20 N over one 8-fruit layout, every fruit returned the *identical* outcome at every value, and kg/hr moved 11% on cycle-time noise alone. `SNAP_N` sets when the stem parts and nothing downstream depends on it: the failures happen either before detachment (the arm never arrives, or never grips) or after it (the fruit is flung during carry). Still an invented number that has to be declared — just not the one the throughput figure is fragile to.
   ```bash
@@ -337,8 +386,8 @@ Worth saying before anyone else says it:
 - **The planner is no longer given perfect positions, but the cameras are perfect.** Week 3 closed the loop — an eye-in-hand camera, a detector and a deprojection verified to 0.39 mm against ground truth — and the deck camera closed the last hole in it, which was that the arm still learned *where to look* from the script. What remains ideal is the *sensors*: square pixels, no distortion, principal point exactly centred, no noise, and extrinsics known to machine precision. Real hand-eye calibration is a millimetre-level problem on its own and is not in this repo, and a second camera means two of them plus the transform between.
 - **The deck camera's recall is flattered by the scene.** Red spheres against green foliage, noiseless depth, and every leaf `contype=0` and above the fruit. It finds 21/21 across the whole band, and that number says more about the renderer than about the sensor. The one place it fails is real and is not tuned away: four fruit in a 70 mm cluster fuse into a single blob and come back as *one* detection with a position 48 mm off, between them — **and the pan-tilt head does not fix it**, returning the same 3 of 6 from all five poses.
 - **The pick order is scored by a proxy, and the proxy currently has no ordering signal in it.** `deck_cam.plan_order` runs a geometric cost model in milliseconds; whether a route actually exists is `mission.Planner`'s kinematic replay at ~150 ms. The proxy's thresholds were swept against the planner on *two-fruit* rows, and they do not survive the trip to fifteen: `_pair_risk` is symmetric, so it scores both fruit of a close pair as blocked while the sweep it was fitted to says one of them plans fine. The search over that model is exact-then-refined and near-optimal; the model it is searching believes no order can save a fruit. `week4_order.py` flies both orders and returns a tie, which is the model's own prediction. The fix is a directional term fitted to a sweep that records *which* fruit of a pair gets refused.
-- **The chassis never moves.** Every number here is measured with the arm bolted in one place, working fruit inside its own envelope. A real harvester spends a large fraction of its cycle travelling down the row and turning at the headland, and none of that is simulated or counted in any cycle time. It is the single largest reason a kg/hr figure from this repo is an upper bound.
-- **It picks every fruit it sees.** No ripeness selection — that is deferred by design and blocked on a dataset licence — so the throughput assumes every tomato is a target, which no real pass ever is.
+- ~~**The chassis never moves.**~~ **Out of date for Weeks 1–4's numbers only.** Every Week 1–4 figure quoted above *was* measured with the arm bolted in one place, and that is still what those numbers mean. But Week 5 built the trolley: `farm.trolley` is a pipe-rail chassis with a real prismatic drive joint and a position servo, `farm/trolley.py --drive` drives the length of the house, and `farm/duo.py` counts the travel time as its own line in the shift report. What is still true is the narrower claim — **no Week 1–4 cycle time includes travel**, and there is no headland turn anywhere, because a pipe-rail trolley in a single bay never makes one.
+- **It picks every fruit it sees.** ⚠️ **Out of date.** Weeks 1–4 had no ripeness selection because every fruit was one `rgba`. `farm.crop` hangs fruit across four horticultural colour stages and only `red` is taken, so the Week 5 throughput is over *targets* rather than over every tomato. The honest remaining caveat is that the classifier reads a hue the scene sets directly — no calyx, no shoulder, no bloom, no lighting variation — so it demonstrates the pipeline, not the perception.
 - **A hand-placed crop is not a crop.** `week4_place.py` will put fruit anywhere, which is what makes it useful for stress-testing the planner, and it means the layouts are arrangements *chosen* rather than ones a plant produced. Real trusses sit where the plant puts them.
 - **The greenhouse is scenery, not obstacles.** Every leaf and post is `contype=0` — drawn, uncollidable. The arm cannot be occluded by a leaf or blocked by a wire, and in a real row both happen. It looks like a greenhouse; it does not yet behave like one.
 - **Nothing in the crop can move except the fruit.** Real trusses swing, stems bend, and a plant pushed at 09:00 is somewhere else at 09:01.
@@ -382,6 +431,15 @@ simulation/mujoco/
   week4_run.py        the throughput campaign across crop densities
   legacy_cycle.py     the unplanned cycle, kept as the baseline to beat
   week1_*.py          the Week 1 demos
+  farm/               Week 5: the whole house, kept separate from weeks 1-4
+    house.py          four rows at real Venlo dimensions, pipe rails and all
+    trolley.py        the pipe-rail trolley the arm rides, room for a 2nd arm
+    crop.py           a random crop, random ripeness, different every open
+    scout.py          drive the aisle and come back with a map
+    route.py          which stops to make, and what to take at each
+    run.py            a whole shift: scout, plan, harvest into the crate
+    watch.py          all of it in six panels, including the live map
+    armframe.py       makes the world-frame planner work for a moving arm
   parked/             the cradle-and-blade gripper — early, not abandoned
 simulation/lessons.json   what it has learned so far
 third_party/          Fairino URDF, MuJoCo Menagerie — never edited

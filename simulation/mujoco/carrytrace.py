@@ -102,7 +102,18 @@ class CarryTrace:
         execute(mission, reacher, gripper, row, box=box, on_tick=box.tick, ...)
     """
 
-    def __init__(self, model, data, row, target, inner, hold_ctrl=None):
+    def __init__(self, model, data, row, target, inner, hold_ctrl=None,
+                 prefix=""):
+        """`prefix` names which arm is carrying, on a machine with more than one.
+
+        ⚠️ Bare names are arm a's — it is deliberately the unprefixed arm (see
+        `farm.trolley.ARM_PREFIX`) so Weeks 1-4 keep working. Without this, a
+        trace taken while **arm b** carried a fruit would read arm a's tool site,
+        arm a's gripper actuator and arm a's pad geoms: the tool-to-fruit
+        distance would be a metre of nothing, and the pad force trace — the whole
+        reason this class exists, and the instrument that found Bug 40 — would be
+        a recording of an idle gripper on the other side of the deck.
+        """
         import mujoco
 
         from fr5 import gripper_ctrl
@@ -120,13 +131,14 @@ class CarryTrace:
         # executor otherwise leaves the tendon at GRIPPER_CLOSED (255) from the
         # grip all the way to the release.
         self.hold_ctrl = hold_ctrl
-        self.grip_idx = gripper_ctrl(model)
+        self.prefix = prefix
+        self.grip_idx = gripper_ctrl(model, prefix)
 
         self.bid = model.body(target).id
         self.dofadr = model.body(target).dofadr[0]
-        self.tool = model.site("tool0").id
-        self.left = [model.geom(n).id for n in LEFT_PADS]
-        self.right = [model.geom(n).id for n in RIGHT_PADS]
+        self.tool = model.site(prefix + "tool0").id
+        self.left = [model.geom(prefix + n).id for n in LEFT_PADS]
+        self.right = [model.geom(prefix + n).id for n in RIGHT_PADS]
         self.fruit_geom = model.geom(f"{target}_geom").id
 
         self.samples: list[Sample] = []
