@@ -112,12 +112,61 @@ class Truss:
         return np.array([self.x, self.y, self.z])
 
 
+def draw_seed():
+    """A fresh seed for this process, from the OS rather than from the clock.
+
+    ⚠️ **Exists so that "random every launch" and "reproducible" are not
+    opposites.** `spawn(seed=None)` already built a different house each time,
+    but it drew from unseeded entropy internally and nothing could say which
+    house it had been — so a layout that broke the planner was gone the moment
+    the process exited, and the only way to look at it again was to keep
+    re-running and hope. Drawing the seed *outside* and printing it means every
+    run is both new and repeatable: the CLIs echo it, and passing it back with
+    `--seed` reproduces the house exactly.
+
+    Range is 32-bit because that is what fits in a `--seed` a person retypes
+    off a terminal without resenting it.
+    """
+    return int(np.random.SeedSequence().entropy % (2 ** 32))
+
+
+def resolve_seed(seed=None, label="crop"):
+    """The seed this run will use, drawn if not given, and announced either way.
+
+    ⚠️ Announced *before* anything is built. A run that crashes on a layout is
+    exactly the run whose seed is worth having, and a seed printed in the
+    summary at the end is a seed the interesting runs never reach.
+    """
+    if seed is not None:
+        return int(seed)
+    seed = draw_seed()
+    print(f"  {label} seed {seed} — drawn fresh for this run. "
+          f"Pass --seed {seed} to open this same house again.")
+    return seed
+
+
 def spawn(n_per_row=14, rows=None, seed=None, min_sep=0.075):
     """Hang `n_per_row` fruit on each row, at random, with random ripeness.
 
     `seed=None` means a **different house every time it is opened**, which is
     the point: a layout the planner has already seen is a layout it can get
-    lucky on. Pass a seed to reproduce one.
+    lucky on. Pass a seed to reproduce one — see `draw_seed`, which is how the
+    CLIs get one they can also print.
+
+    ⚠️ Two placement rules are enforced here and neither is arbitrary:
+
+      * `Z_LOCAL` is `week4_place.MARGINAL_Z` exactly — the band that was
+        measured cell by cell, one full pick each, at 18/21 clean. Hanging fruit
+        above it puts the stem anchor at or through the support bar and below it
+        puts the fruit under the gutter, and both fail as routing errors.
+      * `min_sep` is 75 mm against `week4_place.TOUCHING` at 70 mm, so no two
+        fruit spawn interpenetrating. A pair that starts overlapped is fired
+        apart on the first step and the crop detaches itself before the arm has
+        moved.
+
+    It is deliberately **not** the old 200 mm spacing rule, which Week 4 removed
+    and which stays removed: a close pair is a pick-order problem to be solved,
+    not a layout to be avoided. See the note on `min_sep` below.
 
     ⚠️ `min_sep` is 75 mm, just past touching (`week4_place.TOUCHING` is 70 mm).
     Closer than that and two spheres interpenetrate, which MuJoCo resolves by
@@ -267,7 +316,7 @@ def main():
     args = ap.parse_args()
 
     print(__doc__)
-    trusses = spawn(n_per_row=args.n, seed=args.seed)
+    trusses = spawn(n_per_row=args.n, seed=resolve_seed(args.seed))
     s = summarise(trusses)
     print(f"\n  --- the house, this time ---")
     print(f"  {s['n']} fruit on {len(s['rows'])} rows · "

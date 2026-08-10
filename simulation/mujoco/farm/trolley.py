@@ -582,8 +582,9 @@ def main():
     from farm import crop as fcrop
 
     arms = ("a", "b")[: args.arms]
-    trusses = fcrop.spawn(n_per_row=12, seed=args.seed)
-    model = build(aisle=args.aisle, arms=arms, trusses=trusses, seed=args.seed)
+    seed = fcrop.resolve_seed(args.seed)
+    trusses = fcrop.spawn(n_per_row=12, seed=seed)
+    model = build(aisle=args.aisle, arms=arms, trusses=trusses, seed=seed)
     data = mujoco.MjData(model)
 
     from farm import armframe

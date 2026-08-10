@@ -209,7 +209,8 @@ def main():
     from farm.scout import HouseMap, Scout, Sighting
     from mission import reset_park
 
-    trusses = fcrop.spawn(n_per_row=args.n, seed=args.seed)
+    seed = fcrop.resolve_seed(args.seed)
+    trusses = fcrop.spawn(n_per_row=args.n, seed=seed)
 
     if args.truth:
         # ⚠️ A map built from the operator's own answer. Useful for exactly one
@@ -221,7 +222,7 @@ def main():
         print("\n  ⚠️ routing GROUND TRUTH, not a scouted map")
     else:
         model = trolley.build(aisle=args.aisle, arms=("a",), trusses=trusses,
-                              deck_cam=True, seed=args.seed)
+                              deck_cam=True, seed=seed)
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
         park_q = armframe.park_posture(model, data)

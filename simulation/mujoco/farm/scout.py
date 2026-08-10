@@ -787,9 +787,10 @@ def main():
     from farm import armframe
     from mission import reset_park
 
-    trusses = fcrop.spawn(n_per_row=args.n, seed=args.seed)
+    seed = fcrop.resolve_seed(args.seed)
+    trusses = fcrop.spawn(n_per_row=args.n, seed=seed)
     model = trolley.build(aisle=args.aisle, arms=("a",), trusses=trusses,
-                          deck_cam=True, seed=args.seed or 0)
+                          deck_cam=True, seed=seed)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     park_q = armframe.park_posture(model, data)

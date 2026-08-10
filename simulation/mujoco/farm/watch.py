@@ -340,7 +340,8 @@ def main():
     # renderers on it for the whole shift.
     import farm.crop as _c
 
-    trusses = _c.spawn(n_per_row=args.n, seed=args.seed)
+    seed = _c.resolve_seed(args.seed)
+    trusses = _c.spawn(n_per_row=args.n, seed=seed)
     state["truth"] = trusses
 
     print(f"  building the house — {len(trusses)} fruit, "
@@ -348,7 +349,7 @@ def main():
 
     # A first model just to open the window at the right size.
     model = trolley.build(aisle=args.aisle, arms=("a",), trusses=trusses,
-                          wrist_cam=True, deck_cam=True, seed=args.seed or 0)
+                          wrist_cam=True, deck_cam=True, seed=seed)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     state["model"], state["data"] = model, data
@@ -360,7 +361,7 @@ def main():
     sink.push(compose())
 
     try:
-        shift = frun.run(seed=args.seed, aisle=args.aisle, n_per_row=args.n,
+        shift = frun.run(seed=seed, aisle=args.aisle, n_per_row=args.n,
                          speed=args.speed, use_truth=args.truth,
                          max_stops=args.stops, on_tick=tick,
                          on_event=on_event, verbose=True,

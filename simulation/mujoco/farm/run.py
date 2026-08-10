@@ -124,9 +124,10 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
             on_event(kind, **info)
 
     if scene is None:
+        seed = fcrop.resolve_seed(seed)
         trusses = fcrop.spawn(n_per_row=n_per_row, seed=seed)
         model = trolley.build(aisle=aisle, arms=("a",), trusses=trusses,
-                              wrist_cam=True, deck_cam=True, seed=seed or 0)
+                              wrist_cam=True, deck_cam=True, seed=seed)
         data = mujoco.MjData(model)
     else:
         model, data, trusses = scene
