@@ -62,10 +62,13 @@ def is_ripe(stage):
     return bool(entry[2]) if entry else False
 
 
-def annotate(bgr, detector=None, min_side=6):
-    """Box and label every fruit the colour classifier finds. Returns counts.
+def find(bgr, detector=None, min_side=6):
+    """Run the classifier and return its calls, without drawing anything.
 
-    `bgr` is modified in place — it is a render nobody else owns.
+    Returns a list of `(u0, v0, u1, v1, stage, ripe)`. Split out from `annotate`
+    so a viewer can run the detector at a lower rate than it composites panels
+    and still draw a box on every frame — see `two_arm_farm.Windows`. Running it
+    per panel frame is the expensive thing here; it costs more than the renders.
 
     ⚠️ Runs the detector on the **RGB** of what it is given. Every detector in
     this repo takes RGB (they were written against `mujoco.Renderer.render()`),
@@ -81,20 +84,34 @@ def annotate(bgr, detector=None, min_side=6):
         detector = StageDetector()
 
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    counts = {"ripe": 0, "unripe": 0}
+    out = []
     for d in detector(rgb):
         if min(d.width, d.height) < min_side:
             continue
         stage, _hue = stage_of(rgb, d)
         if stage is None:
             continue
-        ripe = is_ripe(stage)
+        out.append((int(d.u0), int(d.v0), int(d.u1), int(d.v1), stage,
+                    is_ripe(stage)))
+    return out
+
+
+def draw(bgr, calls, stale=False):
+    """Draw `find`'s calls onto a frame in place. Returns the counts.
+
+    `stale=True` marks boxes that were computed on an earlier frame — a viewer
+    running the detector below its panel rate has to say so, because a box drawn
+    over a moving frame is a claim about *this* frame unless it is labelled
+    otherwise. Drawn thinner, which is enough to read as "held" without turning
+    the panel into a legend.
+    """
+    import cv2
+
+    counts = {"ripe": 0, "unripe": 0}
+    for u0, v0, u1, v1, stage, ripe in calls:
         counts["ripe" if ripe else "unripe"] += 1
         colour = STAGE_BGR.get(stage, UNKNOWN_BGR)
-
-        u0, v0 = int(d.u0), int(d.v0)
-        u1, v1 = int(d.u1), int(d.v1)
-        cv2.rectangle(bgr, (u0, v0), (u1, v1), colour, 2)
+        cv2.rectangle(bgr, (u0, v0), (u1, v1), colour, 1 if stale else 2)
 
         # The decision, then the stage it came from. Ripe fruit get a filled
         # tag so they read at a glance in a panel a third of a screen wide —
@@ -104,7 +121,7 @@ def annotate(bgr, detector=None, min_side=6):
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
                                       scale, thick)
         ty = max(th + 2, v0 - 3)
-        if ripe:
+        if ripe and not stale:
             cv2.rectangle(bgr, (u0, ty - th - 3), (u0 + tw + 4, ty + 2),
                           colour, -1)
             cv2.putText(bgr, text, (u0 + 2, ty), cv2.FONT_HERSHEY_SIMPLEX,
@@ -113,6 +130,15 @@ def annotate(bgr, detector=None, min_side=6):
             cv2.putText(bgr, text, (u0 + 2, ty), cv2.FONT_HERSHEY_SIMPLEX,
                         scale, colour, thick, cv2.LINE_AA)
     return counts
+
+
+def annotate(bgr, detector=None, min_side=6):
+    """Box and label every fruit the colour classifier finds. Returns counts.
+
+    `bgr` is modified in place — it is a render nobody else owns. `find` then
+    `draw`; kept as one call because every existing caller wants both.
+    """
+    return draw(bgr, find(bgr, detector=detector, min_side=min_side))
 
 
 def tally(bgr, counts, note="HSV colour threshold - the Week 3 control"):

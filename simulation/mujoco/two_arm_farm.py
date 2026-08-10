@@ -497,20 +497,22 @@ class Windows:
         if img is None:
             return _missing(SENS_W, SENS_H, f"{st.name} wrist: not fitted",
                             "build with wrist_cam=True")
-        if fresh or cam not in self._boxes:
+        # ⚠️ **The detector runs at `--hsv-hz`; the boxes are drawn every frame.**
+        # The first cut cached only the *counts* and drew boxes on detector
+        # frames alone, which at 3 Hz against 10 fps panels meant boxes appeared
+        # on one frame in three and blinked. Caching the calls and re-drawing
+        # them is both cheaper to look at and honest, provided the held frames
+        # say they are held — which `overlay.draw(stale=True)` does by thinning
+        # the box, and the caption repeats in words.
+        stale = not (fresh or cam not in self._boxes)
+        if not stale:
             if self.detector is None:
                 self.detector = StageDetector()
-            # ⚠️ `annotate` draws in place *and* returns the counts, so the
-            # cached value is the counts only — the boxes are redrawn from the
-            # detector on fresh frames and simply absent on stale ones. Keeping
-            # a stale *box* over a moving frame would draw a label on a tomato
-            # that is no longer there, which is worse than a slower label.
-            counts = overlay.annotate(img, detector=self.detector)
-            self._boxes[cam] = counts
-        counts = self._boxes.get(cam, {"ripe": 0, "unripe": 0})
+            self._boxes[cam] = overlay.find(img, detector=self.detector)
+        counts = overlay.draw(img, self._boxes.get(cam, []), stale=stale)
         overlay.tally(img, counts)
-        _title(img, f"{st.name.upper()} WRIST  —  row r{st.row}  —  HSV live",
-               ARM_COL[tag])
+        _title(img, f"{st.name.upper()} WRIST  —  row r{st.row}  —  HSV "
+                    f"{'held' if stale else 'live'}", ARM_COL[tag])
         return img
 
     def _deck_panel(self, tag):
