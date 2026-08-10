@@ -36,7 +36,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from farm import crop as fcrop  # noqa: E402
-from farm import house, route, run as frun, trolley  # noqa: E402
+from farm import house, overlay, route, run as frun, trolley  # noqa: E402
 
 TILE_W, TILE_H = 560, 420
 
@@ -298,6 +298,9 @@ def main():
         for name in ("scout", "aisle", "house", "wrist"):
             rs[name].update_scene(data, camera=name)
             out[name] = cv2.cvtColor(rs[name].render(), cv2.COLOR_RGB2BGR)
+        # The ripeness call, drawn where it is made. Same classifier the mapping
+        # pass uses — see `farm.overlay` for why it must not be a better one.
+        overlay.tally(out["wrist"], overlay.annotate(out["wrist"]))
         ty = float(data.body(trolley.TROLLEY).xpos[1])
         tgt = None
         if thoughts.target:
