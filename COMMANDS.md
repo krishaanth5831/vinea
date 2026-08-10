@@ -561,7 +561,60 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 ⚠️ **It imports freely from Weeks 1–4 and changes none of it.** Those numbers — 46% clean, 31.3 s cycle, 40 mm clearance — were all measured in a one-row scene with a fixed base. `farm.house` is a new scene *next to* `greenhouse.py`, not a replacement for it.
 
-### 🪟 `farm/watch.py` — **the one to run.** Six panels, including the map
+### 🪟🪟 `two_arm_farm.py` — **the one to run.** One full row, two arms, two windows
+
+```bash
+# 🪟🪟 the whole cycle for ONE FULL ROW: map -> plan -> travel -> pick -> crate.
+#      TWO windows open. A new random house each launch; the seed is printed.
+./.venv/bin/python simulation/mujoco/two_arm_farm.py
+
+# 🪟🪟 the same house again
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --seed 7
+
+# 🪟🪟 skip the mapping pass and route the real crop — isolates everything
+#      downstream of perception
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --truth
+
+# 🪟🪟 short: stop after three trolley stops
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --truth --stops 3
+
+# 🖼 render every panel once and exit, and print where each camera is aimed
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --shot
+
+# 📝 no windows at all
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --headless
+
+# 🎬 record both windows: <out>_sensors.mp4 and <out>_mission.mp4
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --out twoarm
+```
+
+`python 2armfarm.py` runs the same thing — it is a shim that execs the real module. ⚠️ A module name starting with a digit is not a legal Python identifier, so `2armfarm.py` can be *run* but never *imported*; all the code lives in `two_arm_farm.py` and nothing but the shim refers to the digit name.
+
+**What you actually see: two OpenCV windows.**
+
+```
+WINDOW 1 — "vinea — SENSORS"        WINDOW 2 — "vinea — MISSION"
++--------------+--------------+     +----------------+----------------+
+| arm1 wrist   | arm2 wrist   |     | THE MAP        | DOWN THE AISLE |
+| HSV ripeness | HSV ripeness |     | what it found  | trolley + both |
+| boxes, live  | boxes, live  |     | and what it    | arms, slow-    |
++--------------+--------------+     | did about it   | tracking       |
+| arm1 deck    | arm2 deck    |     +----------------+----------------+
+| own row, own | own row, own |     | PIPELINE       | PER-ARM STATS  |
+| pan/tilt     | pan/tilt     |     | what each arm  | pick times and |
++--------------+--------------+     | is doing NOW   | running mean   |
+                                    +----------------+----------------+
+```
+
+**Window 1 (SENSORS)** — four live camera panels, each captioned with which arm and which camera. The two wrist cams carry the HSV ripeness overlay: a box round every fruit found, coloured by stage, labelled **RIPE** or **unripe**, with the counts and the classifier's name in the footer. The two deck cams are **one per arm, independently articulated** — each reports its own live pan angle, and they hold different angles at the same time because each scans only its own row.
+
+**Window 2 (MISSION)** — the map top-left (all four rows, every mapped fruit as a dot coloured by believed ripeness, ripe ones ringed, **x** picked, **X** refused, **◇** lost, dim ring skipped, a green circle on whatever an arm is currently targeting, ground truth as a small grey dot above each so a wrong dot reads as wrong). Top-right the aisle shot, tracking the trolley with a lag so the machine stays in frame while visibly travelling. Bottom-left the live pipeline text, one block per arm — phase, current executor leg, deck pan, live guard clearance. Bottom-right per-arm stats: crated / refused / missed, last pick time, running mean, and the last nine pick times.
+
+⚠️ **The arms are serialised — one flies while the other stows — and the window says so.** This is forced, not chosen: `farm/armframe.py` makes Weeks 1–4's world-frame planner work for a moving arm by *rebinding `mission`'s module globals* (`PARK`, `STAGE_X`, `BIN_POS`, `ROW_X`, `INTO_ROW`) to the current arm's frame, with a mirror for arm B. Two arms mid-mission at once would need two conflicting sets of those globals in one interpreter. Serialising is not enough on its own, so the idle arm is *also* in the flying arm's obstacle set (`mission.ArmObstacles`) and *also* folded out of the way (`duo.STOW`).
+
+⚠️ **The pipeline text is read out of the running mission, not scripted.** `farm.duo.ArmState` is written where the work happens, and the current leg is read live from `mission.Guard.leg`, which `week2_pick.execute` sets as it flies.
+
+### 🪟 `farm/watch.py` — six panels, one arm, including the map
 
 ```bash
 # 🪟 the whole shift: scout the house, plan the route, harvest into the crate
@@ -647,6 +700,20 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 ./.venv/bin/python simulation/mujoco/farm/eyes.py --out farm_eyes.mp4
 ```
 
+### 🖼 `farm/decks.py` — one deck camera per arm, and the proof they are independent
+
+```bash
+# 🖼 aim the two heads apart, render both, print the angle between them.
+#    Writes twoarm_deck_a.png and twoarm_deck_b.png. PASS if > 30 deg.
+./.venv/bin/python simulation/mujoco/farm/decks.py --split
+```
+
+**Prints two lines and writes two stills.** `farm/scout.py`'s head is *one* pan-tilt unit on the aisle centreline that turns 180° at every stop to serve both rows. These are **two heads, one per arm**, each over its own arm's mount plate and each scanning only its own row — so they can look different ways at once, which is what `--split` measures: **103.4°** between the two lines of sight on seed 7, arm A on r1 and arm B on r0.
+
+⚠️ Two heads that always mirror each other are one head with extra geometry. That is what the gate exists to rule out.
+
+Each head also sits **0.60 m** from its own row against the shared head's 0.70 m — the Week 1–4 standoff exactly — and never crosses the aisle, so the shared head's 22.5 s of cross-aisle slew per pass disappears.
+
 ```
 +------------------------+------------------------+
 | arm A wrist cam        | arm B wrist cam        |
@@ -715,7 +782,9 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 It costs 22.5 s a pass and is the difference between a second arm having a map and having nothing to pick. The pan axis sits on the aisle centreline so both rows are 0.70 m away and neither arm gets the better camera.
 
-⚠️ **Nothing checks arm against arm.** Each `Guard` and `ClearanceModel` watches one arm against the *crop*; the other arm is in nobody's obstacle set. Two arms reaching across each other on one deck is unmodelled. Known gap, logged in the Bug Log, not worked around.
+⚠️ ~~**Nothing checks arm against arm.**~~ **Fixed — `mission.ArmObstacles`.** Each `Guard`, `ClearanceModel` and `Planner` now takes an `others=` tuple of arm prefixes and puts those arms in the obstacle set, at `ARM_CLEARANCE` = 40 mm (the crop's budget, not structure's 15 mm — another 22 kg arm is not a thing you may scuff). Empty by default, so Weeks 1–4 are untouched.
+
+The check found a real clash the moment it existed: **the two arms were parked 83 mm inside each other**, forearm through forearm, on every two-armed scene ever built. `farm/duo.py` also serialises the arms and stows the idle one. See [`docs/BUG_LOG.md`](docs/BUG_LOG.md) F1, F2, F3 and O2.
 
 ⚠️ **Every launch is a different house, and it tells you which one.** `crop.spawn` always randomised; what is new is that the seed is drawn outside and printed before anything is built, so a layout that breaks the planner is reproducible with `--seed`. There is deliberately **no 200 mm minimum fruit spacing** — Week 4 removed it and `week4_place.py` records why: a close pair is a pick-order problem to be solved, not a layout to be avoided. What *is* enforced is `Z_LOCAL` = the measured `MARGINAL_Z` band and a 75 mm minimum separation against `TOUCHING` at 70 mm, so nothing spawns unpickable or interpenetrating.
 
