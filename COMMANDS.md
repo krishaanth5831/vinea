@@ -594,24 +594,37 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 ### 📝 The pieces, each runnable on its own
 
 ```bash
-# 🪟 the four-row house: 1.60 m pitch, 51 mm heating pipes as the rails
+# 🪟 the four-row house: 1.60 m pitch, 51 mm heating pipes as the rails,
+#    glazing bars every 1.10 m, side walls on a concrete upstand, screen wires
 ./.venv/bin/python simulation/mujoco/farm/house.py
 ./.venv/bin/python simulation/mujoco/farm/house.py --plan     # 📝 the layout arithmetic
 ./.venv/bin/python simulation/mujoco/farm/house.py --shot     # 🖼
 
 # 🪟 the trolley: drives the length of the house on the pipe rail
 ./.venv/bin/python simulation/mujoco/farm/trolley.py --drive
-./.venv/bin/python simulation/mujoco/farm/trolley.py --reach  # 📝 the gate
+./.venv/bin/python simulation/mujoco/farm/trolley.py --reach  # 📝 the gate, arm A
 ./.venv/bin/python simulation/mujoco/farm/trolley.py --shot --arms 2
 
-# 🪟 a random crop — different every time you open it
+# 📝 BOTH arms, each against its own row. Prints two tables and one verdict.
+#    This is the check that says a second arm is really mounted rather than
+#    merely drawn: arm B is bolted round 180° and works the row on the other
+#    side of the aisle at the same 600 mm standoff.
+./.venv/bin/python simulation/mujoco/farm/trolley.py --reach --arms 2
+
+# 🪟 a random crop — a different house every time you open it, and it now
+#    prints the seed it drew so you can open the same one again
 ./.venv/bin/python simulation/mujoco/farm/crop.py
 ./.venv/bin/python simulation/mujoco/farm/crop.py --stats     # 📝
+./.venv/bin/python simulation/mujoco/farm/crop.py --stats --seed 355527551
 
-# 🪟 the mapping pass
+# 🪟 the mapping pass — the head turns to face each row in turn as it drives
 ./.venv/bin/python simulation/mujoco/farm/scout.py --windowed
 ./.venv/bin/python simulation/mujoco/farm/scout.py --recall   # 📝 per-stage recall
 ./.venv/bin/python simulation/mujoco/farm/scout.py --shot     # 🖼 boxes + bands
+
+# 📝 does turning the head buy anything? The same house scouted twice —
+#    once with the head locked at arm A's row, once turning. Prints the A/B.
+./.venv/bin/python simulation/mujoco/farm/scout.py --articulate
 
 # 📝 the route over a map
 ./.venv/bin/python simulation/mujoco/farm/route.py --truth --compare
@@ -620,6 +633,49 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 ./.venv/bin/python simulation/mujoco/farm/run.py
 ./.venv/bin/python simulation/mujoco/farm/run.py --truth --stops 3
 ```
+
+### 🪟 `farm/eyes.py` — both arms' wrist cams, with the ripeness call drawn on
+
+```bash
+# 🪟 two wrist cams side by side with live ripe/unripe boxes, deck cam below
+./.venv/bin/python simulation/mujoco/farm/eyes.py
+
+# 🪟 arm A only — arm B's panel says "not fitted" rather than going blank
+./.venv/bin/python simulation/mujoco/farm/eyes.py --arms 1
+
+# 🎬 record it
+./.venv/bin/python simulation/mujoco/farm/eyes.py --out farm_eyes.mp4
+```
+
+```
++------------------------+------------------------+
+| arm A wrist cam        | arm B wrist cam        |
+| RIPE / unripe boxes    | RIPE / unripe boxes    |
++------------------------+------------------------+
+| deck cam — the mapping pass, head pan live      |
++-------------------------------------------------+
+```
+
+**What you actually see:** a box round every fruit the colour classifier finds, coloured by stage (green / breaker / turning / red) with the word **RIPE** or **unripe** on it — which is `crop.STAGES`'s own `pick` flag, so it is exactly the decision the harvest acts on. A turning fruit is boxed amber and labelled unripe, which is what a grower does with it. The footer counts both and names the classifier. The deck panel reports the head's live pan angle and which row it is facing.
+
+⚠️ **It is the Week 3 colour control, not a model.** Two OpenCV `inRange` bands over hue plus a circularity filter — the same code the mapping pass scores itself with. Nothing was trained. An overlay running a *better* detector than the robot uses would show a machine that sees clearly and picks badly, and the gap would read as a manipulation bug.
+
+### 📝 `farm/misses.py` — why is a ripe tomato not in the crate?
+
+```bash
+# 📝 five shifts, every ripe fruit attributed to one bucket, dominant one named
+./.venv/bin/python simulation/mujoco/farm/misses.py
+
+# 📝 more shifts, tighter numbers
+./.venv/bin/python simulation/mujoco/farm/misses.py --shifts 10
+
+# 📝 with a perfect map — isolates everything downstream of perception
+./.venv/bin/python simulation/mujoco/farm/misses.py --truth
+```
+
+**Prints a table, no window.** It starts from every ripe fruit that was really in the house and gives each one a reason it is or is not crated, then names the dominant bucket and tells you not to tune the others.
+
+⚠️ **Counting attempts measures the robot's aim and calls it its yield.** `run.py` logs one row per fruit it *tried* to pick, so a shift can report 5/5 clean while ripe fruit stand untouched two metres away. This adds the two buckets an attempt log cannot see — `not_mapped` (the scout never saw it) and `not_routed` (mapped, but no stop could reach it) — ahead of the six `outcomes.classify` already names.
 
 ### What it does, and what it does not
 
@@ -636,7 +692,30 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 ⚠️ That costs the harvest nothing, because only red is picked. It would cost a **scouting yield forecast** a great deal, and that is Vinea's second module — so green recall is the number to quote there, not the average.
 
-⚠️ **The scout camera looks one way, so arm B's row maps 0/14.** A two-armed trolley needs a second head. This is a known gap, not an oversight; `--arms 2` fits the second arm and its plate is drawn either way.
+⚠️ ~~The scout camera looks one way, so arm B's row maps 0/14.~~ **Fixed — the head articulates.** It is a pan-tilt unit now and faces each arm's row in turn at every stop. Measured on one house, twice, with `scout.py --articulate`:
+
+| head | r1 (arm A) | r0 (arm B) | phantom | slew |
+|---|---|---|---|---|
+| locked at r1 (what shipped) | 12/14 | **0/14** | 1 | 0.0 s |
+| turning | 12/14 | **8/14** | 1 | 22.5 s |
+
+It costs 22.5 s a pass and is the difference between a second arm having a map and having nothing to pick. The pan axis sits on the aisle centreline so both rows are 0.70 m away and neither arm gets the better camera.
+
+⚠️ **Nothing checks arm against arm.** Each `Guard` and `ClearanceModel` watches one arm against the *crop*; the other arm is in nobody's obstacle set. Two arms reaching across each other on one deck is unmodelled. Known gap, logged in the Bug Log, not worked around.
+
+⚠️ **Every launch is a different house, and it tells you which one.** `crop.spawn` always randomised; what is new is that the seed is drawn outside and printed before anything is built, so a layout that breaks the planner is reproducible with `--seed`. There is deliberately **no 200 mm minimum fruit spacing** — Week 4 removed it and `week4_place.py` records why: a close pair is a pick-order problem to be solved, not a layout to be avoided. What *is* enforced is `Z_LOCAL` = the measured `MARGINAL_Z` band and a 75 mm minimum separation against `TOUCHING` at 70 mm, so nothing spawns unpickable or interpenetrating.
+
+⚠️ **Lifting the shadows made detection worse, and it was measured rather than assumed.** The house is lit by six lamps on a grid now instead of four in a line down the middle, which is why the outer rows are no longer noticeably darker. The obvious companion change — raising the ambient term, since a Venlo roof genuinely does scatter light — was tried and **reverted**: the ripeness bands have a minimum *saturation* of 95–100 as well as a minimum value, and ambient light washes saturation out everywhere at once. Three houses, both rows, 168 fruit:
+
+| lighting | found | phantoms |
+|---|---|---|
+| line of 4 + 2 side fills (what shipped) | 101/168 | 7 |
+| grid of 6 + ambient 0.32 | **91/168** | **14** |
+| grid of 6, ambient untouched | **104/168** | **5** |
+| grid of 6 + 2 side fills | 102/168 | 6 |
+| grid of 6 + the glazing bars and side walls | **108/168** | **3** |
+
+The last row is the one that ships, and the extra gain is not from the lighting: the **side walls** put a solid background behind the outer rows where open sky used to show through the gaps, and bright sky is where phantom detections came from. Enclosing the house for looks turned out to be worth 4 fruit and 2 phantoms.
 
 ⚠️ **`farm/armframe.py` rebinds other modules' globals.** `mission.py` is written in absolute world coordinates (`PARK`, `STAGE_X`, `BIN_POS`, `ROW_X`) which breaks the moment the arm rides a moving base. The adapter rebinds 8 bindings across 4 modules inside a context manager and asserts it restores them (`armframe.check`). It is the smaller, more reversible change than threading a frame through six classes — but it is a real cost, and the file says so.
 
