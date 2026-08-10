@@ -238,6 +238,14 @@ class DuoState:
         self.skipped = set()       # ripe, mapped, not on any route (other row)
         self.refused = set()       # planner found no clearing route
         self.missed = set()        # attempted and lost
+        # ⚠️ `id(sighting) -> truss name`, filled by `associate` as each stop is
+        # worked. Without it the map can colour a dot by believed ripeness but
+        # cannot say what *happened* to it on a scouted run: the outcome sets
+        # above are keyed by truss name, and a `Sighting` is a position and a
+        # stage with no name in it. Under `--truth` the sighting carries its own
+        # `truth` and this is redundant; on a real mapping pass it is the only
+        # link between "the dot the robot drew" and "the fruit it then picked".
+        self.named = {}
         self.active = None         # which arm is flying, or None
         left, right = house.serves(aisle)
         rows = {"a": right, "b": left}
@@ -561,6 +569,10 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
 
             standing = [t.name for t in trusses if row.attached(t.name)]
             ident = associate(fruit_here, model, data, standing)
+            # Remember which dot became which fruit, so the map can show the
+            # outcome on a scouted run too. See `DuoState.named`.
+            for fi, nm in ident.items():
+                state.named[id(fruit_here[fi])] = nm
 
             for fi, fruit in enumerate(fruit_here):
                 name = ident.get(fi)

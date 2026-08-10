@@ -209,10 +209,15 @@ class DuoMapPanel:
             for s in state.house_map.sightings:
                 u, v = self.px(s.pos[0], s.pos[1])
                 col = STAGE_BGR.get(s.stage, INK)
-                name = s.truth.name if s.truth is not None else None
-                # The name a sighting was matched to, if it has been attempted.
-                for n in (name,):
-                    pass
+                # ⚠️ Under `--truth` a sighting carries its own `truth`; on a
+                # real mapping pass it carries nothing but a position and a
+                # stage, and the link to a truss name is made per stop by
+                # `duo.associate`. `state.named` keeps that link so the map can
+                # show what *happened* to a dot on a scouted run and not only on
+                # a cheated one. Truth first, because it is exact where it
+                # exists.
+                name = (s.truth.name if s.truth is not None
+                        else state.named.get(id(s)))
                 picked = name in state.picked if name else False
                 refused = name in state.refused if name else False
                 missed = name in state.missed if name else False
