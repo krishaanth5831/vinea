@@ -101,6 +101,45 @@ DRIVE_ACT = "trolley_y_pos"
 # Arm mounts, in trolley-local x. See `house.ARM_OFFSET`.
 ARM_X = {"a": +house.ARM_OFFSET, "b": -house.ARM_OFFSET}
 
+# Arm mounts, in trolley-local **y** — i.e. staggered along the row.
+#
+# ⚠️ **This is not tidiness, it is the only thing that stops the two arms
+# occupying the same cubic metre, and it was found by measurement rather than by
+# looking at the render.** `ARM_X` puts the two bases 400 mm apart across the
+# aisle, which is right for the 600 mm standoff each arm needs to its own row.
+# But an FR5's upper arm and forearm are each about 400 mm, and the park posture
+# folds the elbow ~330 mm back behind the shoulder — *into the aisle centreline,
+# from both sides at once*. With both arms mounted at y = 0 the two forearms
+# interpenetrate by **83 mm** at rest. MuJoCo's own contact solver reports it
+# (`forearm_link` vs `b_forearm_link`, dist -0.0827) and it is plainly visible in
+# a render: the two arms cross in an X over the middle of the deck.
+#
+# That went unnoticed for as long as it did because nothing checked arm against
+# arm — see `mission.ArmObstacles`, added in the same change. The obstacle set
+# is what *detects* it; this is what *fixes* it.
+#
+# Rotating the idle arm's j1 does not help (measured across -90°..+120°: the gap
+# never opens, because both links sweep through the centreline whatever the base
+# angle). Moving `PARK` does, but only by pushing the tool toward the crop — from
+# 0.32 m out to 0.47-0.57 m against a row at 0.60 m — which re-creates the "pads
+# inside the panel" problem `park_posture` exists to avoid.
+#
+# Staggering the mounts along the row is what a real dual-arm trolley does, and
+# it is measured:
+#
+#     stagger    sphere gap    arm-vs-arm contacts
+#     0.00 m       -0.028 m          2
+#     0.30 m       -0.022 m          4
+#     0.40 m       +0.038 m          4
+#     0.50 m       +0.111 m          0     <- ships
+#     0.60 m       +0.196 m          0
+#
+# 0.50 m is the first value that is both contact-free and clear by more than
+# `mission.ARM_CLEARANCE`. The deck is 1.70 m long, so ±0.25 m leaves 0.60 m of
+# deck beyond each arm — enough for both crates, which move with their arms.
+ARM_STAGGER = 0.50
+ARM_Y = {"a": +ARM_STAGGER / 2, "b": -ARM_STAGGER / 2}
+
 # The name prefix each arm's joints, actuators, sites, links and cameras carry.
 #
 # ⚠️ **Arm "a" is deliberately unprefixed**, and this is the whole reason a
@@ -224,7 +263,7 @@ def add_trolley(spec, aisle=0, arms=("a",), crate=True, y0=0.0):
     # visible empty plate is what makes it checkable rather than asserted.
     for tag, x in ARM_X.items():
         _decor(body, f"tr_plate_{tag}", mujoco.mjtGeom.mjGEOM_CYLINDER,
-               pos=[x, 0, DECK_Z + 0.008], size=[0.085, 0.008, 0],
+               pos=[x, ARM_Y[tag], DECK_Z + 0.008], size=[0.085, 0.008, 0],
                rgba=[0.30, 0.32, 0.35, 1.0], mass=0.0)
 
     if crate:
@@ -271,9 +310,17 @@ def add_trolley(spec, aisle=0, arms=("a",), crate=True, y0=0.0):
 # arm b for a 0.70 m reach across the deck in exactly the direction the carry
 # leg is worst at — the 923 mm stall described above, again.
 def _crate_local(tag):
-    """Where arm `tag`'s crate sits, in trolley-local coordinates."""
+    """Where arm `tag`'s crate sits, in trolley-local coordinates.
+
+    ⚠️ Measured from the arm's **own mount**, both in x and in y. The y term is
+    `ARM_Y[tag]` and not zero: the arms are staggered 500 mm along the row (see
+    `ARM_STAGGER`), so a crate placed at a fixed deck y would sit at the proven
+    `BIN_POS` offset from one arm and half a metre off it for the other — which
+    is the 923 mm carry stall described above, re-introduced by the fix for the
+    arm-vs-arm clash. The crate follows its arm.
+    """
     sign = 1.0 if ARM_YAW[tag] == 0.0 else -1.0
-    return np.array([ARM_X[tag] + sign * 0.30, sign * -0.52,
+    return np.array([ARM_X[tag] + sign * 0.30, ARM_Y[tag] + sign * -0.52,
                      DECK_Z + 0.016])
 
 
@@ -347,7 +394,8 @@ def _mount_arm(spec, body, tag):
         arm.delete(k)
 
     yaw = np.radians(ARM_YAW[tag])
-    frame = body.add_frame(pos=[ARM_X[tag], 0.0, DECK_Z + 0.016],
+    # Staggered along the row as well as offset across the aisle — see `ARM_Y`.
+    frame = body.add_frame(pos=[ARM_X[tag], ARM_Y[tag], DECK_Z + 0.016],
                            quat=[np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
     # See ARM_PREFIX for why arm "a" is the unprefixed one.
     spec.attach(arm, prefix=ARM_PREFIX[tag], frame=frame)
@@ -537,7 +585,9 @@ def reach_gate(seed=1, verbose=True, arms=("a",)):
 
         rows = []
         for t in mine:
-            drive.park_at(float(np.clip(t.y, *y_limits())))
+            # Park the *arm* beside the fruit, not the deck centre — the arms
+            # are staggered along the row. See `ARM_Y`.
+            drive.park_at(float(np.clip(t.y - ARM_Y[tag], *y_limits())))
             park_arm(model, data, park_q, prefix=prefix)
             mujoco.mj_forward(model, data)
             with armframe.at_trolley(model, data, tag):

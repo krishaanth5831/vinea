@@ -127,16 +127,26 @@ def cover(ys, reach=REACH_Y, limits=None):
 
 
 def plan(house_map, aisle=0, arm="a", start=None, reach=REACH_Y, order=True):
-    """Turn a map into a route. Only ripe fruit on the arm's own row."""
+    """Turn a map into a route. Only ripe fruit on the arm's own row.
+
+    ⚠️ **Stops are trolley positions, and the arm is not at the trolley's y.**
+    The two arms are staggered `trolley.ARM_STAGGER` along the row, so arm a
+    stands 250 mm ahead of the deck centre and arm b 250 mm behind it. A stop
+    computed as though the arm were at the trolley's own y parks arm b half a
+    metre past every fruit it was sent to. So the cover is solved in the *arm's*
+    frame — fruit y minus the arm's own offset — and the resulting stops are
+    trolley y, which is what `Drive.drive_to` takes.
+    """
     from deck_cam import plan_order
 
     left, right = house.serves(aisle)
     row = right if arm == "a" else left
+    arm_dy = trolley.ARM_Y[arm]
 
     ripe = [s for s in house_map.sightings if s.ripe and s.row == row]
     other = [s for s in house_map.sightings if s.ripe and s.row != row]
 
-    ys = cover([s.pos[1] for s in ripe], reach=reach)
+    ys = cover([s.pos[1] - arm_dy for s in ripe], reach=reach)
     route = Route(aisle=aisle, arm=arm, row=row, skipped=other)
 
     # ⚠️ Nearest-stop assignment, and it is a heuristic rather than a solve. A
@@ -145,8 +155,8 @@ def plan(house_map, aisle=0, arm="a", start=None, reach=REACH_Y, order=True):
     # because emptying a stop entirely is worth more than balancing two.
     # Stops that end up empty are dropped below, which recovers the common case.
     for s in ripe:
-        k = int(np.argmin([abs(s.pos[1] - y) for y in ys])) if ys else -1
-        if k >= 0 and abs(s.pos[1] - ys[k]) <= reach + 1e-6:
+        k = int(np.argmin([abs(s.pos[1] - arm_dy - y) for y in ys])) if ys else -1
+        if k >= 0 and abs(s.pos[1] - arm_dy - ys[k]) <= reach + 1e-6:
             while len(route.stops) <= k:
                 route.stops.append(Stop(y=ys[len(route.stops)]))
             route.stops[k].fruit.append(s)
@@ -157,8 +167,16 @@ def plan(house_map, aisle=0, arm="a", start=None, reach=REACH_Y, order=True):
         for st in route.stops:
             # The arm's park position at this stop, in world coordinates —
             # which is what `plan_order` measures travel from.
-            base = np.array([house.aisle_x(aisle) + house.ARM_OFFSET,
-                             st.y, trolley.DECK_Z])
+            #
+            # ⚠️ **`ARM_X[arm]`, not `+ARM_OFFSET`.** This was hardcoded to the
+            # positive offset, so a route planned for arm b measured its travel
+            # costs from arm *a*'s mount — 400 mm across the aisle, on the wrong
+            # side of the crop. It only ever affected the pick *order* (the cost
+            # model's travel term), never which fruit were taken, which is why it
+            # survived: a wrong order still harvests, just not in the best
+            # sequence. Now it asks the arm the route is for.
+            base = np.array([house.aisle_x(aisle) + trolley.ARM_X[arm],
+                             st.y + arm_dy, trolley.DECK_Z])
             survey = {f"s{i}": f.pos for i, f in enumerate(st.fruit)}
             st.plan = plan_order(survey, start=base)
             by_name = {f"s{i}": f for i, f in enumerate(st.fruit)}
@@ -179,7 +197,8 @@ def naive(house_map, aisle=0, arm="a", reach=REACH_Y):
     ripe = [s for s in house_map.sightings if s.ripe and s.row == row]
     route = Route(aisle=aisle, arm=arm, row=row)
     for s in ripe:
-        route.stops.append(Stop(y=float(np.clip(s.pos[1],
+        # Trolley y that puts *this arm* at the fruit. See `plan`.
+        route.stops.append(Stop(y=float(np.clip(s.pos[1] - trolley.ARM_Y[arm],
                                                 *trolley.y_limits())),
                                 fruit=[s]))
     return route

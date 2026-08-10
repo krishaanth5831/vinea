@@ -116,8 +116,16 @@ def row_of(tag, aisle=0):
 
 
 def _mount_local(tag):
-    """The pan axis, in trolley-local coordinates: over the arm's own plate."""
-    return np.array([trolley.ARM_X[tag], DECK_LEAD, DECK_Z_CAM])
+    """The pan axis, in trolley-local coordinates: over the arm's own plate.
+
+    ⚠️ `DECK_LEAD` is measured from **its own arm**, not from the deck centre.
+    The arms are staggered 500 mm along the row (`trolley.ARM_STAGGER`), so a
+    camera at a fixed deck y would lead one arm by 0.55 m and the other by 0.05 m
+    — one head surveying the section its arm is about to work and the other
+    staring at the fruit its arm is already on top of.
+    """
+    return np.array([trolley.ARM_X[tag], trolley.ARM_Y[tag] + DECK_LEAD,
+                     DECK_Z_CAM])
 
 
 def _aim_local(tag):
@@ -130,7 +138,7 @@ def _aim_local(tag):
     aisle at arm a's crop, and the map would fill with fruit arm b cannot reach.
     """
     sign = +1.0 if tag == "a" else -1.0
-    return np.array([sign * house.ROW_PITCH / 2, DECK_LEAD,
+    return np.array([sign * house.ROW_PITCH / 2, trolley.ARM_Y[tag] + DECK_LEAD,
                      fcrop.fruit_z(sum(fcrop.Z_LOCAL) / 2)])
 
 
