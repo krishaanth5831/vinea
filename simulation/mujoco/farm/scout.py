@@ -444,12 +444,25 @@ class StageDetector:
                 + self._blobs(hsv, green, GREEN_CIRCULARITY, "greenband"))
 
 
-def stage_of(rgb, det):
+def stage_of(rgb, det, disc=True):
     """Which colour stage a detection is, by mean hue over its own pixels.
 
     ⚠️ Circular mean, not the arithmetic one. Red straddles the hue wrap at
     0/179, so a fruit whose pixels sit either side of it averages to *cyan* if
     you take the plain mean — the same trap `ripeness.classify` documents.
+
+    ⚠️ **Over the inscribed disc, not the whole box, and this docstring used to
+    lie about that.** A tomato's projection is round and its bounding box is
+    square, so ~21% of the box is corner — background, canopy, or whatever fruit
+    is behind this one. The saturation floor does not remove it: a *breaker*
+    tomato one truss back is saturated, in frame, and pulls the mean hue of a
+    red fruit up toward turning. That is the `misbanded` bucket in
+    `farm/misses.py`, and it is a red tomato the harvest then walks past because
+    the map says it is not ready.
+
+    Sampling the disc is not a loosened threshold — no band moved. It is the
+    function finally reading the pixels it always claimed to read. Measured over
+    the scouting pass, `--recall` reports it per stage.
     """
     import cv2
 
@@ -460,6 +473,15 @@ def stage_of(rgb, det):
         return None, float("nan")
     box = hsv[v0:v1, u0:u1]
     sat = box[:, :, 1] >= 90
+    if disc:
+        h_px, w_px = box.shape[:2]
+        yy, xx = np.ogrid[:h_px, :w_px]
+        cy, cx = (h_px - 1) / 2.0, (w_px - 1) / 2.0
+        # Radii of the inscribed ellipse. Ellipse rather than circle so a box
+        # clipped by the frame edge still samples its own interior instead of
+        # collapsing to a few pixels.
+        ry, rx = max(cy, 1e-6), max(cx, 1e-6)
+        sat = sat & ((((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2) <= 1.0)
     if not sat.any():
         return None, float("nan")
     hue = box[:, :, 0][sat].astype(float) * (2 * np.pi / 180.0)

@@ -54,11 +54,13 @@ MAP_GATE_M = 0.12
 
 # The truth-side buckets, ahead of everything `outcomes` already names.
 NOT_MAPPED = "not_mapped"
+MISBANDED = "misbanded"
 NOT_ROUTED = "not_routed"
 
 WHY = {
     NOT_MAPPED: "the scouting pass never saw it",
-    NOT_ROUTED: "mapped, but no stop was scheduled that could reach it",
+    MISBANDED: "seen, but the colour classifier called it unripe",
+    NOT_ROUTED: "mapped and called ripe, but no stop could reach it",
     "not_detected": "at the stop, no truss matched the sighting",
     "misassociated": "the sighting was matched to the wrong truss",
     "unreachable": "the arm could not get to it",
@@ -98,20 +100,41 @@ def attribute(shift):
             by_name[r["fruit"]] = r
     unnamed = [r for r in shift.rows if not r.get("fruit")]
 
+    sightings = (shift.house_map.sightings
+                 if shift.house_map is not None else [])
+
     out = []
     for t in ripe:
         pos = np.asarray(t.pos, float)
-        if mapped and min(float(np.linalg.norm(pos - m))
-                          for m in mapped) > MAP_GATE_M:
+
+        # The sighting this fruit actually produced, if any. Matched by
+        # distance rather than by name: a sighting has no name, it has a
+        # deprojected position and a colour band.
+        best, best_d = None, float("inf")
+        for s in sightings:
+            d = float(np.linalg.norm(pos - np.asarray(s.pos, float)))
+            if d < best_d:
+                best, best_d = s, d
+        if best is None or best_d > MAP_GATE_M:
             out.append((t, NOT_MAPPED))
             continue
-        if not mapped:
-            out.append((t, NOT_MAPPED))
-            continue
+
         rec = by_name.get(t.name)
         if rec is not None:
             out.append((t, rec.get("outcome", "grasp_failed")))
             continue
+
+        # ⚠️ **Seen but banded unripe, which is not a routing failure.** The
+        # route only ever considers sightings it believes are ripe, so a red
+        # tomato the classifier called `turning` never reaches the planner at
+        # all. Folding that into `not_routed` blames the router for the
+        # detector's mistake, and the two have completely different fixes —
+        # this one is the hue bands in `farm/scout.py`, and measurement said
+        # the router loses nothing (7/7 routed on both seeds that showed it).
+        if not best.ripe:
+            out.append((t, MISBANDED))
+            continue
+
         if _key(pos) not in routed and not _near_routed(pos, routed):
             out.append((t, NOT_ROUTED))
             continue
