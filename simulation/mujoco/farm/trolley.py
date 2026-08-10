@@ -343,7 +343,7 @@ def build(aisle=0, arms=("a",), crate=True, wrist_cam=False, deck_cam=False,
     if deck_cam:
         from farm.scout import add_deck_camera
 
-        add_deck_camera(spec)
+        add_deck_camera(spec, aisle=aisle)
 
     # ⚠️ The pads again — same reason as `greenhouse.build_scene`, and it has to
     # be repeated because that function is not the one building this scene.

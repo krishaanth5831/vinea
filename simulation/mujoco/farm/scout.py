@@ -36,8 +36,24 @@ is *scouting*, whose whole output is a yield forecast, and a forecast built on
 "we counted the fruit we could see" is wrong in the direction that flatters it.
 The number to quote there is green recall, not overall recall.
 
+--- the head turns, and that is what makes two arms possible ------------------
+
+⚠️ The camera used to be **bolted to the mast**, facing arm a's row. It framed
+that row well — 12/14 found on seed 7 — and arm b's row sat directly behind it,
+because a trolley on the aisle centreline has its two rows exactly 180° apart.
+Measured on the same house, twice, with `--articulate`:
+
+    head             r1 (arm a)   r0 (arm b)   phantom   slew
+    locked at r1        12/14         0/14         1      0.0 s
+    turning             12/14         8/14         1     22.5 s
+
+So articulating it costs 22.5 s a pass and is the difference between a second
+arm having a map and having nothing to pick. The pan axis is centred on the
+aisle so both rows are 0.70 m away and neither arm gets the better camera.
+
     ./.venv/bin/python simulation/mujoco/farm/scout.py            # the pass
     ./.venv/bin/python simulation/mujoco/farm/scout.py --recall   # per stage
+    ./.venv/bin/python simulation/mujoco/farm/scout.py --articulate  # the A/B
     ./.venv/bin/python simulation/mujoco/farm/scout.py --windowed # watch it
     ./.venv/bin/python simulation/mujoco/farm/scout.py --shot     # what it sees
 """
@@ -112,26 +128,264 @@ MIN_AREA_PX = 200
 # than different head angles, so they carry the drive's own error as well.
 FUSE_M = 0.045
 
+# --- the articulated head ----------------------------------------------------
 
-def add_deck_camera(spec, body_name=trolley.TROLLEY):
-    """Put the scouting camera and its mast on the trolley."""
+SCOUT_HEAD = "scout_head"
+
+# The pan axis sits behind the lens, as on any pan-tilt unit: the camera is
+# carried on a yoke and swings through an arc rather than spinning about its own
+# entrance pupil. Same 100 mm as `deck_cam.DECK_YOKE_M`, and for the same reason
+# — it is what makes the drawn geometry agree with the kinematics.
+SCOUT_YOKE_M = 0.10
+
+# ⚠️ **The pan axis stands on the aisle centreline, and the 100 mm of yoke is
+# what the lens sits in front of.** The obvious alternative — pivot 100 mm
+# behind the old bolted mount, so pan=0 reproduces the shipped lens position
+# exactly — makes the head *asymmetric*: the lens ends up 0.80 m from arm a's
+# row and 0.60 m from arm b's, because the yoke swings it 200 mm across the
+# aisle. Measured on seed 7, that cost arm b's row 10 mapped fruit against arm
+# a's 23. Centred, the lens is 0.70 m from both rows and the two arms get the
+# same camera. The price is that the home lens now sits 100 mm nearer arm a's
+# row than the Week 5 renders were taken at.
+SCOUT_PIVOT_X = 0.0
+
+# ⚠️ Faster than `deck_cam.DECK_SLEW_DEG_S` (60), and it has to be. That head
+# nods within one row; this one turns **180°** to swap rows (see `ROW_PAN`), and
+# at 60°/s that is 3.0 s of slew per stop against a 1.4 s drive between them —
+# the head would become the whole cost of the pass. 120°/s is inside what the
+# PTU class this represents actually does (FLIR's PTU-D48 is specified at
+# 100°/s, the E46 at 300°/s), so it buys the swap back down to 1.5 s.
+SCOUT_SLEW_DEG_S = 120.0
+
+# Which way the head faces to see each arm's row, in degrees of pan from home.
+#
+# ⚠️ **180° apart, and that is geometry rather than a choice.** The mast stands
+# on the aisle centreline; a trolley in aisle `i` has row `i+1` at local
+# x = +ROW_PITCH/2 and row `i` at local x = -ROW_PITCH/2. The two rows are
+# exactly opposite, so a head that serves both is a head that turns all the way
+# round. This is the number that makes the second arm possible: measured on
+# seed 7, the bolted camera saw **14/14** of arm a's row and **0/14** of arm
+# b's, because arm b's row was directly behind it.
+ROW_PAN = {"a": 0.0, "b": 180.0}
+
+
+def add_deck_camera(spec, aisle=0, body_name=trolley.TROLLEY, articulated=True):
+    """Put the scouting camera, its mast and its pan-tilt head into a spec.
+
+    Call before `spec.compile()`.
+
+    ⚠️ **The head is a mocap body parented to the world, not to the trolley,
+    and both halves of that are forced.** Mocap first: hinges would add two DOFs
+    to `mjModel`, and `reach.Reacher` builds `mink.Configuration` over the
+    *whole* model — the solver would see two free joints, find they do nothing
+    for its cost, and leave them anywhere. "Where the arm is reaching" would
+    silently steer "where the camera is looking". `farm.armframe.pin_base`
+    exists because the trolley's own slide joint already had this problem.
+
+    World-parented second: MuJoCo requires mocap bodies to be children of the
+    worldbody, so the head cannot simply be bolted to a moving trolley the way
+    the mast is. `ScoutHead.follow` closes that gap by writing the head's
+    `mocap_pos` from the drive joint every tick, which is what a mast-mounted
+    unit does anyway — it rides the machine and is commanded in the machine's
+    frame.
+
+    `articulated=False` bolts the camera to the mast at the home pose, which is
+    what shipped before the head existed. Kept so `--articulate` can measure the
+    two against each other in one process rather than against a memory.
+    """
     import mujoco
 
     from camera import _xyaxes_towards, add_camera_housing
 
     body = spec.body(body_name)
     xyaxes = _xyaxes_towards(SCOUT_MOUNT, SCOUT_AIM, up_hint=(0.0, 0.0, 1.0))
-
     x, y = float(SCOUT_MOUNT[0]), float(SCOUT_MOUNT[1])
+
+    # The mast stays on the trolley — it is decor and it rides along. It stands
+    # under the *pan axis*, not under the lens, so the post is not where the
+    # yoke swings.
+    mx = SCOUT_PIVOT_X if articulated else x
     _decor(body, "scout_mast", mujoco.mjtGeom.mjGEOM_CAPSULE,
-           fromto=[x, y, trolley.DECK_Z, x, y, float(SCOUT_MOUNT[2]) - 0.04],
+           fromto=[mx, y, trolley.DECK_Z, mx, y, float(SCOUT_MOUNT[2]) - 0.04],
            size=[0.022, 0, 0], rgba=[0.42, 0.44, 0.47, 1.0], mass=0.0)
-    body.add_camera(name=SCOUT_CAM, pos=list(SCOUT_MOUNT), fovy=SCOUT_FOVY,
-                    xyaxes=xyaxes)
-    add_camera_housing(body, f"cam_{SCOUT_CAM}", SCOUT_MOUNT, xyaxes,
-                       kind="d435",
-                       stalk=[x, y, float(SCOUT_MOUNT[2]) - 0.04])
+
+    if not articulated:
+        body.add_camera(name=SCOUT_CAM, pos=list(SCOUT_MOUNT), fovy=SCOUT_FOVY,
+                        xyaxes=xyaxes)
+        add_camera_housing(body, f"cam_{SCOUT_CAM}", SCOUT_MOUNT, xyaxes,
+                           kind="d435",
+                           stalk=[x, y, float(SCOUT_MOUNT[2]) - 0.04])
+        return body
+
+    # The head's origin is the pan axis at trunnion height, so a pure quaternion
+    # on the mocap body *is* the pan-tilt command and nothing has to track a
+    # moving centre of rotation. Its world seat is set here only so the model
+    # compiles somewhere sensible; `ScoutHead.follow` owns it from then on.
+    pivot = np.array([house.aisle_x(aisle) + mx, y, float(SCOUT_MOUNT[2])])
+    head = spec.worldbody.add_body(name=SCOUT_HEAD, pos=pivot.tolist(),
+                                   mocap=True)
+    local = [SCOUT_YOKE_M, 0.0, 0.0]
+
+    head.add_geom(name="scout_trunnion", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                  fromto=[0, -0.030, 0, 0, 0.030, 0], size=[0.020, 0, 0],
+                  rgba=[0.35, 0.37, 0.40, 1.0], contype=0, conaffinity=0,
+                  mass=0.0)
+    head.add_geom(name="scout_yoke", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                  fromto=[0, 0, 0] + local, size=[0.011, 0, 0],
+                  rgba=[0.45, 0.47, 0.50, 1.0], contype=0, conaffinity=0,
+                  mass=0.0)
+    head.add_camera(name=SCOUT_CAM, pos=local, fovy=SCOUT_FOVY, xyaxes=xyaxes)
+    add_camera_housing(head, f"cam_{SCOUT_CAM}", local, xyaxes, kind="d435",
+                       stalk=[0.0, 0.0, 0.0])
     return body
+
+
+class ScoutHead:
+    """Where the scouting camera is pointing, and how to point it elsewhere.
+
+    Pan and tilt are degrees from the home aim, exactly as in `deck_cam.DeckHead`
+    — `pan=0, tilt=0` is the pose the bolted camera shipped at, so the
+    articulated head and the fixed one are the same measurement at the same
+    place. `ROW_PAN` names the two poses that matter.
+    """
+
+    def __init__(self, model, data=None, aisle=0, name=SCOUT_HEAD):
+        from camera import _xyaxes_towards
+
+        self.model, self.aisle = model, aisle
+        try:
+            self.mocap = int(model.body(name).mocapid[0])
+        except KeyError:
+            self.mocap = -1
+        if self.mocap < 0:
+            raise RuntimeError(
+                "no articulated scout head in this model — build the scene "
+                "with deck_cam=True, or use add_deck_camera(articulated=False) "
+                "and skip the head entirely")
+
+        self.pivot_local = np.array(
+            [SCOUT_PIVOT_X, SCOUT_LEAD, float(SCOUT_MOUNT[2])])
+        self.ax = house.aisle_x(aisle)
+        self.jadr = model.joint(trolley.DRIVE_JOINT).qposadr[0]
+
+        self.fwd0 = np.asarray(SCOUT_AIM, float) - np.asarray(SCOUT_MOUNT, float)
+        self.fwd0 /= np.linalg.norm(self.fwd0)
+        # Horizontal by construction — `_xyaxes_towards` crosses forward with
+        # world up — which is what lets pan and tilt stay azimuth and elevation.
+        self.right0 = np.asarray(
+            _xyaxes_towards(SCOUT_MOUNT, SCOUT_AIM, up_hint=(0.0, 0.0, 1.0))[:3],
+            float)
+        self.pan = self.tilt = 0.0
+        self.slewed_s = 0.0
+        if data is not None:
+            self.aim(data, 0.0, 0.0)
+
+    # --- riding the trolley --------------------------------------------------
+
+    def follow(self, data):
+        """Put the head back on top of the mast wherever the trolley now is.
+
+        ⚠️ Cheap, and must be called after anything that moves the drive joint
+        and before the next render. A mocap body does not move on its own, so a
+        frame taken without this is the crop seen from where the trolley *was* —
+        which fuses into the map as a real fruit at a wrong position rather than
+        as an error.
+        """
+        data.mocap_pos[self.mocap] = [
+            self.ax + self.pivot_local[0],
+            float(data.qpos[self.jadr]) + self.pivot_local[1],
+            self.pivot_local[2]]
+
+    # --- pointing ------------------------------------------------------------
+
+    def _quat(self, pan_deg, tilt_deg):
+        import mujoco
+
+        qp, qt, out = np.zeros(4), np.zeros(4), np.zeros(4)
+        mujoco.mju_axisAngle2Quat(qp, np.array([0.0, 0.0, 1.0]),
+                                  np.radians(pan_deg))
+        mujoco.mju_axisAngle2Quat(qt, self.right0, np.radians(tilt_deg))
+        # Pan outer, tilt inner — the trunnion rides on the pan table. The other
+        # order yaws about a tilted axis and rolls the horizon.
+        mujoco.mju_mulQuat(out, qp, qt)
+        return out
+
+    def slew_seconds(self, pan_deg, tilt_deg):
+        """What a real unit would spend getting there from where it is now."""
+        swing = max(abs(pan_deg - self.pan), abs(tilt_deg - self.tilt))
+        return swing / SCOUT_SLEW_DEG_S
+
+    def aim(self, data, pan_deg, tilt_deg=0.0):
+        """Command the head. Returns what the move would cost, unbilled.
+
+        ⚠️ Reports the slew time but does **not** add it to `slewed_s` — the
+        caller does, once per move. Billing here would charge a walked slew for
+        every intermediate step it passes through, and the sum of those is the
+        move's real cost only by accident.
+
+        ⚠️ Caller must `mj_forward` before rendering — writing `mocap_quat` does
+        not move `cam_xpos` on its own, and a render taken in between is the
+        previous pose wearing the new pose's label.
+        """
+        secs = self.slew_seconds(pan_deg, tilt_deg)
+        self.follow(data)
+        data.mocap_quat[self.mocap] = self._quat(pan_deg, tilt_deg)
+        self.pan, self.tilt = float(pan_deg), float(tilt_deg)
+        return secs
+
+    def look_at_row(self, data, tag):
+        """Face the row that arm `tag` works, in one step."""
+        secs = self.aim(data, ROW_PAN[tag], 0.0)
+        self.slewed_s += secs
+        return secs
+
+    def slew_to_row(self, data, tag, on_tick=None):
+        """Face arm `tag`'s row, *walking* there at the unit's real rate.
+
+        Returns the seconds spent. With no `on_tick` this is `look_at_row` — the
+        head arrives in one step and only the clock records the move, which is
+        all a headless run needs. With one, the pan is stepped at `CTRL_DT` so a
+        viewer sees the head turn; the intermediate poses are never rendered into
+        the map, so animating changes the picture and not the measurement.
+        """
+        import mujoco
+
+        target = ROW_PAN[tag]
+        secs = self.slew_seconds(target, 0.0)
+        if on_tick is None or secs <= 0.0:
+            return self.look_at_row(data, tag)
+
+        from reach import CTRL_DT
+
+        start = self.pan
+        steps = max(1, int(round(secs / CTRL_DT)))
+        for k in range(1, steps + 1):
+            self.aim(data, start + (target - start) * k / steps, 0.0)
+            mujoco.mj_forward(self.model, data)
+            on_tick()
+        self.slewed_s += secs
+        return secs
+
+    def current(self, data):
+        """(pan, tilt) read back out of `mjData`, not out of this object.
+
+        They agree today because a mocap body goes exactly where it is put — but
+        a panel reporting a *commanded* angle while claiming to show the robot
+        keeps looking right after the thing behind it has stopped working.
+        """
+        import mujoco
+
+        mat = np.zeros(9)
+        mujoco.mju_quat2Mat(mat, data.mocap_quat[self.mocap])
+        v = mat.reshape(3, 3) @ self.fwd0
+
+        def az_el(u):
+            return (np.degrees(np.arctan2(u[1], u[0])),
+                    np.degrees(np.arcsin(u[2] / np.linalg.norm(u))))
+
+        az, el = az_el(v)
+        az0, el0 = az_el(self.fwd0)
+        return float((az - az0 + 180.0) % 360.0 - 180.0), float(el - el0)
 
 
 # --- the detector ------------------------------------------------------------
@@ -319,24 +573,41 @@ def _fuse(raw, radius=FUSE_M):
 class Scout:
     """The mapping pass. Drives, looks, fuses."""
 
-    def __init__(self, model, data, aisle=0, detector=None, stride=SCOUT_STRIDE):
+    def __init__(self, model, data, aisle=0, detector=None, stride=SCOUT_STRIDE,
+                 arms=("a",)):
         from camera import RENDER_H, RENDER_W, SensorCamera
 
         self.model, self.data = model, data
         self.aisle = aisle
         self.stride = stride
+        self.arms = tuple(arms)
         self.detector = StageDetector() if detector is None else detector
         self.sensor = SensorCamera(model, SCOUT_CAM, RENDER_W, RENDER_H)
         self.intr = self.sensor.intr
         self.last_rgb = None
+        self.head_s = 0.0
+        # The head is optional so a scene built with `articulated=False` still
+        # scouts — it just cannot turn round, and maps one row instead of two.
+        try:
+            self.head = ScoutHead(model, data, aisle=aisle)
+        except RuntimeError:
+            self.head = None
 
     def close(self):
         self.sensor.close()
 
     def look(self):
         """One frame. Returns raw, unfused sightings in world coordinates."""
+        import mujoco
+
         from detect import estimate
 
+        # ⚠️ The head rides a moving trolley and is world-parented, so its pose
+        # is only correct after `follow` + `mj_forward`. Skipping this renders
+        # the crop from where the trolley was one stop ago.
+        if self.head is not None:
+            self.head.follow(self.data)
+            mujoco.mj_forward(self.model, self.data)
         rgb, depth = self.sensor.both(self.data)
         self.last_rgb = rgb
         R, C = self.sensor.pose(self.data)
@@ -352,11 +623,20 @@ class Scout:
         return out
 
     def run(self, drive, on_tick=None, on_frame=None, verbose=True):
-        """Drive the length of the aisle, surveying every `stride` metres."""
+        """Drive the length of the aisle, surveying every `stride` metres.
+
+        At every stop the head faces each arm's row in turn, so a two-armed
+        trolley comes home with both of its rows mapped. The order **alternates**
+        between stops: having just finished on row b, the next stop starts on row
+        b rather than swinging 180° back to a and 180° out again. That halves the
+        slewing over the pass and costs nothing, because which row is looked at
+        first has no effect on what is seen from a stationary trolley.
+        """
         lo, hi = trolley.y_limits()
         stops = list(np.arange(lo + 0.4, hi - 0.4 + 1e-9, self.stride))
         raw = []
         secs = 0.0
+        head_s = 0.0
         drive.park_at(stops[0])
         import mujoco
 
@@ -365,14 +645,21 @@ class Scout:
         for i, y in enumerate(stops):
             if i:
                 secs += drive.drive_to(y, on_tick=on_tick)
-            seen = self.look()
+            order = self.arms if i % 2 == 0 else tuple(reversed(self.arms))
+            seen = []
+            for tag in order:
+                if self.head is not None:
+                    head_s += self.head.slew_to_row(self.data, tag,
+                                                    on_tick=on_tick)
+                seen.extend(self.look())
+                if on_frame is not None:
+                    on_frame(i, len(stops), y, seen, self.last_rgb)
             raw.extend(seen)
-            if on_frame is not None:
-                on_frame(i, len(stops), y, seen, self.last_rgb)
             if verbose and (i % 4 == 0 or i == len(stops) - 1):
                 print(f"    frame {i + 1:>2}/{len(stops)} at y={y:+.2f} — "
                       f"{len(seen)} blobs, {len(raw)} so far")
 
+        self.head_s = head_s
         fused = _fuse(raw)
         # Which row each fruit is on, from its x. The map is about the house,
         # not about the camera, so a sighting that cannot be assigned to a row
@@ -426,6 +713,50 @@ def score(house_map, trusses, gate=0.12):
     }
 
 
+def _articulate_ab(model, trusses, args, rows):
+    """Does turning the head actually buy a row? Both arms, same crop, one run.
+
+    The control is not "a different seed" but *the same house*, scouted twice:
+    once with the head locked at arm a's row, which is what the bolted camera
+    was, and once with it turning. Anything the second finds and the first does
+    not is what the articulation bought.
+    """
+    import mujoco
+
+    from farm import armframe
+    from mission import reset_park
+
+    print("  --- what turning the head buys, same house both times ---\n")
+    print("   head            r_a found   r_b found   phantom   slew s")
+    print("  " + "-" * 58)
+
+    out = {}
+    for label, arms in (("locked at r_a", ("a",)), ("turning", ("a", "b"))):
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        reset_park(model, data, armframe.park_posture(model, data))
+        mujoco.mj_forward(model, data)
+
+        scout = Scout(model, data, aisle=args.aisle, stride=args.stride,
+                      arms=arms)
+        hm = scout.run(trolley.Drive(model, data), verbose=False)
+        s = score(hm, trusses)
+        got = {r: sum(1 for g in hm.sightings
+                      if g.truth is not None and g.row == r)
+               for r in rows.values()}
+        n = {r: sum(1 for t in trusses if t.row == r) for r in rows.values()}
+        print(f"  {label:<15} {got[rows['a']]:>3}/{n[rows['a']]:<7} "
+              f"{got[rows['b']]:>3}/{n[rows['b']]:<8} {s['phantom']:>5}   "
+              f"{scout.head_s:>6.1f}")
+        out[label] = got
+        scout.close()
+
+    gain = (out["turning"][rows["b"]] - out["locked at r_a"][rows["b"]])
+    print(f"\n  arm b's row r{rows['b']}: {gain:+d} fruit. A second arm has "
+          f"nothing to pick without this.")
+    return 0
+
+
 def main():
     import argparse
     import os
@@ -437,11 +768,16 @@ def main():
                     help="write what the scouting camera sees")
     ap.add_argument("--windowed", action="store_true",
                     help="watch the pass in a live viewer")
+    ap.add_argument("--articulate", action="store_true",
+                    help="A/B the bolted camera against the pan-tilt head")
+    ap.add_argument("--arms", type=int, default=2, choices=(1, 2),
+                    help="rows the head scans: 1 = arm a's only, 2 = both")
     ap.add_argument("--aisle", type=int, default=0)
     ap.add_argument("-n", type=int, default=14, help="fruit per row")
     ap.add_argument("--stride", type=float, default=SCOUT_STRIDE)
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
+    arms = ("a", "b")[: args.arms]
 
     os.environ.setdefault("MUJOCO_GL", "glfw" if args.windowed else "egl")
     print(__doc__)
@@ -461,13 +797,17 @@ def main():
     mujoco.mj_forward(model, data)
 
     left, right = house.serves(args.aisle)
+    rows = {"a": right, "b": left}
     print(f"\n  --- scouting pass, aisle a{args.aisle} ---")
     print(f"  {len(trusses)} fruit in the house, "
           f"{sum(1 for t in trusses if t.ripe)} of them ripe")
-    print(f"  the camera looks at row r{right}; rows the trolley cannot see "
-          f"from here are not in this map\n")
+    print(f"  the head scans {', '.join(f'r{rows[t]} (arm {t})' for t in arms)}"
+          f"; rows the trolley cannot see from here are not in this map\n")
 
-    scout = Scout(model, data, aisle=args.aisle, stride=args.stride)
+    if args.articulate:
+        return _articulate_ab(model, trusses, args, rows)
+
+    scout = Scout(model, data, aisle=args.aisle, stride=args.stride, arms=arms)
     drive = trolley.Drive(model, data)
 
     if args.shot:
