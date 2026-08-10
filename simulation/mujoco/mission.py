@@ -140,6 +140,21 @@ STRUCTURE_CLEARANCE = 0.015
 # truss costs the tomato.
 GUARD_STOP = 0.015
 
+# How much room one arm must leave the *other* arm on a two-armed machine. Only
+# consulted when a `ClearanceModel` is built with `others=` — see `ArmObstacles`.
+#
+# ⚠️ **Deliberately the crop's 40 mm and not the structure's 15 mm**, which is
+# the opposite of what "it is a rigid steel object, like the panel" suggests.
+# Structure gets 15 mm because a panel is stationary, known to the millimetre,
+# and a scuff costs nothing. The other arm is none of those: it is 22 kg, it is
+# where the *other* arm's servo lag says it is rather than where its setpoint
+# does, and a collision damages two machines and drops whatever both were
+# holding. It gets the budget reserved for things that must not be touched.
+#
+# ⚠️ This is a **new** constant, not a retuning of an old one. Nothing in Weeks
+# 1-4 reads it, because nothing in Weeks 1-4 had a second arm to clear.
+ARM_CLEARANCE = 0.040
+
 # Orientation weights. See week2_pick for the measurements behind them: 0.1 is
 # deliberately too weak to lead a move (position leads, the angle arrives on the
 # way), and 0.6 is for turning the wrist in place where there is no position to
@@ -510,23 +525,78 @@ class CropObstacles:
             yield name, outside + inside - radii
 
 
+class ArmObstacles:
+    """The *other* arm(s) on the same machine, as spheres the planner must clear.
+
+    ⚠️ **This closes the arm-vs-arm gap, and the gap was real rather than
+    theoretical.** Until this existed, `ClearanceModel` held one arm's own
+    spheres and the crop, and nothing else — so on a two-armed trolley each arm
+    planned as though the other were not there. The two mounts are 400 mm apart
+    and each arm reaches 922 mm, so their working volumes overlap by 1.44 m.
+    Two arms working one deck could pass straight through each other and every
+    clearance number printed would still have read as a pass, because the thing
+    they were passing through was in nobody's obstacle set.
+
+    The same conservative sphere cover as `RobotSpheres` is used for both sides,
+    so the reported distance is never larger than the true one — this can refuse
+    an approach that would have been fine and can never pass one that would not.
+    That is the same guarantee the crop check already carries, and it is the
+    reason a sphere cover is the right shape here rather than a mesh query.
+
+    ⚠️ It reports the distance to the other arm **where the other arm is now**.
+    On a machine that serialises its arms (see `farm.duo`) the idle arm is
+    parked and stationary, so "now" is a fact for the whole mission. On a machine
+    that ever flew both at once it would be a one-cycle-stale prediction, which
+    is exactly why `farm.duo` does not fly both at once.
+    """
+
+    def __init__(self, model, prefixes):
+        self.arms = [(p.rstrip("_") or "a", RobotSpheres(model, prefix=p))
+                     for p in prefixes]
+
+    def distances(self, data, centres, radii):
+        """Same contract as `CropObstacles.distances`: (name, per-sphere array).
+
+        For each of *this* arm's spheres, the distance to the nearest sphere of
+        the other arm — so the array lines up with `centres` and the caller's
+        `argmin` still names the right part of the robot.
+        """
+        for name, sph in self.arms:
+            other_c = sph.world(data)
+            gap = (np.linalg.norm(centres[:, None, :] - other_c[None, :, :],
+                                  axis=2)
+                   - radii[:, None] - sph.radius[None, :])
+            yield f"arm {name}", gap.min(axis=1)
+
+
 class ClearanceModel:
     """How close the robot is to the crop, in metres, right now."""
 
-    def __init__(self, model, row, target=None, prefix=""):
+    def __init__(self, model, row, target=None, prefix="", others=()):
         # `prefix` picks which arm's geometry is being checked. See
         # `robot_geoms` — the wrong one here is silent and plausible.
+        #
+        # `others` names the *other* arms on the machine, by prefix — `("b_",)`
+        # when this model checks arm a of a two-armed trolley. Empty by default,
+        # which is Weeks 1-4's behaviour exactly and leaves every number they
+        # measured untouched. See `ArmObstacles`.
         self.prefix = prefix
         self.spheres = RobotSpheres(model, prefix=prefix)
         self.crop = CropObstacles(model, row, target)
+        self.others = ArmObstacles(model, others) if others else None
 
     def per_obstacle(self, data):
         """{obstacle name: (closest distance, which part of the robot)}."""
         centres = self.spheres.world(data)
         out = {}
-        for name, d in self.crop.distances(data, centres, self.spheres.radius):
-            i = int(np.argmin(d))
-            out[name] = (float(d[i]), self.spheres.label[i])
+        sources = [self.crop.distances(data, centres, self.spheres.radius)]
+        if self.others is not None:
+            sources.append(self.others.distances(data, centres,
+                                                 self.spheres.radius))
+        for source in sources:
+            for name, d in source:
+                i = int(np.argmin(d))
+                out[name] = (float(d[i]), self.spheres.label[i])
         return out
 
     def worst(self, data):
@@ -552,13 +622,16 @@ class Guard:
     is not planned twice.
     """
 
-    def __init__(self, model, data, row, target, stop=GUARD_STOP, prefix=""):
+    def __init__(self, model, data, row, target, stop=GUARD_STOP, prefix="",
+                 others=()):
         self.data = data
-        # ⚠️ The guard watches *one* arm — the one named by `prefix`. It does
-        # not watch the other arm on a two-armed machine, in either direction.
-        # See the arm-vs-arm gap in the Bug Log.
+        # ⚠️ The guard watches the arm named by `prefix` against the crop, and —
+        # when `others` is given — against the other arms on the same machine.
+        # Left empty it is Weeks 1-4's behaviour: one arm, crop only. See
+        # `ArmObstacles` for why the two-armed case needs it and what it costs.
         self.prefix = prefix
-        self.clearance = ClearanceModel(model, row, target, prefix=prefix)
+        self.clearance = ClearanceModel(model, row, target, prefix=prefix,
+                                        others=others)
         self.stop = stop
         self.min_seen = np.inf
         self.tripped = None      # (leg, distance, robot geom, crop geom)
@@ -634,7 +707,7 @@ class Planner:
     """Turns a target fruit into a checked route, without moving the arm."""
 
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
-                 park_q=None, speed=DEFAULT_SPEED, prefix=""):
+                 park_q=None, speed=DEFAULT_SPEED, prefix="", others=()):
         import mink
 
         self.model = model
@@ -656,6 +729,9 @@ class Planner:
         self._scratch = None
         # Which arm this planner routes. See `reach.Reacher.prefix`.
         self.prefix = prefix
+        # The other arms on the same machine, by prefix, which this one must
+        # plan around. Empty is Weeks 1-4. See `ArmObstacles`.
+        self.others = tuple(others)
         self.tool_site = prefix + TOOL_SITE
         self._cfg = mink.Configuration(model)
         self._task = mink.FrameTask(
@@ -846,7 +922,7 @@ class Planner:
             self._scratch = mujoco.MjData(self.model)
 
         clearance = ClearanceModel(self.model, self.row, name,
-                                   prefix=self.prefix)
+                                   prefix=self.prefix, others=self.others)
         # Required gap per obstacle. Lessons raise it for a fruit that has been
         # knocked off before, which is the whole mechanism by which a mistake
         # changes the next route. See lessons.advise.
@@ -854,6 +930,9 @@ class Planner:
                     for n in self.row.names}
         for structure in ("row_support_bar", "row_panel_face"):
             required[structure] = STRUCTURE_CLEARANCE
+        if clearance.others is not None:
+            for other, _sph in clearance.others.arms:
+                required[f"arm {other}"] = ARM_CLEARANCE
 
         cfg = self._cfg
         cfg.update(self.data.qpos[: self.model.nq].copy())
@@ -887,6 +966,19 @@ class Planner:
                 # The target fruit is already out of the obstacle set, so the
                 # grasp legs need no exemption for it. They do need one for the
                 # panel behind it — that is where `contact_ok` earns its keep.
+                #
+                # ⚠️ **The other arm is never exempted, `contact_ok` or not.**
+                # That flag exists so the gripper may work in the 80 mm gap
+                # between the fruit and the panel behind it; the panel is
+                # stationary scenery and touching it is survivable. Another 22 kg
+                # arm is neither. Letting the grasp legs off this check would
+                # exempt exactly the part of the mission where the tool is
+                # furthest from its own base and nearest the other arm's.
+                if obstacle.startswith("arm "):
+                    if d < required.get(obstacle, ARM_CLEARANCE):
+                        breaches.append(Breach(leg.name, d, part, obstacle,
+                                               tool))
+                    continue
                 if not is_crop and leg.contact_ok:
                     continue
                 if d < required.get(obstacle, self.clearance):
