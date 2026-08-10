@@ -679,16 +679,30 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 ### What it does, and what it does not
 
-**A shift on a 48-fruit house**, aisle a0, one arm: 4 crated of the 5 ripe fruit on the worked row, 1 refused (a real neighbour 30 mm from the pad), 2 never detected. 20 s scouting, 33 s driving, 76 s picking.
+**Five shifts, 56-fruit houses, aisle a0, one arm — 22 of the 25 ripe fruit on the worked row crated, 88%.** Measured with `farm/misses.py`, which starts from every ripe fruit that was really there rather than from the attempts the robot chose to make:
+
+| bucket | n | share | |
+|---|---|---|---|
+| clean | 22 | 88.0% | in the crate |
+| misbanded | 2 | 8.0% | seen, but the colour classifier called it unripe |
+| not_mapped | 1 | 4.0% | the scouting pass never saw it |
+
+**Nothing fails at the arm.** Zero refusals, zero guard aborts, zero grasp failures, zero drops and zero ejections across 22 attempts. Every remaining miss is perception, upstream of any motion — which is a different machine from the one the Week 5 notes described, where a refusal and two missed detections were the story.
+
+⚠️ **Three misses is a thin basis for ranking two buckets**, and 2-against-1 is not a ranking. What five shifts support is the shape, not the order.
+
+⚠️ **A shift is not bit-reproducible.** The same seed gave 2/4 and then 3/4 on the same shift with unchanged harvest code. `--seed` reproduces the *crop layout* — verified directly — but MuJoCo running multi-threaded does not reproduce contact ordering, so a single shift's count is a sample and not a fixed result.
 
 **Ripeness is measured per stage, and the total is the wrong number to quote.** Hue separation was measured before the detector was designed:
 
 | | hue | separated from the canopy? |
 |---|---|---|
-| red | 2 | yes — **100% recall, 100% correctly banded** |
-| turning | 14 | yes |
-| breaker | 29 | yes |
-| green | 49 | **no** — a stem is 55, a leaf is 62. **33% recall** |
+| red | 2 | yes — **98.7% correctly banded** (75/78 → 77/78, see below) |
+| turning | 14 | yes — **98.2%** (52/57 → 56/57) |
+| breaker | 29 | yes — 100% |
+| green | 49 | **no** — a stem is 55, a leaf is 62. Banded right when found, but **most are never found at all** |
+
+⚠️ **`stage_of` used to average the whole bounding box while its docstring claimed it averaged "its own pixels".** A tomato's projection is round and its box is square, so ~21% of what it sampled was corner, and the saturation floor does not reject a *breaker* tomato one truss behind — which is exactly what pulls a red fruit's mean hue up into `turning`, so the map calls it unripe and the harvest walks past it. Sampling the **inscribed disc** fixes it. No band moved; the function now reads the pixels it always claimed to. Eight houses, 156 matched fruit: red 96.2% → **98.7%**, turning 91.2% → **98.2%**, green and breaker 100% either way.
 
 ⚠️ That costs the harvest nothing, because only red is picked. It would cost a **scouting yield forecast** a great deal, and that is Vinea's second module — so green recall is the number to quote there, not the average.
 
