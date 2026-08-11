@@ -137,6 +137,62 @@ STOP_MERGE_M = 0.25
 # trolley stops and buys both arms working at every one of them.
 CONCURRENT_TOWARD_M = 0.30
 
+# How many times an arm re-plans while waiting for the other one to move out of
+# the way, and how many control cycles it waits between tries.
+#
+# ⚠️ **This is the only place the two arms interlock, and it is deliberately the
+# weakest possible one.** An arm blocked by the *crop* gives up immediately —
+# the plants do not move, so retrying is a spin. An arm blocked by the *other
+# arm* is blocked by a snapshot of something that is moving, so it folds up and
+# tries again.
+#
+# ⚠️ Sized to outlast a whole pick rather than to give up during one. 400 tries
+# at 10 cycles is 40 s of simulated time against a 20-25 s pick, so an arm
+# blocked by the other waits until the deck is genuinely free instead of
+# expiring halfway through and reporting a refusal that is really a timeout —
+# which is a much worse number to publish, because it looks like the planner
+# could not find a route. The short interval means it takes its turn promptly.
+# Still bounded, so a real deadlock ends as a reported refusal, not a hang.
+PLAN_RETRIES = 400
+PLAN_RETRY_CYCLES = 10
+
+# The legs that put an arm through the middle of the deck, where the other arm
+# also has to pass. Only one arm may be in one of these at a time.
+#
+# ⚠️ **Measured from the aborts, not guessed.** With both arms flying freely the
+# planner accepted every route — correctly, each was clear against the other
+# arm's pose at plan time — and then the guard aborted them in flight, always in
+# the same two places:
+#
+#     ABORT on `unwind` — arm b at 12 mm (via upperarm_link)
+#     ABORT on `carry`  — arm b at 12 mm (via forearm_link)
+#
+# Both are the arm coming *back* rather than reaching out. `carry` swings j1
+# round to the crate and `unwind` ramps the joints from the wound-up carry
+# posture to park; both sweep the elbow through the deck centreline, and two
+# arms doing it at once meet there. Reaching *into* a row is the safe half —
+# measured, both arms extended into their own rows never come closer than
+# +188 mm, because extended arms are 1.6 m apart in x and only folded ones are
+# in the middle.
+#
+# So the interlock is on the returning half only. The picking half — approach,
+# insert, grip, pull, extract — is where the time goes and it runs fully
+# concurrently.
+#
+# ⚠️ An arm waits *before* the leg, holding position, never inside one: a leg is
+# the unit the route was verified in, and stopping halfway through one leaves
+# the arm somewhere no route checked.
+# ⚠️ `settle` is in the set, and it is the leg that looks least like it should
+# be. It holds position — but the position it holds is PARK, immediately after
+# the arm has unfolded, which *is* the middle of the deck. Leaving it out meant
+# the token was released on the mission's very first leg, before the arm had
+# gone anywhere, and the other arm unfolded straight into it.
+CROSSING_LEGS = frozenset({
+    "settle", "clear", "lane", "align",     # unfolding and setting out
+    "turn", "carry", "release",             # swinging round to the crate
+    "withdraw", "ready", "park", "unwind",  # and back to park
+})
+
 # Where an arm waits while the *other* one works.
 #
 # ⚠️ **Not the park posture, and the difference is measured.** `PARK` is where an
@@ -756,6 +812,46 @@ class Machine:
                 self.on_tick(None)
 
 
+class DeckCentre:
+    """One token for the shared middle of the deck. One arm in it at a time.
+
+    ⚠️ **The smallest interlock that works, and it is deliberately small.** The
+    two arms only foul each other on the legs that swing them back through the
+    deck centreline — see `CROSSING_LEGS` for the aborts that identified which.
+    Everything else, including the whole picking half of the cycle, runs with
+    both arms moving.
+
+    Cannot deadlock: an arm that holds the token is never itself waiting for
+    anything, so the holder always makes progress and always releases. The
+    holder is released on mission end too, in `work`'s `finally`, so an aborted
+    pick cannot strand it.
+    """
+
+    def __init__(self):
+        self.holder = None
+        self.waits = 0          # how many times an arm had to wait, for the log
+        self.wait_cycles = 0
+
+    def claim(self, tag, leg):
+        """True if `tag` may start `leg` now. Frees the token on a safe leg."""
+        if leg not in CROSSING_LEGS:
+            if self.holder == tag:
+                self.holder = None
+            return True
+        if self.holder is None:
+            self.holder = tag
+            self.waits += 0
+            return True
+        if self.holder == tag:
+            return True
+        self.wait_cycles += 1
+        return False
+
+    def release(self, tag):
+        if self.holder == tag:
+            self.holder = None
+
+
 def assign(itinerary, state, verbose=True):
     """Give every routed fruit to exactly one arm, and say so.
 
@@ -845,6 +941,9 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     drive = trolley.Drive(model, data)
     machine = Machine(model, data, row, on_tick=on_tick)
     state.machine = machine
+    # The one place the two arms interlock. See `DeckCentre`.
+    centre = DeckCentre()
+    state.centre = centre
 
     def stow(tag):
         """Fold an arm out of the way. See `STOW`.
@@ -979,16 +1078,98 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                 continue
             state.picked_by[name] = tag
 
-            me.say("planning", f"route to {name}")
-            # This arm's world, read where the trolley is standing now. No
-            # globals are touched, which is why the other arm can be mid-mission
-            # while this runs. See `mission.ArmFrame`.
-            fr = armframe.frame(model, data, tag)
-            planner = Planner(model, data, row, lessons=None, clearance=0.040,
-                              park_q=parks[tag], speed=speed, prefix=prefix,
-                              others=others, pin=tuple(pin), frame=fr)
-            m = planner.plan(name)
-            me.route(m)
+            # ⚠️ **The posture an arm waits in is the whole safety story here,
+            # and it is measured.** Both arms' `PARK` postures fold the elbow
+            # back over the shoulder and across the aisle, so the two arms
+            # interleave in x and are held apart only by the 500 mm stagger
+            # along the row. Worst arm-vs-arm gap, swept:
+            #
+            #     both at PARK                       +110 mm
+            #     both reaching into their own rows  +188 mm
+            #     one reaching, other at PARK         -40 mm   <- the problem
+            #     either one STOWED                  +318 mm
+            #
+            # An extended arm is out over its own row, 1.6 m from the other; a
+            # folded one is in the middle. So the dangerous state is one arm
+            # *moving* while the other *sits at PARK*, and the fix is that an
+            # arm which is not flying is folded, never parked.
+            #
+            # ⚠️ **The deck centre is therefore claimed before unfolding, not at
+            # the mission's first leg.** Unfolding to PARK is itself entering
+            # the shared middle. Claiming it at `clear` instead aborted picks at
+            # 14 mm — the other arm had already unfolded into the space.
+            m = None
+            for attempt_i in range(PLAN_RETRIES):
+                waited = 0
+                while not centre.claim(tag, "clear"):
+                    me.waiting_on = ("other arm to clear the deck centre "
+                                     "before unfolding")
+                    me.say("idle-waiting", me.waiting_on)
+                    waited += 1
+                    yield
+                if waited and verbose:
+                    print(f"    {me.name} held folded for {waited} cycles "
+                          f"waiting for the deck centre")
+                me.waiting_on = ""
+                # ⚠️ **Unfold to PARK *before* planning, and plan from there,
+                # because a mission has to be flown from the posture it was
+                # planned in.** The first cut planned from STOW — which does
+                # give the other arm a clear deck to plan against — and then
+                # flew from STOW too. It stopped refusing routes and started
+                # failing grasps: 3 of 7 picks reached the fruit and came away
+                # with nothing, including an arm working entirely alone that
+                # had been clean before. `mission._legs` builds the `clear` leg
+                # from the tool's current position and `anchor_posture` anchors
+                # the solver's null space on `park_q`, so a mission that starts
+                # folded over its own base is a different problem from the one
+                # every Week 1-4 number was measured on.
+                #
+                # So: fold up to *wait*, unfold to plan and fly. The waiting is
+                # what gives the other arm a clear deck; the unfolding is what
+                # keeps the pick the pick that was measured.
+                unstow(tag)
+                mujoco.mj_forward(model, data)
+                me.say("planning", f"route to {name}")
+                # This arm's world, read where the trolley is standing now. No
+                # globals are touched, which is why the other arm can be
+                # mid-mission while this runs. See `mission.ArmFrame`.
+                fr = armframe.frame(model, data, tag)
+                planner = Planner(model, data, row, lessons=None,
+                                  clearance=0.040, park_q=parks[tag],
+                                  speed=speed, prefix=prefix, others=others,
+                                  pin=tuple(pin), frame=fr)
+                m = planner.plan(name)
+                me.route(m)
+                if m.ok:
+                    break
+                # ⚠️ Only *arm-vs-arm* refusals are worth waiting out. A route
+                # refused by the crop will be refused again in a second — the
+                # plants do not move — so retrying it would spin. A route
+                # refused by the other arm is refused against a **snapshot of
+                # something that is moving**, and waiting is the correct
+                # response rather than giving up on the fruit.
+                blocked_by_arm = any(b.obstacle.startswith("arm ")
+                                     for b in m.breaches)
+                if not blocked_by_arm or not any(
+                        state.state[o].flying for o in arms if o != tag):
+                    break
+                # Fold up while waiting, and give the deck centre back. That is
+                # what gives the other arm a clear +318 mm instead of a PARK
+                # posture in its way, and it is why waiting actually changes the
+                # answer rather than just re-asking the same question. See
+                # `stow`.
+                stow(tag)
+                centre.release(tag)
+                mujoco.mj_forward(model, data)
+                me.waiting_on = (f"other arm — {m.breaches[0].obstacle} at "
+                                 f"{m.breaches[0].distance * 1000:.0f} mm")
+                me.say("idle-waiting", me.waiting_on)
+                if verbose and attempt_i == 0:
+                    print(f"    {me.name} {name}: waiting for the other arm "
+                          f"({m.breaches[0]})")
+                for _ in range(PLAN_RETRY_CYCLES):
+                    yield
+            me.waiting_on = ""
 
             if not m.ok:
                 why = str(m.breaches[0] if m.breaches else "no route")
@@ -998,6 +1179,11 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                 if verbose:
                     print(f"    {me.name} {name} ({fruit.stage}): "
                           f"REFUSED — {why}")
+                # Fold up and hand the centre back — this arm is not going
+                # anywhere and must not sit at PARK in the other's way.
+                stow(tag)
+                centre.release(tag)
+                mujoco.mj_forward(model, data)
                 continue
 
             reacher = make_reacher(model, data, speed=speed, prefix=prefix,
@@ -1021,15 +1207,25 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             # `finally` so a mission that aborts does not leave a black box
             # recording an arm that has stopped flying.
             machine.boxes[tag] = trace
-            run_ = MissionRun(m, reacher, gripper, row, box=trace, guard=guard)
+            run_ = MissionRun(m, reacher, gripper, row, box=trace, guard=guard,
+                              gate=lambda leg, _t=tag: centre.claim(_t, leg))
             me.run = run_
             try:
                 while run_.command():
                     me.follow_leg()
+                    if run_.waiting_for:
+                        me.waiting_on = (f"other arm to clear the deck centre "
+                                         f"before `{run_.waiting_for}`")
+                        me.phase = "idle-waiting"
+                        me.detail = me.waiting_on
+                    else:
+                        me.waiting_on = ""
                     yield
             finally:
                 machine.boxes.pop(tag, None)
+                centre.release(tag)
                 me.run = None
+                me.waiting_on = ""
             res = run_.result
 
             rec = {"stop": si, "stage": fruit.stage, "row": fruit.row,
@@ -1062,11 +1258,20 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             me.say("done" if res["in_bin"] else "lost",
                    f"{name} {rec['outcome']} {res['seconds']:.1f}s")
             if verbose:
+                note = ""
+                if res["aborted"]:
+                    w = res["aborted"]
+                    note = (f"  ABORT on `{w[0]}` — {w[3]} at "
+                            f"{w[1] * 1000:.0f} mm (via {w[2]})")
                 print(f"    {me.name} {name} ({fruit.stage}): "
                       f"{rec['outcome']:<14} crate={rec['in_bin']} "
-                      f"{res['seconds']:.1f}s")
+                      f"{res['seconds']:.1f}s{note}")
 
         me.target = None
+        # Fold up rather than rest at PARK. The other arm may still be flying,
+        # and PARK is the posture that gets in its way. See `stow`.
+        stow(tag)
+        mujoco.mj_forward(model, data)
         me.say("idle-waiting", "done at this stop, waiting for the other arm")
 
     for si, (y, per_arm) in enumerate(itinerary, 1):
@@ -1084,11 +1289,15 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
 
         state.say("pick", f"stop {si}/{len(itinerary)}")
         working = [t for t in arms if per_arm.get(t)]
+        # ⚠️ **Everything folds up to start with, including the arms about to
+        # work.** An arm at PARK sits in the shared middle of the deck, and the
+        # first thing each arm does is plan a route that the *other* arm's
+        # current posture has to clear. Starting them both at PARK means each
+        # one plans against the other's worst posture and both refuse. Starting
+        # them both stowed means each plans against +318 mm and both accept.
+        # `work` folds its arm again between fruit for the same reason.
         for t in arms:
-            if t in working:
-                unstow(t)
-            else:
-                stow(t)
+            stow(t)
         mujoco.mj_forward(model, data)
         if verbose and working:
             print(f"    both arms working at once: "

@@ -188,7 +188,15 @@ class MissionRun:
     """
 
     def __init__(self, mission, reacher, gripper, row, box=None, guard=None,
-                 on_tick=None, verbose=False):
+                 on_tick=None, verbose=False, gate=None):
+        # ⚠️ `gate(leg_name) -> bool` is asked before each leg is started, and
+        # while it says no the arm **holds where it is** and keeps yielding.
+        # It exists so a machine with two arms can interlock them on the legs
+        # that use shared space without serialising the whole mission — see
+        # `farm.duo.CROSSING_LEGS`. Left None the mission never waits, which is
+        # every single-armed caller.
+        self.gate = gate
+        self.waiting_for = ""
         self.mission = mission
         self.reacher = reacher
         self.gripper = gripper
@@ -411,6 +419,16 @@ class MissionRun:
                     box.leg = leg.name
                 if guard is not None:
                     guard.leg = leg.name
+                # ⚠️ Wait *before* the leg, holding position, never mid-leg.
+                # A leg is the unit the plan was verified in; stopping halfway
+                # through one leaves the arm somewhere no route checked.
+                if self.gate is not None:
+                    here = self.data.site(self.tool_site).xpos.copy()
+                    while not self.gate(leg.name):
+                        self.waiting_for = leg.name
+                        yield from self._pump(
+                            hold_steps(self.reacher, here, CTRL_DT))
+                    self.waiting_for = ""
                 yield from self._leg(leg)
 
                 if i == 0:
