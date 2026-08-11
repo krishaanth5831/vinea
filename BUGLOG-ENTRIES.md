@@ -25,6 +25,51 @@ belong under a new one:
 
 ---
 
+## Entry 40 — **stays Open**, with the next step done and the entry corrected
+
+*Bug 40 is not fixed and nothing was changed to try. What follows is the experiment the entry's own "Next step" asks for, plus three corrections to the entry itself. Paste it as a dated block under the existing measurement, the way the 2026-08-04 block was added.*
+
+**EXPERIMENT 2026-08-12 — the cradle, with `parked/cradletrace.py`. It does not eject.**
+
+The entry's next step was to run the same trace against the Vinea cradle gripper. That needed the tool revived first (revival step 1 in `parked/README.md`, and it was real: eleven constants had moved to `mission.py`, two to `legacy_cycle.py`, and the file needed its parent on `sys.path`). Revived, it reproduces its recorded **5/5 cut, 4/5 carried, 2/5 crated** exactly.
+
+⚠️ **It is not `carrytrace` re-pointed and cannot be.** That instrument rides a `mission.Leg` list; this cycle is a flat pre-planner state machine with **no `grip` and no `pull`**, so "the same legs" is not available without revival step 3. And `carrytrace` reads *per-pad* force; a cradle has no pads, only a floor and two walls, and the floor is load-bearing where the 2F85 had no load-bearing surface at all. Those columns are not comparable and were not lined up.
+
+⚠️ **Neither speed threshold survives this tool, and that took three attempts.** `ESCAPE_MS = 1.0` absolute is valid only because the Robotiq cycle carries throttled at `CARRY_SPEED = 0.25`; this cycle drives unthrottled and the *tool* crosses 1.0 m/s, so applied as-is it flags `t0` and `t2` as ejections at 1.00 and 1.06 m/s — both of which crate 79–122 mm from centre with the fruit sitting still in the channel. That is this file's own footnote happening again in a new file. A *relative* threshold fails too: a fruit rattling in an open channel reaches 0.54 m/s relative to the tool without leaving it. The measure that works, and the only one that means the same thing for both tools, is **displacement in the tool frame**.
+
+**Twenty runs, five fruit × position error 0 / 3.9 / 15 / 40 mm:**
+
+| fruit | fruit in the tool frame while held | escaped | crated |
+|---|---|---|---|
+| `t0` | 9 → 20 mm across all four errors | **no** | 4/4 |
+| `t1` | 4 → 19 mm | **no** | 0/4 |
+| `t2` | 2 → 20 mm | **no** | 4/4 |
+| `t4` | 6 → 20 mm | **no** | 0/4 |
+| `t3` | 641 → 2322 mm — never cradled, see below | — | 0/4 |
+
+against the 2F85 on the same row:
+
+| run | est err | peak m/s while held | fruit in the tool frame | outcome |
+|---|---|---|---|---|
+| `t1` ground truth | 0 | 0.42 | 0.2 → **4.7 mm** | crated |
+| `t1` perception | 3.9 mm | 1.54 | 5.3 → **783.6 mm** | **ejected** |
+
+**On every fruit the cradle actually holds, the fruit stays within 20 mm of the tool point through every carrying leg, and that number is flat against position error from 0 to 40 mm** — ten times the error that ejects the 2F85. Flat-against-the-input is the same shape of evidence this entry used to conclude the 2F85's failure *is* a geometric instability, pointing the other way.
+
+`t3` is not a counter-example: its fruit is 1.1 m from the tool before the carrying legs begin, channel force **0.0 N throughout**, `carried=False`. It is knocked off during the approach and never cradled — which `week2_vinea`'s own run also scores as not carried.
+
+**What it does not prove.** Not a like-for-like cycle (different legs, no planner, unthrottled carry), so no cycle-time or success-rate comparison can be drawn from it. No perception — the 3.9 mm is injected on the *belief*, from `t1`'s real error vector, so it says nothing about aiming a cradle from vision. `Blade.severed` has a 55 mm tolerance, so `cut=True` at 40 mm error is not evidence the blade found the stem. n = 5 fruit, one row, and **53** says a shift is not bit-reproducible. And it is **not the better tool**: crate rate **8/20 = 40%**, the same 40% the row run gives. It does not throw fruit; it drops it. Only the first is the safety problem.
+
+**⚠️ CORRECTION 1 — "six metres outside the greenhouse" is mostly a fruit rolling, and this is the entry's most-quoted number.** `z = 0.03` is the **floor**. The fruit is not in flight there; it is lying down. And it is still moving — at the last sample of the trace it is doing **0.58 m/s with zero deceleration**, having held exactly that speed in a straight line for 2.5 s. The run ends because the *cycle* ends, not because the fruit stopped. The reason it never stops is **41, in a second place nobody connected it to**: `geom_condim = 3` on the **fruit and the floor** as well as the pads — `t1_geom` `friction=[0.6, 0.01, 0.001]`, `floor` `[1.0, 0.005, 1e-4]` — so a sphere that reaches the floor has no rolling resistance available at any coefficient. Confirmed independently on the cradle's `t3`, which rolls **3.79 m at a constant 0.20 m/s**. **What survives:** the mechanism, and the peak speed while held (1.54 m/s against 0.42 for a clean pick), which is measured while the fruit is still in the gripper and is what the safety argument should rest on. **What does not:** the six metres, as evidence of anything.
+
+**⚠️ CORRECTION 2 — the ejection's numbers have moved, and only the ejection's.** Re-run three times today, identical each time: `t1` ground truth **0.42 m/s / 44 mm** (logged 0.42 / 25), `t3` perception **0.64 m/s / 53 mm** (logged 0.65 / 93), `t1` perception **1.54 m/s / 1255 mm** (logged **2.32 / 2046**). The two stable runs reproduce to 0.01 m/s; the unstable one has moved by a third. That is not a regression — it is what an unstable event looks like beside stable ones, and it is *more* support for this entry's conclusion. But **2.32 m/s and 2046 mm should not be quoted again without re-running.**
+
+**⚠️ CORRECTION 3 — the one-sided unload is real, and this entry's own instrument cannot display it.** Confirmed in the CSV: left pad **63 → 0 N over 12 control cycles** while the right holds ~112 N, fruit walking **1.3 → 7.8 mm** along tool x, then gone. But `carrytrace`'s summary table prints **145.4 / 144.5 N** for the carry leg — near-symmetric, because it reports the per-leg *peak* and each pad peaks at a different moment. Anyone reading the table alone concludes the pads were balanced. Take `--csv`.
+
+*Lesson: the tool comparison was answerable and the tool's own instrument was not portable to it — three thresholds had to fail before the measure that means the same thing for both machines fell out, and it was the geometric one, not either of the kinetic ones. And the entry's most quotable number was the one that did not survive being asked how it was produced.*
+
+---
+
 ## Note against the Open section, not a fix
 
 **Entries 42/42 and 6/6 have no command that produces them.** Both are real measurements from the build log — 42 hand-run mouse clicks, and entry 23's six-position table sweep — and neither can be re-run, because `week1_mousereach.py` has no sweep mode and `week1_gripper.py` picks one hardcoded fruit. This is bug **6**'s own sentence about itself, found while trying to use those numbers as the regression bar for **7**. Bug **7** is therefore held to a byte-for-byte stdout diff over a fixed point set, captured before and after and committed under `tests/baselines/`, which compares every waypoint and arrival error rather than a final tally.
