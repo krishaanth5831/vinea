@@ -265,6 +265,17 @@ WAIT_MAX_CYCLES = 6000
 # it through the scene. So there is no safe posture for a waiting arm mid-pick,
 # and therefore no safe point to hand the deck over mid-mission.
 #
+# ⚠️ **The trade curve, all on `--truth --stops 5 --seed 7`.** More overlap
+# costs fruit, monotonically, and every abort is the guard being right:
+#
+#     interlock                crated   guard aborts   both arms moving
+#     none, both arms free       --         many            ~47%
+#     the returning half        5/7          2               19%
+#     + `extract`               4/7          2               15%
+#     whole mission (ships)     6/7          0                0%
+#
+# This set is the knob. Shrink it and the middle rows come back.
+#
 # ⚠️ **What this is not.** It is not the old serialisation. That was
 # `armframe` rebinding module globals, which made two arms mid-mission
 # *inexpressible*; this is one measured mechanical constraint on one shared
