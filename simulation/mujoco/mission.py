@@ -185,6 +185,55 @@ TIP_MAX_S = 3.5
 INTO_ROW = np.array([1.0, 0.0, 0.0])
 DOWNWARD = np.array([0.0, 0.0, -1.0])
 
+
+# --- whose world a mission is planned in -------------------------------------
+
+@dataclass(frozen=True)
+class ArmFrame:
+    """The five world constants a mission is planned against, as a value.
+
+    ⚠️ **This is what used to be five module globals, and moving it here is what
+    makes two arms flyable at once.** `PARK`, `STAGE_X`, `BIN_POS`, `ROW_X` and
+    `INTO_ROW` describe *one* arm's world — where it rests, the plane it stages
+    on, where its crate is, where its crop is, and which way "into the row"
+    points. That was fine while there was one arm bolted to the origin.
+
+    On a trolley they are functions of where the machine is standing, and
+    `farm.armframe` made them work by **rebinding this module's globals** for
+    the duration of a mission. That is why the two arms were serialised: two
+    arms mid-mission need two conflicting sets of those globals in one
+    interpreter, so concurrency was not merely unimplemented, it was
+    inexpressible. See Bug Log 57.
+
+    Carried as a value on the `Mission`, two arms simply hold two frames, and
+    nothing global changes at all.
+
+    ⚠️ `WORLD` below is built from the module constants at import, so every
+    caller that passes no frame gets exactly the Week 1-4 numbers. Nothing
+    measured in Weeks 1-4 can move, because for those callers this is the same
+    five values reached by a different name.
+    """
+
+    park: np.ndarray
+    stage_x: float
+    bin_pos: np.ndarray
+    row_x: float
+    into_row: np.ndarray
+
+    @property
+    def back(self):
+        """Sign of "out of the canopy" along x. See `Route.pull_vector`."""
+        return -float(self.into_row[0])
+
+
+WORLD = ArmFrame(park=PARK, stage_x=STAGE_X, bin_pos=BIN_POS, row_x=ROW_X,
+                 into_row=INTO_ROW)
+
+
+def _frame(frame):
+    """`WORLD` when a caller passes nothing. The Weeks 1-4 default, in one place."""
+    return WORLD if frame is None else frame
+
 # The legs that move with fruit in the gripper, between the pull and the
 # release. These are the ones CARRY_SPEED applies to.
 CARRYING_LEGS = {"extract", "turn", "carry"}
@@ -264,6 +313,17 @@ class Mission:
     tried: list[str] = field(default_factory=list)
     applied: list[str] = field(default_factory=list)   # lessons that shaped it
     path: np.ndarray | None = None         # the predicted tool path, for drawing
+    # ⚠️ Which arm's world this was planned in, carried with the plan rather
+    # than left in module state for the executor to look up. `execute` scores
+    # the crate from `mission.frame.bin_pos` and escapes an abort along
+    # `mission.frame.into_row`, so a plan handed to the executor is complete —
+    # there is nothing left to rebind and nothing for a second arm to clobber.
+    # `None` means the Week 1-4 world; see `ArmFrame`.
+    frame: ArmFrame | None = None
+
+    @property
+    def arm_frame(self):
+        return _frame(self.frame)
 
     def summary(self) -> str:
         head = (f"mission {self.target}: {'planned' if self.ok else 'REFUSED'} · "
@@ -439,6 +499,33 @@ def _sphere_count(pts, max_k=MAX_SPHERES_PER_GEOM):
     return int(np.clip(np.ceil(long_axis / (0.75 * thick)), 1, max_k))
 
 
+_SPHERE_CACHE = {}
+
+
+def arm_spheres(model, prefix=""):
+    """`RobotSpheres` for one arm, built once per (model, prefix).
+
+    ⚠️ **The cover depends only on the model, and it was being rebuilt for every
+    candidate route.** `_verify` constructs a fresh `ClearanceModel` per
+    candidate, which builds a `RobotSpheres` for this arm *and* one for every
+    other arm on the machine — and each of those walks all 5433 geoms, unpacks
+    the mesh vertices of the ones that belong to the arm, runs an SVD per geom
+    to size the cover and another to split it. Identical work, up to 18 times a
+    plan, twice over on a two-armed machine.
+
+    Cached on the model's id and the prefix. Nothing in the cover reads
+    `mjData` — `world()` takes the data and poses the cached local centres — so
+    this cannot go stale against a moving arm. It would go stale against a
+    *recompiled model*, which is why the key includes `id(model)` and why this
+    repo does not recompile mid-run.
+    """
+    key = (id(model), prefix)
+    got = _SPHERE_CACHE.get(key)
+    if got is None:
+        got = _SPHERE_CACHE[key] = RobotSpheres(model, prefix=prefix)
+    return got
+
+
 class RobotSpheres:
     """A conservative sphere cover of the arm and gripper, posed from mjData."""
 
@@ -551,7 +638,7 @@ class ArmObstacles:
     """
 
     def __init__(self, model, prefixes):
-        self.arms = [(p.rstrip("_") or "a", RobotSpheres(model, prefix=p))
+        self.arms = [(p.rstrip("_") or "a", arm_spheres(model, p))
                      for p in prefixes]
 
     def distances(self, data, centres, radii):
@@ -581,7 +668,7 @@ class ClearanceModel:
         # which is Weeks 1-4's behaviour exactly and leaves every number they
         # measured untouched. See `ArmObstacles`.
         self.prefix = prefix
-        self.spheres = RobotSpheres(model, prefix=prefix)
+        self.spheres = arm_spheres(model, prefix)
         self.crop = CropObstacles(model, row, target)
         self.others = ArmObstacles(model, others) if others else None
 
@@ -663,9 +750,16 @@ class Route:
     stage_x: float = STAGE_X
     approach_gap: float = APPROACH_GAP
     keepout: dict = field(default_factory=dict)   # fruit name -> extra metres
+    # ⚠️ The frame this route's `stage_x` is measured in. It exists so `label`
+    # can report a backoff — "+8cm" means eight centimetres behind *this arm's*
+    # staging plane — without reading a module global that a second arm may
+    # have a different answer for. `farm.armframe._patch_default` used to patch
+    # this dataclass's `__init__.__defaults__` for exactly this reason; it no
+    # longer has to, because the nominal comes in with the route.
+    frame: ArmFrame | None = None
 
     def label(self):
-        back = STAGE_X - self.stage_x
+        back = _frame(self.frame).stage_x - self.stage_x
         bits = [self.lane]
         if self.pull != "down":
             bits.append(f"pull-{self.pull}")
@@ -692,11 +786,11 @@ class Route:
         pulling the fruit toward themselves rather than toward the floor.
         """
         # ⚠️ The x components are "back out of the canopy", not "toward -x".
-        # They are signed by INTO_ROW so a mirrored arm leans out of its own
-        # row rather than further into it — see `farm.armframe._MIRROR`. For
-        # the unmirrored arm INTO_ROW[0] is +1 and these are the Week 2
-        # numbers unchanged.
-        back = -INTO_ROW[0]
+        # They are signed by the frame's `into_row` so a mirrored arm leans out
+        # of its own row rather than further into it — see
+        # `farm.armframe.MIRROR`. For the unmirrored arm `into_row[0]` is +1 and
+        # these are the Week 2 numbers unchanged.
+        back = _frame(self.frame).back
         return {
             "out": np.array([back * 0.09, 0.0, -PULL_DOWN]),
             "far": np.array([back * 0.17, 0.0, -0.06]),
@@ -708,7 +802,7 @@ class Planner:
 
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
                  park_q=None, speed=DEFAULT_SPEED, prefix="", others=(),
-                 pin=()):
+                 pin=(), frame=None):
         import mink
 
         self.model = model
@@ -717,6 +811,12 @@ class Planner:
         self.lessons = lessons
         self.clearance = clearance
         self.park_q = park_q
+        # ⚠️ Which arm's world to plan in. `None` is the Week 1-4 world and is
+        # what every single-armed caller gets, unchanged. `farm.armframe.frame`
+        # builds the trolley-mounted one. See `ArmFrame` — this parameter is
+        # what replaced rebinding this module's globals, and it is why two arms
+        # can now be mid-mission at the same time.
+        self.frame = _frame(frame)
         # ⚠️ The plan carries the speed, not the arm. Every Leg used to default
         # to DEFAULT_SPEED, and the executor sets the arm to `leg.speed` at the
         # top of each leg — so a Reacher built at --speed 1.0 was clobbered back
@@ -734,6 +834,11 @@ class Planner:
         # plan around. Empty is Weeks 1-4. See `ArmObstacles`.
         self.others = tuple(others)
         self.tool_site = prefix + TOOL_SITE
+        # This arm's six, by name. Needed to seed the preview's posture task on
+        # `park_q` the way the executor does — see `_verify`.
+        from fr5 import JOINTS as _J
+
+        self.joints = [prefix + j for j in _J]
 
         # ⚠️ **The preview has to be pinned exactly like the executor, or the
         # planner verifies routes the arm cannot fly.** `mink.Configuration`
@@ -754,12 +859,42 @@ class Planner:
         # same contract `park_posture` already uses — `farm.duo` passes the drive
         # joint and every other arm's six.
         self.pin = tuple(pin)
-        self._limits = None
-        if self.pin:
-            import mink as _mink
 
-            self._limits = [_mink.VelocityLimit(model,
-                                                {j: 0.0 for j in self.pin})]
+        # ⚠️ **The preview gets the executor's joint speed cap, not an
+        # unlimited solver, and this is the same argument as `pin` one
+        # paragraph up carried to its conclusion.** Pinning stopped the preview
+        # using joints the executor will never move. It did nothing about the
+        # preview moving the arm's *own* joints faster than the arm can, and
+        # `reach.Reacher` caps them at `joint_velocity * speed` because a
+        # velocity limit is a constraint inside the QP rather than a scale
+        # factor afterwards — so capped and uncapped solvers take **different
+        # paths**, not the same path at different speeds.
+        #
+        # With one arm that difference was invisible, because it lives in the
+        # null space: the tool goes to the same place either way, and every
+        # clearance that mattered was against the crop, which the tool's own
+        # position dominates.
+        #
+        # With two arms it is not invisible, because the thing the other arm
+        # collides with is the **elbow**, which is exactly what the null space
+        # decides. Measured on one route, arm a reaching 0.40 m *forward* —
+        # away from arm b — while arm b sat parked:
+        #
+        #     preview, unlimited solver     lane: upperarm_link within -142 mm
+        #     same pose solved to converge                        +250 mm
+        #
+        # The planner was refusing good routes for a posture the arm does not
+        # adopt. A preview checked in a posture the arm will never adopt is a
+        # measurement of a different machine — the note above says so about
+        # pinning, and it is just as true about speed.
+        from fr5 import JOINT_VELOCITY as _JV
+
+        caps = {j: 0.0 for j in self.pin}
+        for j in self.joints:
+            caps[j] = _JV[j[len(prefix):]] * self.speed
+        import mink as _mink
+
+        self._limits = [_mink.VelocityLimit(model, caps)]
         self._cfg = mink.Configuration(model)
         self._task = mink.FrameTask(
             frame_name=self.tool_site, frame_type="site", position_cost=1.0,
@@ -775,12 +910,14 @@ class Planner:
         Every leg exists for a measured reason; the ones that are not obvious
         are the ones that were added after something broke.
         """
+        fr = self.frame
+        INTO_ROW, PARK = fr.into_row, fr.park
         sx = route.stage_x
         start = self.data.site(self.tool_site).xpos.copy()
         lane_z = self._lane_z(route, target)
         pull_to = target + route.pull_vector()
         out_z = float(pull_to[2])
-        over_bin = BIN_POS + np.array([0, 0, BIN_DROP_UP])
+        over_bin = fr.bin_pos + np.array([0, 0, BIN_DROP_UP])
 
         legs = [
             # 0. Settle. The weld overshoots for ~50 ms on startup and the peak
@@ -926,8 +1063,11 @@ class Planner:
         zs = [self.row.pos(n)[2] for n in self.row.names]
         if route.lane == "under":
             # Not below the crate rim — ducking under the crop and then dragging
-            # the gripper through the bin is not an improvement.
-            return float(max(min(zs) - 0.20, BIN_POS[2] + BIN_WALL + 0.10))
+            # the gripper through the bin is not an improvement. This arm's
+            # crate: on a trolley it rides beside its own arm, so the rim to
+            # clear is not the same height for both.
+            return float(max(min(zs) - 0.20,
+                             self.frame.bin_pos[2] + BIN_WALL + 0.10))
         return float(max(zs) + 0.16)
 
     # -- checking it ----------------------------------------------------------
@@ -963,7 +1103,34 @@ class Planner:
 
         cfg = self._cfg
         cfg.update(self.data.qpos[: self.model.nq].copy())
-        self._posture.set_target_from_configuration(cfg)
+        # ⚠️ **The preview's null-space bias has to be the executor's, or it
+        # previews a posture the arm will never adopt.** `week2_pick.
+        # anchor_posture` points the executor's `PostureTask` at `park_q`, so
+        # the solver prefers the canonical park configuration wherever nothing
+        # else is competing for the redundant DOF. This seeded the same task
+        # from *wherever the arm happens to be*, which is a different
+        # preference, and over eighteen legs the two diverge.
+        #
+        # It was invisible with one arm because the divergence is in the null
+        # space — the tool goes to the same place either way, so every
+        # clearance that mattered was against the crop, which the tool's own
+        # position dominates. With two arms it stops being invisible: the
+        # carry to the crate swings j1 round, the preview keeps the wound-up
+        # posture through `withdraw`/`ready`/`park`, and the elbow it draws
+        # sweeps across the aisle into the other arm. Measured, that reported
+        #
+        #     park: forearm_link within -129 mm of arm b
+        #
+        # and refused every route for a posture the executor unwinds out of.
+        # Same class as the `pin` note above: a preview checked in a posture
+        # the arm will never adopt is a measurement of a different machine.
+        if self.park_q is not None:
+            seed = self.data.qpos[: self.model.nq].copy()
+            for jname, value in zip(self.joints, np.asarray(self.park_q)):
+                seed[self.model.joint(jname).qposadr[0]] = value
+            self._posture.set_target(seed)
+        else:
+            self._posture.set_target_from_configuration(cfg)
         tasks = [self._task, self._posture]
 
         crop = set(self.row.names)
@@ -1033,6 +1200,20 @@ class Planner:
                                             1e-3, limits=self._limits)
                         cfg.integrate_inplace(vel, PREVIEW_DT)
                     measure(leg)
+            elif leg.kind == "home" and leg.posture is not None:
+                # ⚠️ **The one leg that moves the arm without moving the tool,
+                # and the preview used to skip the motion entirely.** `unwind`
+                # drives the *joints* to `park_q`; measuring it at whatever
+                # posture the previous leg left behind reports the clearance of
+                # the posture the arm is unwinding *out of*, which is exactly
+                # the wound-up one. Walk the configuration to the posture the
+                # executor will ramp to, then measure there.
+                q = np.array(cfg.q).copy()
+                for jname, value in zip(self.joints,
+                                        np.asarray(leg.posture, dtype=float)):
+                    q[self.model.joint(jname).qposadr[0]] = value
+                cfg.update(q)
+                measure(leg)
             elif leg.goal is not None:
                 measure(leg)
 
@@ -1049,7 +1230,7 @@ class Planner:
         for — and widened only when the check says the direct one is blocked.
         """
         target = self.row.pos(name)
-        base = Route()
+        base = Route(stage_x=self.frame.stage_x, frame=self.frame)
         applied = []
         if self.lessons is not None:
             base, applied = self.lessons.advise(name, self.row, base)
@@ -1062,7 +1243,8 @@ class Planner:
             mission = Mission(target=name, legs=legs, ok=not breaches,
                               clearance=worst, lane=route.lane,
                               stage_x=route.stage_x, breaches=breaches,
-                              tried=tried, applied=applied, path=path)
+                              tried=tried, applied=applied, path=path,
+                              frame=self.frame)
             if not breaches:
                 return mission
             if best is None or worst > best.clearance:
@@ -1107,14 +1289,14 @@ class Planner:
             route = Route(lane=lane, pull=pull, roll=roll,
                           stage_x=base.stage_x - backoff,
                           approach_gap=base.approach_gap,
-                          keepout=base.keepout)
+                          keepout=base.keepout, frame=self.frame)
             if route.label() in seen:
                 continue
             seen.add(route.label())
             yield route
 
 
-def park_posture(model, iters=600, prefix="", pin=(), hold=None):
+def park_posture(model, iters=600, prefix="", pin=(), hold=None, frame=None):
     """Arm joint angles that put the tool at PARK, facing the row.
 
     Solved once at startup and reused as the pose every attempt begins and ends
@@ -1131,6 +1313,11 @@ def park_posture(model, iters=600, prefix="", pin=(), hold=None):
     import mujoco
 
     from fr5 import JOINTS, reset_home
+
+    # ⚠️ Which arm's world to park in. `None` is Week 1-4's, so the single-armed
+    # callers below and in `week2_pick` are unchanged. See `ArmFrame`.
+    fr = _frame(frame)
+    PARK, INTO_ROW = fr.park, fr.into_row
 
     # ⚠️ `prefix` names which arm on a machine carrying more than one. Bare
     # names are arm a and every single-armed scene keeps them. Without it the

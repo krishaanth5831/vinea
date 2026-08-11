@@ -229,9 +229,10 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
             say("select", fruit=name, stage=fruit.stage, stop=si,
                 left=len(stop.fruit) - fi)
             p0 = _time.perf_counter()
-            with armframe.at_trolley(model, data):
+            with armframe.at_trolley(model, data) as fr:
                 planner = Planner(model, data, row, lessons=None,
-                                  clearance=0.040, park_q=park_q, speed=speed)
+                                  clearance=0.040, park_q=park_q, speed=speed,
+                                  frame=fr)
                 m = planner.plan(name)
             rec["t_plan"] = _time.perf_counter() - p0
 
@@ -247,7 +248,7 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
                           f"{rec['refused_reason']}")
                 continue
 
-            reacher = make_reacher(model, data, speed=speed)
+            reacher = make_reacher(model, data, speed=speed, frame=m.frame)
             # ⚠️ Before anything else. Without this the IK solver plans base
             # motion the trolley will never make; see `armframe.pin_base`.
             armframe.pin_base(reacher)

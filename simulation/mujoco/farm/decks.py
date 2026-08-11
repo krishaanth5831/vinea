@@ -36,19 +36,56 @@ own row, so the whole cross-aisle slew disappears; what pan buys here is
 *coverage along the row* from a standing trolley, which is what a scouting head
 is actually for.
 
---- the mocap decision, restated because it is load-bearing ------------------
+--- the head is bolted to the trolley, and it used to be a mocap body --------
 
-Same as `scout.add_deck_camera` and for the same reason: these are **mocap
-bodies parented to the world**, not hinges. A hinge would add DOFs to `mjModel`,
-and `reach.Reacher` builds `mink.Configuration` over the *whole* model — the IK
-solver would discover two free joints that cost it nothing and park them
-anywhere, so "where the arm is reaching" would silently steer "where the camera
-is looking". `farm.armframe.pin_base` exists because the trolley's slide joint
-already had exactly this problem.
+⚠️ **This was a mocap body parented to the worldbody, and that is what caused
+both deck-camera bugs.** The reasoning for mocap was real: a hinge adds DOFs to
+`mjModel`, and `reach.Reacher` builds `mink.Configuration` over the *whole*
+model, so the IK solver would discover two free joints that cost it nothing and
+park them anywhere — "where the arm is reaching" would silently steer "where the
+camera is looking". `farm.armframe.pin_base` exists because the trolley's slide
+joint already had exactly this problem.
 
-Mocap bodies must be children of the worldbody, so they cannot be bolted to a
-moving trolley. `ArmDeckHead.follow` writes `mocap_pos` from the drive joint
-every tick, which is what a mast-mounted unit does anyway.
+But mocap bodies **must** be children of the worldbody, so the head could not be
+bolted to a moving trolley. It was kept over its mast by `ArmDeckHead.follow`
+writing `mocap_pos` from the drive joint — from Python, on the ticks that
+happened to call it.
+
+That left one rigid assembly moving by **two different transport mechanisms**:
+
+    the mast        a geom on the trolley body, moved by the model tree on
+                    every physics step, continuously
+    the head        a worldbody mocap body, moved only when Python said so
+
+and everything that went wrong followed from that gap:
+
+    deck cam TELEPORTS      `Drive.drive_to` steps physics for the whole
+                            traverse and never calls `follow`. The camera stays
+                            frozen where the last `follow` put it for the entire
+                            drive, then jumps the full distance travelled the
+                            next time one is called. It is not a camera moving
+                            badly, it is a camera not moving at all and then
+                            being told the answer.
+    POLE moves, camera      the same desync seen from the other side. Through
+    is left behind          the whole harvest nothing calls `follow`, so the
+                            mast rides the trolley and the head does not.
+
+⚠️ **The fix is structural rather than a smoothed teleport**, because lerping
+the jump would only spread one frame's error over ten. The head is now a
+**child body of the trolley**, with two hinges:
+
+    deck_yaw_<tag>    pan, about the mast's own z, child of the trolley
+    deck_head_<tag>   tilt, about the yoke's right axis, child of the yaw body
+
+Position along the row is now inherited through the model tree exactly as the
+mast's is, because it *is* the mast's — there is no second mechanism and so
+nothing to desync. Only the articulation is driven from Python.
+
+The DOF objection is answered rather than dodged: `head_joints()` names the new
+joints and every IK caller pins them, the same contract the drive joint has
+used since `pin_base`. `follow()` is kept as a no-op so the old call sites still
+read, and so that re-introducing a Python-driven position is an obvious edit
+rather than a quiet one.
 
     ./.venv/bin/python simulation/mujoco/farm/decks.py            # stills
     ./.venv/bin/python simulation/mujoco/farm/decks.py --split    # the proof
@@ -73,6 +110,44 @@ from greenhouse import _decor  # noqa: E402
 # callers, so both arms are named symmetrically and neither is the special case.
 DECK_CAM = {"a": "deck_a", "b": "deck_b"}
 DECK_HEAD = {"a": "deck_head_a", "b": "deck_head_b"}
+DECK_YAW = {"a": "deck_yaw_a", "b": "deck_yaw_b"}
+
+# The two articulation joints per head, and their position servos. Named so
+# every IK caller can pin them — see `head_joints`.
+DECK_PAN_JOINT = {"a": "deck_pan_a", "b": "deck_pan_b"}
+DECK_TILT_JOINT = {"a": "deck_tilt_a", "b": "deck_tilt_b"}
+
+# How far the head may swing, in degrees. Wider than `SCAN_HALF_DEG` so the scan
+# pattern is not sitting on a joint limit, and narrow enough that a runaway
+# command cannot spin the camera to face the back wall.
+PAN_LIMIT_DEG = 75.0
+TILT_LIMIT_DEG = 45.0
+
+# Position-servo gains for the pan-tilt unit. It carries a D435 and a yoke —
+# well under a kilogram — so these only have to hold the tilt axis against
+# gravity and settle quickly. The pan axis is vertical and carries no gravity
+# torque at all.
+HEAD_KP = 220.0
+HEAD_KV = 22.0
+HEAD_MASS = 0.55          # D435 plus the trunnion and yoke, roughly
+
+
+def head_joints(arms=("a", "b")):
+    """Every deck-head joint name, for the `pin` sets.
+
+    ⚠️ **Pinning these is not optional and it is the price of making the head a
+    real body.** `mink.Configuration` spans the whole model, so an unpinned pan
+    or tilt joint is a free DOF the IK solver will happily use to help the tool
+    reach — and `reach.Reacher.step` writes only the arm's six actuators, so the
+    solve would be "reach by also turning the camera" and the arm would land
+    short by whatever the camera was supposed to contribute. That is exactly
+    `farm.armframe.pin_base`'s bug with a camera in place of the trolley, and it
+    is why this head was a mocap body for as long as it was.
+    """
+    out = []
+    for tag in arms:
+        out += [DECK_PAN_JOINT[tag], DECK_TILT_JOINT[tag]]
+    return out
 
 # Where each head's pan axis stands, in trolley-local coordinates: directly over
 # its own arm's mount plate, 1.10 m up. Same height as `scout.SCOUT_MOUNT` — it
@@ -169,27 +244,61 @@ def add_arm_deck_cameras(spec, aisle=0, arms=("a", "b"),
                fromto=[mx, my, trolley.DECK_Z, mx, my, DECK_Z_CAM - 0.04],
                size=[0.020, 0, 0], rgba=[0.42, 0.44, 0.47, 1.0], mass=0.0)
 
-        # The head's origin *is* the pan axis, so a pure quaternion on the mocap
-        # body is the pan-tilt command and nothing has to track a moving centre
-        # of rotation. Its world seat here only has to compile somewhere sane;
-        # `ArmDeckHead.follow` owns it from the first tick.
-        pivot = [ax + mx, my, DECK_Z_CAM]
-        head = spec.worldbody.add_body(name=DECK_HEAD[tag], pos=pivot,
-                                       mocap=True)
+        # ⚠️ **Children of the trolley, not of the worldbody.** `pos` is
+        # therefore trolley-local, and the drive joint carries the whole head
+        # down the row for free — which is the entire point. The old worldbody
+        # mocap seat had to be world coordinates and had to be rewritten from
+        # Python every tick; see the module docstring for what that cost.
+        #
+        # Two bodies rather than one: the pan table carries the trunnion, and
+        # the tilt yoke rides on the pan table. Pan outer, tilt inner — the
+        # other order yaws about a tilted axis and rolls the horizon.
+        yaw = body.add_body(name=DECK_YAW[tag], pos=[mx, my, DECK_Z_CAM])
+        yaw.add_joint(name=DECK_PAN_JOINT[tag],
+                      type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 0, 1],
+                      range=[-np.radians(PAN_LIMIT_DEG),
+                             np.radians(PAN_LIMIT_DEG)],
+                      damping=1.2)
+        yaw.add_geom(name=f"deck_trunnion_{tag}",
+                     type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                     fromto=[0, -0.028, 0, 0, 0.028, 0], size=[0.018, 0, 0],
+                     rgba=[0.35, 0.37, 0.40, 1.0], contype=0, conaffinity=0,
+                     mass=0.10)
+
+        # The tilt axis is the camera's own "right" at home, which
+        # `_xyaxes_towards` makes horizontal by construction — that is what lets
+        # pan and tilt stay azimuth and elevation rather than a general
+        # rotation.
+        right0 = [float(v) for v in xyaxes[:3]]
+        head = yaw.add_body(name=DECK_HEAD[tag], pos=[0, 0, 0])
+        head.add_joint(name=DECK_TILT_JOINT[tag],
+                       type=mujoco.mjtJoint.mjJNT_HINGE, axis=right0,
+                       range=[-np.radians(TILT_LIMIT_DEG),
+                              np.radians(TILT_LIMIT_DEG)],
+                       damping=0.8)
         local = [SCOUT_YOKE_M, 0.0, 0.0]
-        head.add_geom(name=f"deck_trunnion_{tag}",
-                      type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                      fromto=[0, -0.028, 0, 0, 0.028, 0], size=[0.018, 0, 0],
-                      rgba=[0.35, 0.37, 0.40, 1.0], contype=0, conaffinity=0,
-                      mass=0.0)
         head.add_geom(name=f"deck_yoke_{tag}", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
                       fromto=[0, 0, 0] + local, size=[0.010, 0, 0],
                       rgba=[0.45, 0.47, 0.50, 1.0], contype=0, conaffinity=0,
-                      mass=0.0)
+                      mass=HEAD_MASS)
         head.add_camera(name=DECK_CAM[tag], pos=local, fovy=SCOUT_FOVY,
                         xyaxes=xyaxes)
         add_camera_housing(head, f"cam_{DECK_CAM[tag]}", local, xyaxes,
                            kind="d435", stalk=[0.0, 0.0, 0.0])
+
+        # Position servos, so the head *holds* its aim. The tilt axis carries
+        # the camera on a 90 mm yoke and would otherwise sag under gravity; the
+        # pan axis is vertical and needs only to resist the trolley's
+        # acceleration down the row.
+        for jname in (DECK_PAN_JOINT[tag], DECK_TILT_JOINT[tag]):
+            act = spec.add_actuator(
+                name=f"{jname}_pos", target=jname,
+                trntype=mujoco.mjtTrn.mjTRN_JOINT,
+                gaintype=mujoco.mjtGain.mjGAIN_FIXED,
+                biastype=mujoco.mjtBias.mjBIAS_AFFINE)
+            act.gainprm[0] = HEAD_KP
+            act.biasprm[1] = -HEAD_KP
+            act.biasprm[2] = -HEAD_KV
     return body
 
 
@@ -207,15 +316,21 @@ class ArmDeckHead:
         from camera import _xyaxes_towards
 
         self.model, self.tag, self.aisle = model, tag, aisle
-        name = DECK_HEAD[tag]
         try:
-            self.mocap = int(model.body(name).mocapid[0])
+            pan_j = model.joint(DECK_PAN_JOINT[tag])
+            tilt_j = model.joint(DECK_TILT_JOINT[tag])
         except KeyError:
-            self.mocap = -1
-        if self.mocap < 0:
             raise RuntimeError(
                 f"no deck head for arm {tag} in this model — build the scene "
                 f"with arm_decks=True")
+        self.pan_adr = int(pan_j.qposadr[0])
+        self.tilt_adr = int(tilt_j.qposadr[0])
+        self.pan_dof = int(pan_j.dofadr[0])
+        self.tilt_dof = int(tilt_j.dofadr[0])
+        self.pan_act = int(model.actuator(f"{DECK_PAN_JOINT[tag]}_pos").id)
+        self.tilt_act = int(model.actuator(f"{DECK_TILT_JOINT[tag]}_pos").id)
+        self.body_id = int(model.body(DECK_HEAD[tag]).id)
+        self.cam_id = int(model.camera(DECK_CAM[tag]).id)
 
         self.pivot_local = _mount_local(tag)
         self.ax = house.aisle_x(aisle)
@@ -234,31 +349,32 @@ class ArmDeckHead:
     # --- riding the trolley --------------------------------------------------
 
     def follow(self, data):
-        """Put the head back over its mast wherever the trolley now is.
+        """Nothing. The head is a child of the trolley and rides it for free.
 
-        ⚠️ Must be called after anything that moves the drive joint and before
-        the next render. A mocap body does not move on its own, so a frame taken
-        without this shows the crop from where the trolley *was* — which fuses
-        into the map as a real fruit at a wrong position rather than as an error.
+        ⚠️ **Deliberately kept, and deliberately empty.** This used to write
+        `mocap_pos` from the drive joint, and it was the only thing carrying the
+        head down the row — so every code path that stepped physics without
+        calling it left the camera behind while its own mast drove away. That
+        was both deck-camera bugs: the teleport (a whole traverse of catch-up
+        applied in one frame) and the pole-without-camera desync.
+
+        The head is now a real child body of the trolley, so position is
+        inherited through the model tree on every physics step, the same way the
+        mast's is. There is no second mechanism and therefore nothing to
+        desync. See the module docstring.
+
+        It stays as a no-op so the existing call sites still read, and so that
+        anyone re-introducing a Python-driven position has to delete this
+        comment to do it.
         """
-        data.mocap_pos[self.mocap] = [
-            self.ax + self.pivot_local[0],
-            float(data.qpos[self.jadr]) + self.pivot_local[1],
-            self.pivot_local[2]]
+        return None
 
     # --- pointing ------------------------------------------------------------
 
-    def _quat(self, pan_deg, tilt_deg):
-        import mujoco
-
-        qp, qt, out = np.zeros(4), np.zeros(4), np.zeros(4)
-        mujoco.mju_axisAngle2Quat(qp, np.array([0.0, 0.0, 1.0]),
-                                  np.radians(pan_deg))
-        mujoco.mju_axisAngle2Quat(qt, self.right0, np.radians(tilt_deg))
-        # Pan outer, tilt inner — the trunnion rides on the pan table. The other
-        # order yaws about a tilted axis and rolls the horizon.
-        mujoco.mju_mulQuat(out, qp, qt)
-        return out
+    def where(self, data):
+        """(camera world position, head body world position). For the offset check."""
+        return (np.array(data.cam_xpos[self.cam_id], float),
+                np.array(data.xpos[self.body_id], float))
 
     def slew_seconds(self, pan_deg, tilt_deg=0.0):
         """What a real PTU would spend getting there from where it is now."""
@@ -273,14 +389,28 @@ class ArmDeckHead:
         intermediate step it passes through, and the sum of those is the move's
         real cost only by accident. Same contract as `scout.ScoutHead.aim`.
 
-        ⚠️ Caller must `mj_forward` before rendering: writing `mocap_quat` does
-        not move `cam_xpos` on its own, and a render taken in between is the
+        ⚠️ Caller must `mj_forward` before rendering: writing `qpos` does not
+        move `cam_xpos` on its own, and a render taken in between is the
         previous pose wearing the new pose's label.
+
+        ⚠️ **Both the joint angle and the servo setpoint are written.** The
+        angle makes the pose exact for the very next `mj_forward`, which is what
+        the mapping pass needs — a scan pose that is a servo transient away from
+        where it says it is fuses fruit at wrong positions. The setpoint is what
+        *holds* it there through the physics steps that follow, so the tilt axis
+        does not sag under the camera between commands. Position only would
+        droop; setpoint only would lag.
         """
+        pan_deg = float(np.clip(pan_deg, -PAN_LIMIT_DEG, PAN_LIMIT_DEG))
+        tilt_deg = float(np.clip(tilt_deg, -TILT_LIMIT_DEG, TILT_LIMIT_DEG))
         secs = self.slew_seconds(pan_deg, tilt_deg)
-        self.follow(data)
-        data.mocap_quat[self.mocap] = self._quat(pan_deg, tilt_deg)
-        self.pan, self.tilt = float(pan_deg), float(tilt_deg)
+        data.qpos[self.pan_adr] = np.radians(pan_deg)
+        data.qpos[self.tilt_adr] = np.radians(tilt_deg)
+        data.qvel[self.pan_dof] = 0.0
+        data.qvel[self.tilt_dof] = 0.0
+        data.ctrl[self.pan_act] = np.radians(pan_deg)
+        data.ctrl[self.tilt_act] = np.radians(tilt_deg)
+        self.pan, self.tilt = pan_deg, tilt_deg
         return secs
 
     def slew_to(self, data, pan_deg, tilt_deg=0.0, on_tick=None):
@@ -315,24 +445,15 @@ class ArmDeckHead:
     def current(self, data):
         """(pan, tilt) read back out of `mjData`, not out of this object.
 
-        They agree today because a mocap body goes exactly where it is put — but
-        a panel reporting a *commanded* angle while claiming to show the robot
-        keeps looking right after the thing behind it has stopped working. Same
-        argument as `scout.ScoutHead.current`.
+        ⚠️ Read from the **joint angles the servos actually reached**, not from
+        the commanded `self.pan`. They agree closely, because `aim` writes the
+        angle as well as the setpoint — but a panel reporting a commanded angle
+        while claiming to show the robot keeps looking right after the thing
+        behind it has stopped working. That is the whole reason this method
+        exists rather than a property. Same argument as `scout.ScoutHead.current`.
         """
-        import mujoco
-
-        mat = np.zeros(9)
-        mujoco.mju_quat2Mat(mat, data.mocap_quat[self.mocap])
-        m = mat.reshape(3, 3)
-        # -z of a MuJoCo camera frame is forward; the head's own frame here has
-        # +x forward at home, so read the rotated +x back against the home aim.
-        fwd = m @ np.array([1.0, 0.0, 0.0])
-        pan = np.degrees(np.arctan2(fwd[1], fwd[0]))
-        home = np.degrees(np.arctan2(0.0, 1.0))
-        rel = ((pan - home + 180.0) % 360.0) - 180.0
-        tilt = np.degrees(np.arcsin(np.clip(fwd[2], -1.0, 1.0)))
-        return float(rel), float(tilt)
+        return (float(np.degrees(data.qpos[self.pan_adr])),
+                float(np.degrees(data.qpos[self.tilt_adr])))
 
 
 def heads(model, data, arms=("a", "b"), aisle=0):
@@ -343,6 +464,112 @@ def heads(model, data, arms=("a", "b"), aisle=0):
             out[tag] = ArmDeckHead(model, data, tag=tag, aisle=aisle)
         except RuntimeError:
             pass
+    return out
+
+
+# --- the proof that the head rides the trolley --------------------------------
+
+def offset_check(seed=7, aisle=0, n_per_row=10, articulate=True, verbose=True):
+    """Drive the whole aisle and log camera-vs-trolley offset every cycle.
+
+    ⚠️ **This is the check that says the deck-camera bugs are actually gone, and
+    it is a measurement rather than a look at the render.** Both bugs were the
+    head and its mast moving by different mechanisms (see the module docstring);
+    if that is fixed, the vector from the trolley to the camera is **constant**
+    for the whole traverse, and the maximum deviation from its own mean is the
+    number that says so.
+
+    ⚠️ It articulates both heads *while* the trolley drives, because the
+    interesting failure is the one where position and articulation are driven
+    from different places. Pan changes the camera's offset from the pan axis by
+    design — that is what a pan-tilt unit does — so the invariant is measured
+    against the **head body's pivot**, which articulation must not move, as well
+    as against the lens, which it must.
+
+    Returns `{tag: (max_pivot_deviation_mm, max_lens_deviation_mm)}`.
+    """
+    import mujoco
+
+    from farm import armframe
+    from mission import park_arm, reset_park
+    from reach import CTRL_DT
+
+    arms = ("a", "b")
+    trusses = fcrop.spawn(n_per_row=n_per_row, seed=seed)
+    model = trolley.build(aisle=aisle, arms=arms, trusses=trusses,
+                          wrist_cam=True, arm_decks=True, seed=seed)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    parks = {t: armframe.park_posture(model, data, t, arms=arms) for t in arms}
+    reset_park(model, data, parks["a"], prefix=trolley.ARM_PREFIX["a"])
+    for t in arms:
+        park_arm(model, data, parks[t], prefix=trolley.ARM_PREFIX[t])
+    mujoco.mj_forward(model, data)
+
+    hs = heads(model, data, arms=arms, aisle=aisle)
+    drive = trolley.Drive(model, data)
+    lo, hi = trolley.y_limits()
+    drive.park_at(lo + 0.4)
+    mujoco.mj_forward(model, data)
+
+    tid = model.body(trolley.TROLLEY).id
+    samples = {t: {"pivot": [], "lens": [], "pan": []} for t in arms}
+    n = [0]
+
+    def sample():
+        """Aim both heads, forward **once**, then read everything.
+
+        ⚠️ The ordering is the measurement. `mj_step` leaves `xpos` describing
+        the configuration *before* its last integration, so reading the trolley
+        before a `mj_forward` and the camera after it compares two different
+        instants — which shows up as a spurious offset of exactly one physics
+        step of travel (0.35 m/s x 2 ms = 0.7 mm) and reads as the very desync
+        this check exists to rule out. Same trap, and the same fix, as
+        `DuoScout.run`: aim every head, then forward, then read.
+        """
+        n[0] += 1
+        for t in arms:
+            if articulate:
+                # A slow continuous sweep, so the head is genuinely articulating
+                # through the drive rather than sitting at a scan pose.
+                hs[t].aim(data, SCAN_HALF_DEG * np.sin(n[0] * CTRL_DT * 0.9
+                                                       + (0.0 if t == "a"
+                                                          else 1.7)))
+        mujoco.mj_forward(model, data)
+        tpos = np.array(data.xpos[tid], float)
+        for t in arms:
+            lens, pivot = hs[t].where(data)
+            samples[t]["pivot"].append(pivot - tpos)
+            samples[t]["lens"].append(lens - tpos)
+            samples[t]["pan"].append(hs[t].current(data)[0])
+
+    if verbose:
+        print(f"\n  --- driving {lo + 0.4:+.2f} m to {hi - 0.4:+.2f} m, "
+              f"both heads {'articulating' if articulate else 'held'} ---")
+    sample()
+    drive.drive_to(hi - 0.4, on_tick=sample)
+
+    out = {}
+    if verbose:
+        print(f"  {n[0]} control cycles, trolley odometer "
+              f"{drive.travelled:.2f} m\n")
+        print(f"  {'arm':<5} {'pan swept':>18} {'pivot offset dev':>18} "
+              f"{'lens offset dev':>18}")
+    for t in arms:
+        piv = np.array(samples[t]["pivot"])
+        lens = np.array(samples[t]["lens"])
+        pan = np.array(samples[t]["pan"])
+        dev_p = float(np.abs(piv - piv.mean(axis=0)).max()) * 1000
+        dev_l = float(np.abs(lens - lens.mean(axis=0)).max()) * 1000
+        out[t] = (dev_p, dev_l)
+        if verbose:
+            print(f"  {t.upper():<5} {pan.min():+7.1f}..{pan.max():+6.1f} deg "
+                  f"{dev_p:>15.3f} mm {dev_l:>15.1f} mm")
+    if verbose:
+        print(f"\n  The pivot offset is the invariant: the head's own axis must "
+              f"not move\n  relative to the trolley, ever. The lens offset "
+              f"*should* change — that is\n  the pan doing its job — and it is "
+              f"printed so the two cannot be confused.")
     return out
 
 
@@ -420,6 +647,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--split", action="store_true",
                     help="point the two heads apart and render both")
+    ap.add_argument("--offset", action="store_true",
+                    help="drive the aisle and prove the heads ride the trolley")
     ap.add_argument("--aisle", type=int, default=0)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("-n", type=int, default=10)
@@ -427,6 +656,15 @@ def main():
 
     os.environ.setdefault("MUJOCO_GL", "egl")
     print(__doc__)
+    if args.offset:
+        devs = offset_check(seed=args.seed, aisle=args.aisle, n_per_row=args.n)
+        # A rigid child of the trolley cannot drift at all; anything above a
+        # micron would mean the head is being moved by something else again.
+        worst = max(d[0] for d in devs.values())
+        ok = worst < 0.001
+        print(f"\n  {'PASS' if ok else 'FAIL'} — max pivot-to-trolley "
+              f"deviation {worst:.6f} mm over the traverse")
+        return 0 if ok else 1
     ang = split_look(seed=args.seed, aisle=args.aisle, n_per_row=args.n)
     if args.split:
         ok = ang > 30.0

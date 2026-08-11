@@ -1,45 +1,42 @@
 #!/usr/bin/env python3
-"""Make Weeks 1-4's world-frame planner work for an arm that moves.
+"""Where one arm's world is, when the arm is bolted to a moving trolley.
 
-⚠️ **This module exists because of one design fact in `mission.py`, and it is
-worth stating plainly rather than working around quietly: the Week 1-4 planner
-is written in absolute world coordinates.**
+⚠️ **This module used to rebind `mission`'s globals and it no longer does.**
+The Week 1-4 planner was written in absolute world coordinates:
 
     PARK     = [0.32, -0.10, 0.50]     where the arm rests
     STAGE_X  = 0.32                    the plane it approaches from
     BIN_POS  = [0.30, -0.52, 0.00]     where the crate is
     ROW_X    = 0.60                    where the crop is
+    INTO_ROW = [+1, 0, 0]              which way the canopy is
 
-Every one of those is a module constant, and every one of them is correct for
-exactly one machine: an arm bolted to the origin with a crate beside it. That
-was a reasonable thing to write when the base could not move. It stops being
-reasonable the moment the arm is on a trolley, because all four are then
-functions of where the trolley is standing — a mission planned against `PARK`
-while the trolley is at y = +3 m parks the arm three metres behind itself, and
-`BIN_POS` aims the release at a patch of floor the machine drove away from.
+Every one is correct for exactly one machine: an arm bolted to the origin with
+a crate beside it. On a trolley all five are functions of where the machine is
+standing, so this module computed the arm's own values and **wrote them into
+`mission`, `week2_pick`, `plant_row` and `week4_place` for the duration of a
+mission**, restoring them on the way out.
 
-**What this does.** The arm's geometry relative to its own base has not changed
-at all — that is the entire point of `house.ARM_OFFSET` and `trolley.DECK_Z`.
-So the fix is a pure translation: rebind those constants to
-`week1_4_value + arm_base_world` for as long as the trolley is parked, and put
-them back afterwards.
+That worked, and it had one cost that turned out to be the binding constraint
+on the whole machine: **two arms mid-mission at once need two conflicting sets
+of those globals in one interpreter**, so the second arm could not fly. It was
+not unimplemented, it was inexpressible. `farm/duo.py` serialised the arms and
+said so on screen; Bug Log 57 recorded it as architectural.
 
-⚠️ **Rebinding another module's globals is a real cost and it is taken with
-open eyes.** The alternative is threading a frame through `Planner`, `Route`,
-`_legs`, `Guard`, `ClearanceModel` and `execute` — six classes and about
-thirty call sites in code whose numbers are the repo's headline results, for a
-refactor with no measurement attached. This is the smaller, more reversible
-change, and it is confined to one context manager that is impossible to leave
-open by accident:
+`mission.ArmFrame` is the fix the old docstring here promised: the five values
+as a *value*, carried on the `Planner` and stamped onto the `Mission` it
+produces, so the executor reads the frame off the plan it was handed. Two arms
+hold two frames and nothing global moves. This module's job is now only to
+**compute** an arm's frame from where its trolley is standing:
 
-    with at_trolley(model, data):
-        mission = planner.plan(name)
-        execute(mission, ...)
+    frame = armframe.frame(model, data, "b")
+    planner = Planner(model, data, row, prefix="b_", frame=frame)
+    mission = planner.plan(name)     # carries the frame with it
+    execute(mission, ...)            # reads it back off the mission
 
-**The right fix eventually** is for `mission` to plan in the arm's frame and be
-handed a base transform, at which point this file deletes itself. It is not the
-right fix *today*, because doing it means re-taking every clearance and cycle
-number in the README to prove nothing moved.
+`at_trolley` is kept as a context manager over the same numbers, because
+`trolley.reach_gate`, `carrytrace` and the Week 3-4 demos still use it and
+their measurements were taken through it. It now delegates to `frame()` and
+rebinds nothing that the two-armed path reads.
 """
 
 from __future__ import annotations
@@ -100,8 +97,9 @@ _HOLDERS = {
 # `INTO_ROW`, which would have arm b approach every fruit from behind.
 #
 # diag(-1, -1, 1): a half turn about z. x and y flip, height does not.
-_MIRROR = {"a": np.array([1.0, 1.0, 1.0]),
-           "b": np.array([-1.0, -1.0, 1.0])}
+MIRROR = {"a": np.array([1.0, 1.0, 1.0]),
+          "b": np.array([-1.0, -1.0, 1.0])}
+_MIRROR = MIRROR      # the old private name, kept for external readers
 
 # The Week 1-4 values, captured at import so a nested or aborted `at_trolley`
 # can always restore the truth rather than whatever the last caller left.
@@ -129,15 +127,16 @@ def arm_base(model, data, tag="a"):
 def offsets(model, data, tag="a"):
     """The translation from the Week 1-4 world to this one, as a dict.
 
-    Returned rather than applied so a caller can print it, which is the only way
-    anyone is going to trust a module that rewrites globals.
+    Returned rather than applied so a caller can print it. `frame()` is the same
+    numbers in the shape `mission` actually consumes; this stays because
+    `check()` and the Week 3-4 demos print it by key.
     """
     base = arm_base(model, data, tag)
     aisle = _aisle_of(model, data)
-    m = _MIRROR[tag]
+    m = MIRROR[tag]
     return {
         "arm_base": base,
-        # Reflect about the arm's own base, then translate. See `_MIRROR`.
+        # Reflect about the arm's own base, then translate. See `MIRROR`.
         "PARK": m * _BASE["PARK"] + base,
         "STAGE_X": m[0] * _BASE["STAGE_X"] + base[0],
         "BIN_POS": trolley.crate_pos(model, data, tag),
@@ -145,6 +144,31 @@ def offsets(model, data, tag="a"):
         # A direction, so it reflects but does not translate.
         "INTO_ROW": m * _BASE["INTO_ROW"],
     }
+
+
+def frame(model, data, tag="a"):
+    """This arm's world, as a `mission.ArmFrame`. The thing to pass to `Planner`.
+
+    ⚠️ **Read fresh, and therefore read where the trolley is standing *now*.**
+    Every value except `INTO_ROW` depends on the drive joint, so a frame is only
+    valid while the machine is parked. Build one per stop, after the drive and
+    before the plan — which is what `farm.duo` does, and why `Drive.drive_to` is
+    never called between building a frame and finishing the mission planned in
+    it. A mission whose park pose moved halfway through is a mission that never
+    returns to where it started.
+
+    ⚠️ The crate is read out of `mjData` rather than derived, because it rides
+    the trolley and `trolley.crate_pos` is the only thing that knows where it
+    ended up. The rest are arithmetic on the arm's base.
+    """
+    from mission import ArmFrame
+
+    off = offsets(model, data, tag)
+    return ArmFrame(park=np.asarray(off["PARK"], float),
+                    stage_x=float(off["STAGE_X"]),
+                    bin_pos=np.asarray(off["BIN_POS"], float),
+                    row_x=float(off["ROW_X"]),
+                    into_row=np.asarray(off["INTO_ROW"], float))
 
 
 def _aisle_of(model, data):
@@ -189,17 +213,34 @@ def _patch_default(cls, field, value):
 
 @contextmanager
 def at_trolley(model, data, tag="a", verbose=False):
-    """Plan and fly in the Week 1-4 planner as if the arm were at the origin.
+    """Rebind the Week 1-4 globals to this arm's frame, and yield that frame.
 
-    ⚠️ The crate is read live and the rest are read once, on entry. That is not
-    an oversight: `BIN_POS` has to be where the crate *is*, and the crate rides
-    the trolley — but `PARK` and `STAGE_X` are the frame a **single mission** is
-    planned and flown in, and a mission whose park pose moved halfway through
-    would be a mission that never returns to where it started. So the trolley
-    must not drive inside this block, and `Drive.drive_to` is not called from
-    within one anywhere in this package.
+    ⚠️ **Prefer `frame()` and `Planner(frame=...)`.** This is kept for the
+    callers whose numbers were measured through it and for the handful of
+    modules that still read `mission.BIN_POS` and friends by import
+    (`carrytrace`, the Week 3-4 demos). It rebinds globals, which is safe only
+    while one arm is planning — `farm.duo` no longer uses it, and that is what
+    lets both arms fly at once.
+
+    ⚠️ **The yielded `ArmFrame` is the part that reaches `Planner`.** Since
+    `mission.WORLD` captures the Week 1-4 values at import, rebinding
+    `mission.PARK` does *not* change what a `Planner` built with no `frame=`
+    plans against. That is deliberate — a stable `WORLD` is what guarantees the
+    single-armed numbers cannot move — but it means a caller inside this block
+    must pass the yielded frame on:
+
+        with at_trolley(model, data, tag) as fr:
+            planner = Planner(..., frame=fr)
+
+    ⚠️ The crate is read live and the rest are read once, on entry. `BIN_POS`
+    has to be where the crate *is*, and the crate rides the trolley — but `PARK`
+    and `STAGE_X` are the frame a **single mission** is planned and flown in,
+    and a mission whose park pose moved halfway through would be a mission that
+    never returns to where it started. So the trolley must not drive inside this
+    block, and `Drive.drive_to` is not called from within one anywhere.
     """
     off = offsets(model, data, tag)
+    fr = frame(model, data, tag)
     if verbose:
         print(f"  arm frame: base {off['arm_base'].round(3)} · "
               f"PARK {off['PARK'].round(3)} · "
@@ -216,12 +257,30 @@ def at_trolley(model, data, tag="a", verbose=False):
         for cls in (mission.Route, mission.Mission):
             old_defaults.append(
                 (cls, _patch_default(cls, "stage_x", off["STAGE_X"])))
-        yield off
+        yield fr
     finally:
         for cls, old in old_defaults:
             _patch_default(cls, "stage_x", old)
         for mod, attr, value in saved:
             setattr(mod, attr, value)
+
+
+def deck_joints(model):
+    """The deck heads' pan/tilt joints that this model actually has.
+
+    Asked of the model rather than assumed, because `trolley.build` fits the
+    heads only with `arm_decks=True` and every Week 1-4 scene has none.
+    """
+    from farm import decks
+
+    out = []
+    for name in decks.head_joints(("a", "b")):
+        try:
+            model.joint(name)
+        except KeyError:
+            continue
+        out.append(name)
+    return out
 
 
 def pin_base(reacher, others=()):
@@ -264,8 +323,9 @@ def pin_base(reacher, others=()):
     find a six-joint answer, which is the only kind that can be executed.
 
     ⚠️ **And it has to survive `set_speed`.** `mission._legs` gives the carrying
-    legs their own speed cap, so `_run_leg` calls `reacher.set_speed(...)` part
-    way through every mission — and `set_speed` *rebuilds* `self.limits` from
+    legs their own speed cap, so `week2_pick.MissionRun._leg` calls
+    `reacher.set_speed(...)` part way through every mission — and `set_speed`
+    *rebuilds* `self.limits` from
     `JOINTS` alone, throwing the pin away. The symptom is beautifully confusing:
     the approach, insert and pull legs arrive to 4 mm, and then `extract` — the
     first carrying leg, and the first one to change speed — is 84 mm short. So
@@ -281,6 +341,12 @@ def pin_base(reacher, others=()):
         for p in others:
             for j in JOINTS:
                 caps[p + j] = 0.0
+        # ⚠️ And the deck heads, for exactly the same reason as the drive
+        # joint. They became real hinges when the head was reparented onto the
+        # trolley (`farm.decks`), which is two more free DOF the QP will reach
+        # with and the executor will never command. See `decks.head_joints`.
+        for j in deck_joints(reacher.model):
+            caps[j] = 0.0
         reacher.limits = [mink.VelocityLimit(reacher.model, caps)]
 
     inner = reacher.set_speed
@@ -311,7 +377,7 @@ def park_posture(model, data, tag="a", arms=None, **kw):
     it defaults to just this one, which is the single-armed behaviour.
     """
     fitted = (tag,) if arms is None else tuple(arms)
-    pin = [trolley.DRIVE_JOINT]
+    pin = [trolley.DRIVE_JOINT] + deck_joints(model)
     for p in trolley.other_arms(tag, fitted):
         pin += [p + j for j in _JOINTS]
     # ⚠️ And the scratch has to stand where the machine stands. `PARK` below is
@@ -320,9 +386,12 @@ def park_posture(model, data, tag="a", arms=None, **kw):
     # the trolley happened to start. See `mission.park_posture`'s `hold`.
     hold = {trolley.DRIVE_JOINT:
             float(data.qpos[model.joint(trolley.DRIVE_JOINT).qposadr[0]])}
-    with at_trolley(model, data, tag):
-        return mission.park_posture(model, prefix=trolley.ARM_PREFIX[tag],
-                                    pin=tuple(pin), hold=hold, **kw)
+    # ⚠️ Handed the frame rather than solved inside a rebinding block. Same
+    # numbers, and it no longer mutates module state that a concurrently
+    # planning second arm is reading. See the module docstring.
+    return mission.park_posture(model, prefix=trolley.ARM_PREFIX[tag],
+                                pin=tuple(pin), hold=hold,
+                                frame=frame(model, data, tag), **kw)
 
 
 def check(model, data, tag="a"):
@@ -332,12 +401,14 @@ def check(model, data, tag="a"):
     print(f"\n  --- the arm's frame, on a trolley at "
           f"y={data.body(trolley.TROLLEY).xpos[1]:+.2f} ---")
     print(f"  {'constant':<10} {'week 1-4':<24} {'here':<24}")
-    with at_trolley(model, data, tag) as off:
+    with at_trolley(model, data, tag) as fr:
+        here = {"PARK": fr.park, "BIN_POS": fr.bin_pos,
+                "STAGE_X": fr.stage_x, "ROW_X": fr.row_x}
         for k in ("PARK", "BIN_POS"):
             print(f"  {k:<10} {str(_BASE[k].round(3)):<24} "
-                  f"{str(np.asarray(off[k]).round(3)):<24}")
+                  f"{str(np.asarray(here[k]).round(3)):<24}")
         for k in ("STAGE_X", "ROW_X"):
-            print(f"  {k:<10} {_BASE[k]:<24.3f} {off[k]:<24.3f}")
+            print(f"  {k:<10} {_BASE[k]:<24.3f} {here[k]:<24.3f}")
     leaked = [f"{mod.__name__}.{attr}"
               for mod, attr, was in before
               if not np.allclose(np.array(getattr(mod, attr), dtype=float), was)]

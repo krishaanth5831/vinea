@@ -27,19 +27,24 @@ already owns the quit handling, the window lifecycle and the mp4 writer.
 
     1. MAP      drive the aisle, both deck heads scanning their own rows,
                 fusing one house map. Nothing is picked in this pass.
-    2. PLAN     one route per arm, merged into one trolley itinerary. Visible
-                in window 2 before either arm commits.
+    2. PLAN     one route per arm, covered jointly into one trolley itinerary,
+                then every fruit assigned to exactly one arm and logged.
+                Visible in window 2 before either arm commits.
     3. TRAVEL   drive to each stop.
-    4. PICK     both arms work, one at a time. See `farm.duo` for why that is
-                forced rather than chosen.
+    4. PICK     **both arms work at the same time**, stepped inside one physics
+                loop. They interlock only on the legs that swing them through
+                the middle of the deck. See `farm.duo`.
     5. CRATE    each arm has its own crate, riding on the deck beside it.
 
 --- three things this window is careful about --------------------------------
 
 ⚠️ **The pipeline text is read out of the running mission, not scripted.**
 `farm.duo.ArmState` is written where the work happens and the current leg is
-read live from `mission.Guard.leg`, which `week2_pick.execute` sets as it flies.
-There is no list of captions and no timer driving them.
+read live from `week2_pick.MissionRun.leg`, which the executor sets as it flies.
+There is no list of captions and no timer driving them. The route verdict, the
+clearance breach in millimetres, the guard's live margin, the abort distance and
+the map-versus-truth position error are all fields on the mission objects — see
+`pipeline_lines`, which asserts this and then only formats.
 
 ⚠️ **The map is what the robot believes, not what is there.** Every dot is a
 `scout.Sighting` — a position the deck cameras estimated and a stage the HSV
@@ -79,6 +84,11 @@ ACCENT = (140, 250, 150)
 WARN = (110, 110, 250)
 AMBER = (90, 200, 245)
 ARM_COL = {"a": (235, 190, 110), "b": (150, 210, 255)}
+
+# The clearance budget a refusal is measured against, so the panel can print
+# "breach 26 mm against 40 mm" rather than a bare number. Imported rather than
+# restated: `farm.duo` plans at this and the two must not drift.
+CLEARANCE_MM = 40.0
 
 # Stage colours, BGR, matched to `farm.overlay.STAGE_BGR` so a dot on the map is
 # the same colour as the box drawn round that fruit in a camera panel.
@@ -122,12 +132,16 @@ def _text_panel(w, h, lines, title=None, colour=INK):
     if title:
         _title(img, title, colour)
         y = 48
+    # ⚠️ 78 characters, not 64. The pipeline panel is 620 px wide and this font
+    # at 0.40 is about 7 px a character, so 64 was clipping ~20% of the width
+    # off every line — "missed 0" arrived as "miss". A panel that silently
+    # truncates the number you are reading it for is worse than a smaller font.
     for text, col in lines:
         if y > h - 8:
             break
-        cv2.putText(img, text[:64], (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+        cv2.putText(img, text[:78], (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
                     col, 1, cv2.LINE_AA)
-        y += 18
+        y += 17
     return img
 
 
@@ -306,13 +320,28 @@ class AisleCam:
     # row and fill the frame with leaves — the aisle is only 1.6 m wide, so
     # there is very little angular room between "down the aisle" and "inside the
     # crop".
-    LAG = 0.06            # per panel frame, toward the trolley's y
-    DIST = 4.5
+    #
+    # ⚠️ **A first-order lag alone does not keep the machine in frame, and that
+    # is not a tuning problem, it is what a first-order lag does.** Chasing a
+    # target moving at constant speed, it settles at a *steady-state error* of
+    # `speed * tau` and stays there for the whole traverse — at the old 0.06
+    # per frame and 10 fps that is a 1.7 s time constant against a 0.35 m/s
+    # trolley, so the machine sat ~0.6 m off-centre for every drive and drifted
+    # further at any higher speed. Smooth, and consistently badly framed.
+    #
+    # So the follow is smooth *and* bounded: exponential toward the trolley,
+    # then clamped so it can never be more than `MAX_LAG_M` behind. The clamp
+    # only engages during sustained travel, and while it is engaged the camera
+    # moves at exactly the trolley's speed — so it is still not a snap, it has
+    # simply stopped falling further behind.
+    TAU_S = 0.35          # follow time constant, seconds
+    MAX_LAG_M = 0.40      # never further off centre than this
+    DIST = 3.2            # close enough that the deck and both arms fill it
     AZIMUTH = 90.0
     ELEVATION = -12.0
     HEIGHT = 0.85
 
-    def __init__(self, model, data, aisle=0):
+    def __init__(self, model, data, aisle=0, fps=10):
         import mujoco
 
         self.cam = mujoco.MjvCamera()
@@ -321,6 +350,13 @@ class AisleCam:
         self.cam.elevation = self.ELEVATION
         self.ax = house.aisle_x(aisle)
         self.y = float(data.body(trolley.TROLLEY).xpos[1])
+        # ⚠️ Converted from a time constant using the panel period, not left as
+        # a per-frame fraction. A per-frame constant means the camera follows
+        # twice as fast at 20 fps as at 10 — the framing would change with
+        # `--fps`, which is a display setting and has no business altering what
+        # the shot looks like.
+        dt = 1.0 / max(float(fps), 1e-6)
+        self.alpha = 1.0 - np.exp(-dt / self.TAU_S)
         self._apply()
 
     def _apply(self):
@@ -328,9 +364,18 @@ class AisleCam:
 
     def follow(self, data):
         target = float(data.body(trolley.TROLLEY).xpos[1])
-        self.y += (target - self.y) * self.LAG
+        self.y += (target - self.y) * self.alpha
+        # The bound. `np.clip` on the error rather than on `self.y`, so the sign
+        # is handled for a trolley driving in either direction.
+        err = target - self.y
+        if abs(err) > self.MAX_LAG_M:
+            self.y = target - np.copysign(self.MAX_LAG_M, err)
         self._apply()
         return self.cam
+
+    def lag(self, data):
+        """How far off centre the machine currently is, in metres. For the log."""
+        return abs(float(data.body(trolley.TROLLEY).xpos[1]) - self.y)
 
 
 # --- the pipeline and stats panels -------------------------------------------
@@ -338,40 +383,87 @@ class AisleCam:
 def pipeline_lines(state, data):
     """What the robot is doing right now, per arm. Read from `state`, not acted.
 
-    Every line here is either a field `farm.duo` wrote where the work happened
-    or something derived from one. See that module's note on exposure.
+    ⚠️ **Every line here is a field `farm.duo` wrote where the work happened, or
+    something derived from one.** There is no scripted sequence and no timer:
+    the phase comes from the executor's current leg via `ArmState.follow_leg`,
+    the route verdict from the `Mission` the planner returned, the breach from
+    `Mission.breaches[0]`, the guard's margin from the live `Guard`, and the
+    position error from the map's estimate against `mjData`'s truth. If a line
+    is wrong, the robot is wrong.
+
+    Anything the panel wants that the mission objects did not already expose was
+    added to `ArmState` rather than reconstructed here — see that class.
     """
     out = [(f"PHASE   {state.phase.upper()}", ACCENT)]
     if state.detail:
         out.append((f"        {state.detail}", DIM))
+    flying = getattr(state, "flying", set())
+    if len(flying) > 1:
+        out.append((f"        both arms flying — "
+                    f"{len(flying)} missions in one physics loop", ACCENT))
     out.append(("", INK))
 
     for tag in state.arms:
         st = state.state[tag]
         col = ARM_COL[tag]
-        live = state.active == tag
+        live = tag in flying
         mark = ">" if live else " "
         out.append((f"{mark} {st.line()}", col if live else DIM))
-        pan = st.deck_pan(data)
-        bits = [f"row r{st.row}", f"deck pan {pan:+.0f}deg"]
-        if st.stage:
-            bits.append(st.stage)
+
+        # --- the target, what the map thought it was, and how wrong that was
+        if st.target:
+            bits = [st.target]
+            if st.stage:
+                bits.append(st.stage)
+            if st.est_pos is not None:
+                p = st.est_pos
+                bits.append(f"est [{p[0]:+.2f} {p[1]:+.2f} {p[2]:+.2f}]")
+            err = st.est_err_mm
+            if np.isfinite(err):
+                bits.append(f"err {err:.0f}mm vs truth")
+            out.append((f"    {'  '.join(bits)}", INK))
+
+        # --- what the planner decided, and if it refused, by how much
+        if st.route_ok is True:
+            out.append((f"    route ACCEPTED  {st.route_label}"
+                        f"  ({st.route_tried} tried)", ACCENT))
+        elif st.route_ok is False:
+            out.append((f"    route REFUSED   {st.route_tried} tried", WARN))
+            if st.refuse_reason:
+                out.append((f"      {st.refuse_reason[:56]}", WARN))
+            if np.isfinite(st.breach_mm):
+                out.append((f"      breach {st.breach_mm:.0f} mm against "
+                            f"{CLEARANCE_MM:.0f} mm", WARN))
+
+        # --- the guard: live margin, and where it stopped things if it did
         g = st.guard
         if g is not None and np.isfinite(getattr(g, "min_seen", np.inf)):
-            bits.append(f"min clear {g.min_seen * 1000:.0f}mm")
-        out.append((f"    {'  '.join(bits)}", DIM))
-        if st.phase == "refused" and st.detail:
-            out.append((f"    {st.detail[:56]}", WARN))
+            gcol = WARN if g.min_seen * 1000 < 25 else DIM
+            out.append((f"    guard ARMED     min clear "
+                        f"{g.min_seen * 1000:.0f}mm  on `{g.leg or '-'}`",
+                        gcol if g.armed else DIM))
+        elif g is not None:
+            out.append((f"    guard {'armed' if g.armed else 'disarmed'}", DIM))
+        if st.abort_leg:
+            out.append((f"    ABORTED on `{st.abort_leg}` at "
+                        f"{st.abort_mm:.0f} mm", WARN))
+
+        # --- what it is waiting on, if anything
+        if st.waiting_on:
+            out.append((f"    WAITING ON  {st.waiting_on[:50]}", AMBER))
+
+        s = st.stats
+        mean = f"{s.mean_s:.1f}s" if s.pick_s else "-"
+        out.append((f"    row r{st.row}  deck pan {st.deck_pan(data):+.0f}deg"
+                    f"  |  picks {s.crated}  mean {mean}  "
+                    f"refused {s.refused}  missed {s.missed}", DIM))
         out.append(("", INK))
 
-    if state.active is None and state.phase == "pick":
-        out.append(("  both arms idle — serialised, see farm/duo.py", DIM))
-    elif state.active:
-        other = [t for t in state.arms if t != state.active]
-        if other:
-            out.append((f"  arm{2 if state.active == 'a' else 1} is STOWED "
-                        f"while arm{1 if state.active == 'a' else 2} flies",
-                        AMBER))
+    centre = getattr(state, "centre", None)
+    if centre is not None and centre.holder:
+        out.append((f"  deck centre held by "
+                    f"arm{1 if centre.holder == 'a' else 2} — the other arm "
+                    f"waits before its crossing legs", AMBER))
     return out
 
 
@@ -395,6 +487,14 @@ def stats_lines(state):
 
     out.append((f"BOTH  crated {tot['crated']}  refused {tot['refused']}  "
                 f"missed {tot['missed']}", ACCENT))
+    # ⚠️ The concurrency claim as a live number, booked by `duo.Machine` rather
+    # than asserted by this panel. A control cycle counts once both arms have a
+    # mission in flight on it.
+    mach = getattr(state, "machine", None)
+    if mach is not None and mach.cycles:
+        pct = 100 * mach.concurrent_cycles / mach.cycles
+        out.append((f"      both arms flying on {mach.concurrent_cycles} of "
+                    f"{mach.cycles} cycles ({pct:.0f}%)", ACCENT))
     if state.house_map is not None:
         hm = state.house_map
         out.append((f"      map {len(hm.sightings)} found, "
@@ -411,30 +511,63 @@ def stats_lines(state):
 class Windows:
     """Two `Sink`s, five cameras, three cadences.
 
-    ⚠️ **The cadences are decoupled on purpose and this is the performance
-    story.** Five camera renders plus an HSV pass per frame, on top of physics,
-    will not run at the control rate and must not be made to by speeding the
-    physics up or cutting a measured constant. Instead:
+    ⚠️ **The cadences are decoupled on purpose**, and must not be re-coupled by
+    speeding the physics up or cutting a measured constant:
 
         physics       every control cycle, `reach.CTRL_DT`, untouched
         panels        `--fps` (default 10) — the renders
         HSV overlay   `--hsv-hz` (default 3) — the detector, whose boxes are
                       cached and re-drawn on the intervening frames
 
-    The overlay cadence is the one that matters: `overlay.annotate` runs an HSV
-    threshold, a contour pass and a circularity filter over a full frame, twice
-    (once per wrist), and it costs more than the renders do. Caching its boxes
-    changes how often the labels update, not what they say.
+    ⚠️ **This docstring used to claim the cadences were "the performance story",
+    and a profile says they are not.** Measured on one two-armed pick, headless,
+    with no panels rendered at all — 123.5 s of work with the renderer switched
+    off entirely:
+
+        plant_row.weld_force        48.3 s   39%   one efc scan per fruit per
+                                                   physics substep
+        daqp IK solve               44.1 s   36%   a QP over 317 DOF to move
+                                                   a 6-DOF arm
+        mink task objective          7.4 s    6%
+        mj_step                      5.7 s    5%
+        guard clearance              2.5 s    2%
+        rendering                    0.0 s    0%   there was none
+
+    The panels are ~2 ms of an ~39 ms control cycle during the harvest — about
+    5%. Rendering *is* the cost during the mapping pass, which renders two
+    1280x960 RGB+depth sensor pairs per scan pose, and that is why the rates are
+    booked per phase.
+
+    So the wins were taken where the time actually was (`plant_row.weld_forces`,
+    one scan for the whole row instead of one per fruit), and the render-side
+    work here is the honest remainder: one `Renderer` per camera reused for the
+    whole run, and a live panel resolution that is a display choice rather than
+    the detector's.
+
+    ⚠️ **The detector keeps its own resolution.** Dropping the live panels to
+    save compositing time must not quietly drop what the HSV classifier sees —
+    that would change the measurement, not the display. `--panel-scale` moves
+    the view panels only; `farm.scout` renders at `camera.RENDER_W/H` and is
+    untouched by it.
     """
 
     def __init__(self, model, data, state, fps=10, hsv_hz=3.0, out=None,
-                 arms=("a", "b")):
+                 arms=("a", "b"), panel_scale=1.0):
         import mujoco
 
         from week3_watch import Sink
 
         self.model, self.data, self.state = model, data, state
         self.arms = tuple(arms)
+        # Live view resolution. The tile geometry the panels are composited at
+        # never changes — the *render* is done smaller and scaled up, so the
+        # window layout, the captions and the mp4 dimensions are all unaffected
+        # and only the pixels the GPU has to produce move.
+        self.scale = float(np.clip(panel_scale, 0.25, 1.0))
+        self.rw = max(64, int(SENS_W * self.scale))
+        self.rh = max(64, int(SENS_H * self.scale))
+        self.aw = max(64, int(MISS_W * self.scale))
+        self.ah = max(64, int(MISS_H * self.scale))
         self.map = DuoMapPanel()
         self.detector = None
         self._boxes = {}
@@ -460,16 +593,23 @@ class Windows:
             except KeyError:
                 return False
 
+        # ⚠️ **One `Renderer` per camera, built once and kept for the whole
+        # run.** A `mujoco.Renderer` allocates an offscreen framebuffer and a
+        # scene of `max_geom` — 30000 here, because the house is 5433 geoms
+        # before the crop — so constructing one per frame would pay that
+        # allocation at the panel rate and thrash the GPU. They are closed in
+        # `close()`, which is why `shot()` has a `finally`.
         self.r = {}
         for t in self.arms:
-            for cam, (w, h) in ((self.wrist[t], (SENS_W, SENS_H)),
-                                (self.deck[t], (SENS_W, SENS_H))):
+            for cam in (self.wrist[t], self.deck[t]):
                 if has(cam):
-                    self.r[cam] = mujoco.Renderer(model, height=h, width=w,
+                    self.r[cam] = mujoco.Renderer(model, height=self.rh,
+                                                  width=self.rw,
                                                   max_geom=30000)
-        self.r["aisle"] = mujoco.Renderer(model, height=MISS_H, width=MISS_W,
+        self.r["aisle"] = mujoco.Renderer(model, height=self.ah, width=self.aw,
                                           max_geom=30000)
-        self.aisle_cam = AisleCam(model, data, aisle=state.aisle)
+        self.aisle_cam = AisleCam(model, data, aisle=state.aisle, fps=fps)
+        self.worst_lag = 0.0
 
         # ⚠️ **Window titles are ASCII only, and this is a hard constraint of the
         # backend rather than a style choice.** OpenCV 5's Qt highgui keys its
@@ -503,12 +643,23 @@ class Windows:
             s.close()
 
     def _render(self, cam, w, h):
+        """Render `cam` and return it at the tile size `w`x`h`.
+
+        ⚠️ The *render* happens at `--panel-scale` of the tile and is resized up
+        to it. That keeps the panel layout, the captions and the mp4 dimensions
+        identical whatever the scale is, so the flag is a cost knob and not a
+        format change — a viewer at scale 0.5 and one at 1.0 produce the same
+        shaped video.
+        """
         import cv2
 
         if cam not in self.r:
             return None
         self.r[cam].update_scene(self.data, camera=cam)
-        return cv2.cvtColor(self.r[cam].render(), cv2.COLOR_RGB2BGR)
+        img = cv2.cvtColor(self.r[cam].render(), cv2.COLOR_RGB2BGR)
+        if img.shape[1] != w or img.shape[0] != h:
+            img = cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR)
+        return img
 
     def _wrist_panel(self, tag, fresh):
         import cv2
@@ -583,9 +734,14 @@ class Windows:
         self.r["aisle"].update_scene(self.data,
                                      camera=self.aisle_cam.follow(self.data))
         aisle = cv2.cvtColor(self.r["aisle"].render(), cv2.COLOR_RGB2BGR)
+        if aisle.shape[1] != MISS_W or aisle.shape[0] != MISS_H:
+            aisle = cv2.resize(aisle, (MISS_W, MISS_H),
+                               interpolation=cv2.INTER_LINEAR)
         ty = float(self.data.body(trolley.TROLLEY).xpos[1])
-        _title(aisle, f"DOWN THE AISLE  —  trolley at y={ty:+.2f} m, "
-                      f"both arms")
+        lag = self.aisle_cam.lag(self.data)
+        self.worst_lag = max(self.worst_lag, lag)
+        _title(aisle, f"DOWN THE AISLE  —  trolley at y={ty:+.2f} m  —  "
+                      f"cam {lag * 100:.0f} cm off centre")
         pipe = _text_panel(MISS_W, MISS_H, pipeline_lines(st, self.data),
                            "PIPELINE  —  what each arm is doing now")
         stats = _text_panel(MISS_W, MISS_H, stats_lines(st),
@@ -719,6 +875,12 @@ def main():
     ap.add_argument("--fps", type=int, default=10, help="panel rate")
     ap.add_argument("--hsv-hz", type=float, default=3.0,
                     help="how often the ripeness overlay re-detects")
+    ap.add_argument("--panel-scale", type=float, default=1.0,
+                    help="render the live view panels at this fraction of "
+                         "their tile size and scale up (0.25-1.0). The panel "
+                         "layout and the mp4 dimensions do not change. The "
+                         "detector keeps its own resolution — this is a "
+                         "display cost knob, not a perception one.")
     ap.add_argument("--shot", action="store_true",
                     help="render every panel once and exit")
     ap.add_argument("--headless", action="store_true",
@@ -774,7 +936,7 @@ def main():
 
     windows = None if args.headless else Windows(
         model, data, state, fps=args.fps, hsv_hz=args.hsv_hz, out=args.out,
-        arms=arms)
+        arms=arms, panel_scale=args.panel_scale)
     on_tick = None if windows is None else windows.tick
 
     t0 = time.perf_counter()
@@ -801,6 +963,13 @@ def main():
                   f"sensor pairs per\n     scan pose on top of the four panels; "
                   f"the harvest renders panels only.\n     One mean over both "
                   f"describes neither — read the per-phase rates.")
+            print(f"\n  ⚠️ Panels are ~5% of a harvest control cycle. The cost "
+                  f"is physics-side —\n     see the profile in `Windows`. "
+                  f"--panel-scale {args.panel_scale:g} "
+                  f"({windows.rw}x{windows.rh} tiles).")
+            print(f"\n  aisle cam never further than "
+                  f"{windows.worst_lag * 100:.0f} cm off the trolley "
+                  f"(bound {AisleCam.MAX_LAG_M * 100:.0f} cm)")
             windows.close()
         else:
             print(f"\n  {wall:.0f} s wall, no windows")

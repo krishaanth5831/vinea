@@ -586,6 +586,11 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 # 🎬 record both windows: <out>_sensors.mp4 and <out>_mission.mp4
 ./.venv/bin/python simulation/mujoco/two_arm_farm.py --out twoarm
+
+# 🪟🪟 cheaper live view: render the panels at half size and scale up.
+#     The window layout and the mp4 dimensions do not change, and the HSV
+#     detector keeps its own resolution — this is a display cost knob only.
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --panel-scale 0.5
 ```
 
 `python 2armfarm.py` runs the same thing — it is a shim that execs the real module. ⚠️ A module name starting with a digit is not a legal Python identifier, so `2armfarm.py` can be *run* but never *imported*; all the code lives in `two_arm_farm.py` and nothing but the shim refers to the digit name.
@@ -610,9 +615,44 @@ WINDOW 1 — "vinea — SENSORS"        WINDOW 2 — "vinea — MISSION"
 
 **Window 2 (MISSION)** — the map top-left (all four rows, every mapped fruit as a dot coloured by believed ripeness, ripe ones ringed, **x** picked, **X** refused, **◇** lost, dim ring skipped, a green circle on whatever an arm is currently targeting, ground truth as a small grey dot above each so a wrong dot reads as wrong). Top-right the aisle shot, tracking the trolley with a lag so the machine stays in frame while visibly travelling. Bottom-left the live pipeline text, one block per arm — phase, current executor leg, deck pan, live guard clearance. Bottom-right per-arm stats: crated / refused / missed, last pick time, running mean, and the last nine pick times.
 
-⚠️ **The arms are serialised — one flies while the other stows — and the window says so.** This is forced, not chosen: `farm/armframe.py` makes Weeks 1–4's world-frame planner work for a moving arm by *rebinding `mission`'s module globals* (`PARK`, `STAGE_X`, `BIN_POS`, `ROW_X`, `INTO_ROW`) to the current arm's frame, with a mirror for arm B. Two arms mid-mission at once would need two conflicting sets of those globals in one interpreter. Serialising is not enough on its own, so the idle arm is *also* in the flying arm's obstacle set (`mission.ArmObstacles`) and *also* folded out of the way (`duo.STOW`).
+⚠️ **Both arms work at the same time, and the window says so with a number.** They were serialised, and it was forced rather than chosen: `farm/armframe.py` made Weeks 1–4's world-frame planner work for a moving arm by *rebinding `mission`'s module globals* (`PARK`, `STAGE_X`, `BIN_POS`, `ROW_X`, `INTO_ROW`) to the current arm's frame, so two arms mid-mission needed two conflicting sets of them in one interpreter; and `week2_pick.execute` owned its own loop, so two of them could not interleave. Both are gone — `mission.ArmFrame` carries the five constants as a value on the plan, and `week2_pick.MissionRun` is a generator that stops each control cycle with its setpoints written and physics pending. `farm.duo.Machine` commands every arm and then steps the plant **once**.
 
-⚠️ **The pipeline text is read out of the running mission, not scripted.** `farm.duo.ArmState` is written where the work happens, and the current leg is read live from `mission.Guard.leg`, which `week2_pick.execute` sets as it flies.
+⚠️ **Arm-vs-arm clearance is mandatory now, and it is doing real work.** While the arms were serialised the idle one was stationary, so checking against it was checking against a fact. With both flying into a working volume that overlaps by 1.44 m it is the only thing between them: `work()` refuses to fly an arm whose `others` set is empty, and both the planner's preview and the runtime `Guard` carry it. The guard is the one that holds the line — `ArmObstacles` reports where the other arm is *now*, which is a measurement taken every control cycle for the guard and a one-snapshot prediction for the planner.
+
+⚠️ **The two arms interlock on one token for the shared middle of the deck, and a mission holds it end to end.** Both `PARK` postures fold the elbow across the aisle, so the arms interleave in x and are held apart only by the 500 mm stagger along the row. Measured: both parked +110 mm, both reaching into their own rows +188 mm, either stowed +318 mm, one moving while the other sits at PARK **−40 mm**.
+
+The interlock was narrowed **four times**, each time guided by a guard abort rather than by reasoning about the geometry, and each narrowing found another contact at 12–15 mm — the trail is in `duo.CROSSING_LEGS`. The pattern that settles it: **the hazard is the arm that is waiting, not the one that is moving.** A waiting arm has to hold some posture; every posture except the stow is within the other arm's reach somewhere in its cycle; and an arm holding a fruit cannot stow, because `park_arm` is a teleport. So there is no safe point to hand the deck over mid-pick.
+
+⚠️ **This is a measured mechanical limit and the previous one was not.** The old serialisation was `armframe` rebinding module globals, which made two arms mid-mission *inexpressible* — no measurement could have moved it. This one shrinks the moment `trolley.ARM_STAGGER`, the deck width or the park posture change, with no code change at all. Everything other than the manipulation runs concurrently: mapping, planning, waiting, both deck heads scanning, travel. The run prints both readings — control cycles with both arms mid-mission, and cycles with both arms actually moving — rather than the flattering one.
+
+⚠️ **The pipeline text is read out of the running mission, not scripted.** `farm.duo.ArmState` is written where the work happens, and the current leg is read live off `week2_pick.MissionRun.leg`, which the executor sets as it flies. The panel also shows, per arm: the target with its ripeness class, the map's estimated position and the error against ground truth; whether the planner accepted or refused and how many candidates it tried; the refusal's breach in mm against the 40 mm budget; the guard's live minimum clearance and the leg it is on; the distance any abort happened at; what the arm is waiting on, including waiting for the other arm; and the running picks / mean / refusals / misses. Everything the panel wanted that the mission objects did not already expose was **added to `ArmState`**, not reconstructed in the viewer.
+
+#### Where the time actually goes
+
+⚠️ **The docstring used to say the camera cadences were the performance story. They are not.** Profiled headless, with the renderer switched off entirely — one two-armed pick, 123.5 s of work:
+
+| cost | | |
+|---|---:|---|
+| `plant_row.weld_force` | 48.3 s | 39% — one `efc` scan per fruit per physics substep |
+| `daqp` IK solve | 44.1 s | 36% — a QP over **317 DOF** to move a 6-DOF arm |
+| `mink` task objective | 7.4 s | 6% |
+| `mj_step` | 5.7 s | 5% |
+| guard clearance | 2.5 s | 2% |
+| rendering | 0.0 s | 0% — there was none |
+
+The panels are ~5% of a harvest control cycle. So the win was taken where the time was: `plant_row.weld_forces` reads the whole row's weld forces in **one** `efc` pass instead of one per fruit — 3.690 ms → 0.125 ms per call, **29.5×**, verified bit-identical over 300 steps × 48 fruit. Same command, same seed, per-phase panel rate:
+
+| phase | before | after |
+|---|---:|---:|
+| pick | 2.2 fps | **3.5 fps** |
+| map | 8.7 fps | 8.5 fps |
+| travel | 19.8 fps | 20.1 fps |
+
+The pick phase is where the run spends its time and it is 59% faster. The *overall* mean is not comparable between runs that harvested different numbers of fruit; read the per-phase rates, which is why they are printed.
+
+⚠️ **288 of those 317 IK DOF are tomato free joints**, and a crop-free model solves the same IK 45× faster (14.14 ms → 0.31 ms). That is recorded and **not** fixed — it needs a reduced model for the solver, which changes IK answers, so it wants its own measurement pass rather than a drive-by. Bug Log 67.
+
+⚠️ **EGL was already on the NVIDIA card.** `GL_RENDERER` reports `NVIDIA RTX 1000 Ada Generation Laptop GPU/PCIe/SSE2`, driver 595.84 — `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` sorts ahead of `50_mesa.json`, so nothing was landing on the AMD iGPU and there was no offload to force.
 
 ### 🪟 `farm/watch.py` — six panels, one arm, including the map
 
@@ -706,7 +746,26 @@ WINDOW 1 — "vinea — SENSORS"        WINDOW 2 — "vinea — MISSION"
 # 🖼 aim the two heads apart, render both, print the angle between them.
 #    Writes twoarm_deck_a.png and twoarm_deck_b.png. PASS if > 30 deg.
 ./.venv/bin/python simulation/mujoco/farm/decks.py --split
+
+# 📝 drive the whole aisle with both heads sweeping, and log the
+#    camera-to-trolley offset every control cycle. PASS if it never moves.
+./.venv/bin/python simulation/mujoco/farm/decks.py --offset
 ```
+
+**`--offset` is the check that the two deck-camera bugs are gone**, and it is a measurement rather than a look at the render. Both bugs were one mechanism: the head was a worldbody **mocap body** driven from Python while its own mast was a geom on the **trolley body**, so one rigid assembly moved by two transports. `Drive.drive_to` steps physics for a whole traverse and never called `follow`, so the camera sat frozen for the drive and then jumped the full distance (the *teleport*); and nothing calls `follow` at all during the harvest, so the mast rode away and left the camera behind (the *desync*).
+
+The head is now a child body of the trolley — `deck_yaw_<tag>` → `deck_head_<tag>`, pan and tilt hinges, position-servoed — so position is inherited through the model tree and only articulation is driven from Python. There is no second mechanism and so nothing to desync. On seed 7:
+
+```
+  driving -3.60 m to +3.60 m, both heads articulating
+  2084 control cycles, trolley odometer 7.20 m
+
+  arm            pan swept   pivot offset dev    lens offset dev
+  A       -30.0.. +30.0 deg           0.000 mm            50.0 mm
+  B       -30.0.. +30.0 deg           0.000 mm            50.2 mm
+```
+
+⚠️ **The pivot offset is the invariant; the lens offset is not.** The head's own axis must never move relative to the trolley — that is what "bolted to it" means, and it is exactly 0.000 mm. The lens *should* move, by up to 50 mm, because that is the pan turning it on a 90 mm yoke. Both are printed so the two can never be mistaken for each other.
 
 **Prints two lines and writes two stills.** `farm/scout.py`'s head is *one* pan-tilt unit on the aisle centreline that turns 180° at every stop to serve both rows. These are **two heads, one per arm**, each over its own arm's mount plate and each scanning only its own row — so they can look different ways at once, which is what `--split` measures: **103.4°** between the two lines of sight on seed 7, arm A on r1 and arm B on r0.
 

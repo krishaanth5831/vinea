@@ -198,7 +198,25 @@ class Blackbox:
     # -- the hook -------------------------------------------------------------
 
     def substep(self):
-        """Called after every physics step. Must stay cheap: ~12k calls a pick."""
+        """Called after every physics step. Must stay cheap: ~12k calls a pick.
+
+        ⚠️ **One arm's version.** It snaps the row itself, so two of these on
+        one machine would call `row.update` twice per physics step — the second
+        call reading forces the first has already acted on, and only one of the
+        two recorders learning that a stem broke. `observe` / `attribute` are
+        the same work split so a machine can run the row once and hand the
+        breaks to every recorder; see `farm.duo.Machine`. This stays as the
+        composition of the two, for every single-armed caller.
+        """
+        self.observe()
+        self.attribute(self.row.update())
+
+    def observe(self):
+        """The recording half: advance the clock and log what is touching what.
+
+        No physics is read that a second recorder would disturb, so every arm on
+        the machine may call this on the same step.
+        """
         self.t += self.dt
 
         # 1. Log any contact a fruit is currently in. ncon is single digits in
@@ -220,12 +238,18 @@ class Blackbox:
                 slot = "robot" if what[1] else "structure"
                 self._touch[n][slot] = Touch(self.t, what[0], what[1], what[2])
 
-        # 2. Snap anything past the threshold — this is `row.update`, kept here
-        #    so the break and the evidence are read on the same step.
-        broke = self.row.update()
+    def attribute(self, broke):
+        """The blaming half: explain anything that just broke.
 
-        # 3. Anything that broke and was not the fruit being picked is an
-        #    incident, explained now while the evidence is still fresh.
+        ⚠️ Kept on the same physics step as the snap that produced `broke` —
+        that is the whole reason `row.update` used to live inside this method.
+        A machine driving several arms calls `row.update` once and passes the
+        same list to every recorder, which preserves the property that matters:
+        the break and the evidence for it are read on the same step.
+
+        Anything that broke and was not the fruit being picked is an incident,
+        explained now while the evidence is still fresh.
+        """
         for n in broke:
             if n not in self._watch or n in self._done:
                 continue

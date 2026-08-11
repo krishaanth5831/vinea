@@ -175,8 +175,20 @@ class CarryTrace:
         ⚠️ Per substep, not per control cycle. A 2 ms physics step against a
         10 ms control cycle means a peak sampled at tick rate can miss four
         fifths of the contact history, and the peak is the signal here.
+
+        ⚠️ One arm's version — it snaps the row. See `incident.Blackbox.substep`
+        and use `observe`/`attribute` on a machine carrying more than one.
         """
-        self.inner.substep()
+        self.observe()
+        self.attribute(self.row.update())
+
+    def attribute(self, broke):
+        """Hand the row's breaks to the black box underneath. See `observe`."""
+        self.inner.attribute(broke)
+
+    def observe(self):
+        """The recording half, safe to call once per arm per physics step."""
+        self.inner.observe()
         for i in range(self.data.ncon):
             c = self.data.contact[i]
             g1, g2 = int(c.geom1), int(c.geom2)
