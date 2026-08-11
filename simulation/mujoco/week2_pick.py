@@ -123,8 +123,13 @@ def anchor_posture(reacher, model, data, park_q):
     return reacher
 
 
-def make_reacher(model, data, speed=DEFAULT_SPEED, prefix=""):
+def make_reacher(model, data, speed=DEFAULT_SPEED, prefix="", frame=None):
     """A Reacher configured for reaching into a row.
+
+    ⚠️ `frame` is which arm's world the approach axis belongs to. Left None it
+    is Week 1-4's `INTO_ROW`, `[+1, 0, 0]`. Arm b is bolted round 180 deg, so
+    its frame's `into_row` is `[-1, 0, 0]` and a Reacher built without it would
+    approach every fruit from behind the row. See `mission.ArmFrame`.
 
     ⚠️ mocap=None matters. The row's stems *are* mocap bodies, and the Reacher
     parks a marker on mocap 0 by default — which would drag stem t0 around the
@@ -135,10 +140,13 @@ def make_reacher(model, data, speed=DEFAULT_SPEED, prefix=""):
     `reset_home` and undo both, putting the arm back inside the canopy with the
     jitter silently switched off.
     """
+    from mission import _frame
+
     return Reacher(model, data, speed=speed, standoff=0.0,
                    max_reach=MAX_REACH_GRIPPER, reached_mm=REACHED_MM_LOADED,
                    orientation_cost=ORIENTATION_COST, roll_cost=ROLL_COST,
-                   approach=INTO_ROW, mocap=None, reset=False, prefix=prefix)
+                   approach=_frame(frame).into_row, mocap=None, reset=False,
+                   prefix=prefix)
 
 
 def _run_leg(leg, reacher, gripper, row, target, tick, say):
@@ -255,6 +263,15 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
     clock = [0.0]
     grasped = [False]
 
+    # ⚠️ **The crate and the escape direction come off the mission, not off this
+    # module's globals, and that is the fix for the bug in the comment below.**
+    # `from mission import BIN_POS` copied the Week 1-4 crate at the world
+    # origin into this module at import time, so `farm.armframe` had to rebind
+    # it here as well as in `mission` — and rebinding is what made two arms
+    # mid-mission impossible. A plan now carries its own frame, so this reads
+    # the crate belonging to the arm that flew the plan. See `mission.ArmFrame`.
+    fr = mission.arm_frame
+
     # ⚠️ Per *physics* step, not per control cycle, and the difference is not
     # academic: polled at 100 Hz a stiff arm pulling on a weld drove the force
     # to 77 N before a 12 N threshold was noticed — an effective detach force
@@ -318,7 +335,7 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
         guard.armed = False
         here = data.site(tool_site).xpos.copy()
         reacher.set_orientation_cost(ORIENTATION_COST)
-        reacher.approach = INTO_ROW
+        reacher.approach = fr.into_row
         reacher.drive_to(np.array([mission.stage_x, here[1], here[2]]),
                          on_tick=tick)
 
@@ -326,7 +343,8 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
     return {
         "fruit": target,
         "target": mission.target,
-        "in_bin": bool(crate_contains(fruit.xpos, BIN_POS, BIN_HALF, BIN_WALL)),
+        "in_bin": bool(crate_contains(fruit.xpos, fr.bin_pos, BIN_HALF,
+                                      BIN_WALL)),
         "grasped": bool(grasped[0]),
         "broke": bool(not row.attached(target)),
         "peak_n": float(row.peak[target]),

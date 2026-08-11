@@ -185,6 +185,55 @@ TIP_MAX_S = 3.5
 INTO_ROW = np.array([1.0, 0.0, 0.0])
 DOWNWARD = np.array([0.0, 0.0, -1.0])
 
+
+# --- whose world a mission is planned in -------------------------------------
+
+@dataclass(frozen=True)
+class ArmFrame:
+    """The five world constants a mission is planned against, as a value.
+
+    ⚠️ **This is what used to be five module globals, and moving it here is what
+    makes two arms flyable at once.** `PARK`, `STAGE_X`, `BIN_POS`, `ROW_X` and
+    `INTO_ROW` describe *one* arm's world — where it rests, the plane it stages
+    on, where its crate is, where its crop is, and which way "into the row"
+    points. That was fine while there was one arm bolted to the origin.
+
+    On a trolley they are functions of where the machine is standing, and
+    `farm.armframe` made them work by **rebinding this module's globals** for
+    the duration of a mission. That is why the two arms were serialised: two
+    arms mid-mission need two conflicting sets of those globals in one
+    interpreter, so concurrency was not merely unimplemented, it was
+    inexpressible. See Bug Log 57.
+
+    Carried as a value on the `Mission`, two arms simply hold two frames, and
+    nothing global changes at all.
+
+    ⚠️ `WORLD` below is built from the module constants at import, so every
+    caller that passes no frame gets exactly the Week 1-4 numbers. Nothing
+    measured in Weeks 1-4 can move, because for those callers this is the same
+    five values reached by a different name.
+    """
+
+    park: np.ndarray
+    stage_x: float
+    bin_pos: np.ndarray
+    row_x: float
+    into_row: np.ndarray
+
+    @property
+    def back(self):
+        """Sign of "out of the canopy" along x. See `Route.pull_vector`."""
+        return -float(self.into_row[0])
+
+
+WORLD = ArmFrame(park=PARK, stage_x=STAGE_X, bin_pos=BIN_POS, row_x=ROW_X,
+                 into_row=INTO_ROW)
+
+
+def _frame(frame):
+    """`WORLD` when a caller passes nothing. The Weeks 1-4 default, in one place."""
+    return WORLD if frame is None else frame
+
 # The legs that move with fruit in the gripper, between the pull and the
 # release. These are the ones CARRY_SPEED applies to.
 CARRYING_LEGS = {"extract", "turn", "carry"}
@@ -264,6 +313,17 @@ class Mission:
     tried: list[str] = field(default_factory=list)
     applied: list[str] = field(default_factory=list)   # lessons that shaped it
     path: np.ndarray | None = None         # the predicted tool path, for drawing
+    # ⚠️ Which arm's world this was planned in, carried with the plan rather
+    # than left in module state for the executor to look up. `execute` scores
+    # the crate from `mission.frame.bin_pos` and escapes an abort along
+    # `mission.frame.into_row`, so a plan handed to the executor is complete —
+    # there is nothing left to rebind and nothing for a second arm to clobber.
+    # `None` means the Week 1-4 world; see `ArmFrame`.
+    frame: ArmFrame | None = None
+
+    @property
+    def arm_frame(self):
+        return _frame(self.frame)
 
     def summary(self) -> str:
         head = (f"mission {self.target}: {'planned' if self.ok else 'REFUSED'} · "
@@ -663,9 +723,16 @@ class Route:
     stage_x: float = STAGE_X
     approach_gap: float = APPROACH_GAP
     keepout: dict = field(default_factory=dict)   # fruit name -> extra metres
+    # ⚠️ The frame this route's `stage_x` is measured in. It exists so `label`
+    # can report a backoff — "+8cm" means eight centimetres behind *this arm's*
+    # staging plane — without reading a module global that a second arm may
+    # have a different answer for. `farm.armframe._patch_default` used to patch
+    # this dataclass's `__init__.__defaults__` for exactly this reason; it no
+    # longer has to, because the nominal comes in with the route.
+    frame: ArmFrame | None = None
 
     def label(self):
-        back = STAGE_X - self.stage_x
+        back = _frame(self.frame).stage_x - self.stage_x
         bits = [self.lane]
         if self.pull != "down":
             bits.append(f"pull-{self.pull}")
@@ -692,11 +759,11 @@ class Route:
         pulling the fruit toward themselves rather than toward the floor.
         """
         # ⚠️ The x components are "back out of the canopy", not "toward -x".
-        # They are signed by INTO_ROW so a mirrored arm leans out of its own
-        # row rather than further into it — see `farm.armframe._MIRROR`. For
-        # the unmirrored arm INTO_ROW[0] is +1 and these are the Week 2
-        # numbers unchanged.
-        back = -INTO_ROW[0]
+        # They are signed by the frame's `into_row` so a mirrored arm leans out
+        # of its own row rather than further into it — see
+        # `farm.armframe.MIRROR`. For the unmirrored arm `into_row[0]` is +1 and
+        # these are the Week 2 numbers unchanged.
+        back = _frame(self.frame).back
         return {
             "out": np.array([back * 0.09, 0.0, -PULL_DOWN]),
             "far": np.array([back * 0.17, 0.0, -0.06]),
@@ -708,7 +775,7 @@ class Planner:
 
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
                  park_q=None, speed=DEFAULT_SPEED, prefix="", others=(),
-                 pin=()):
+                 pin=(), frame=None):
         import mink
 
         self.model = model
@@ -717,6 +784,12 @@ class Planner:
         self.lessons = lessons
         self.clearance = clearance
         self.park_q = park_q
+        # ⚠️ Which arm's world to plan in. `None` is the Week 1-4 world and is
+        # what every single-armed caller gets, unchanged. `farm.armframe.frame`
+        # builds the trolley-mounted one. See `ArmFrame` — this parameter is
+        # what replaced rebinding this module's globals, and it is why two arms
+        # can now be mid-mission at the same time.
+        self.frame = _frame(frame)
         # ⚠️ The plan carries the speed, not the arm. Every Leg used to default
         # to DEFAULT_SPEED, and the executor sets the arm to `leg.speed` at the
         # top of each leg — so a Reacher built at --speed 1.0 was clobbered back
@@ -775,12 +848,14 @@ class Planner:
         Every leg exists for a measured reason; the ones that are not obvious
         are the ones that were added after something broke.
         """
+        fr = self.frame
+        INTO_ROW, PARK = fr.into_row, fr.park
         sx = route.stage_x
         start = self.data.site(self.tool_site).xpos.copy()
         lane_z = self._lane_z(route, target)
         pull_to = target + route.pull_vector()
         out_z = float(pull_to[2])
-        over_bin = BIN_POS + np.array([0, 0, BIN_DROP_UP])
+        over_bin = fr.bin_pos + np.array([0, 0, BIN_DROP_UP])
 
         legs = [
             # 0. Settle. The weld overshoots for ~50 ms on startup and the peak
@@ -926,8 +1001,11 @@ class Planner:
         zs = [self.row.pos(n)[2] for n in self.row.names]
         if route.lane == "under":
             # Not below the crate rim — ducking under the crop and then dragging
-            # the gripper through the bin is not an improvement.
-            return float(max(min(zs) - 0.20, BIN_POS[2] + BIN_WALL + 0.10))
+            # the gripper through the bin is not an improvement. This arm's
+            # crate: on a trolley it rides beside its own arm, so the rim to
+            # clear is not the same height for both.
+            return float(max(min(zs) - 0.20,
+                             self.frame.bin_pos[2] + BIN_WALL + 0.10))
         return float(max(zs) + 0.16)
 
     # -- checking it ----------------------------------------------------------
@@ -1049,7 +1127,7 @@ class Planner:
         for — and widened only when the check says the direct one is blocked.
         """
         target = self.row.pos(name)
-        base = Route()
+        base = Route(stage_x=self.frame.stage_x, frame=self.frame)
         applied = []
         if self.lessons is not None:
             base, applied = self.lessons.advise(name, self.row, base)
@@ -1062,7 +1140,8 @@ class Planner:
             mission = Mission(target=name, legs=legs, ok=not breaches,
                               clearance=worst, lane=route.lane,
                               stage_x=route.stage_x, breaches=breaches,
-                              tried=tried, applied=applied, path=path)
+                              tried=tried, applied=applied, path=path,
+                              frame=self.frame)
             if not breaches:
                 return mission
             if best is None or worst > best.clearance:
@@ -1107,14 +1186,14 @@ class Planner:
             route = Route(lane=lane, pull=pull, roll=roll,
                           stage_x=base.stage_x - backoff,
                           approach_gap=base.approach_gap,
-                          keepout=base.keepout)
+                          keepout=base.keepout, frame=self.frame)
             if route.label() in seen:
                 continue
             seen.add(route.label())
             yield route
 
 
-def park_posture(model, iters=600, prefix="", pin=(), hold=None):
+def park_posture(model, iters=600, prefix="", pin=(), hold=None, frame=None):
     """Arm joint angles that put the tool at PARK, facing the row.
 
     Solved once at startup and reused as the pose every attempt begins and ends
@@ -1131,6 +1210,11 @@ def park_posture(model, iters=600, prefix="", pin=(), hold=None):
     import mujoco
 
     from fr5 import JOINTS, reset_home
+
+    # ⚠️ Which arm's world to park in. `None` is Week 1-4's, so the single-armed
+    # callers below and in `week2_pick` are unchanged. See `ArmFrame`.
+    fr = _frame(frame)
+    PARK, INTO_ROW = fr.park, fr.into_row
 
     # ⚠️ `prefix` names which arm on a machine carrying more than one. Bare
     # names are arm a and every single-armed scene keeps them. Without it the

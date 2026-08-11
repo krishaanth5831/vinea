@@ -590,10 +590,10 @@ def reach_gate(seed=1, verbose=True, arms=("a",)):
             drive.park_at(float(np.clip(t.y - ARM_Y[tag], *y_limits())))
             park_arm(model, data, park_q, prefix=prefix)
             mujoco.mj_forward(model, data)
-            with armframe.at_trolley(model, data, tag):
+            with armframe.at_trolley(model, data, tag) as fr:
                 planner = Planner(model, data, row, lessons=None,
                                   clearance=0.040, park_q=park_q, speed=0.4,
-                                  prefix=prefix)
+                                  prefix=prefix, frame=fr)
                 m = planner.plan(t.name)
             rows.append((t, m))
 
