@@ -1,0 +1,158 @@
+
+=== click (+0.00, +0.60) ===
+  approach  tool [+0.27 -0.00 +0.60]   arm 3.4 mm
+  engage    tool [+0.42 +0.00 +0.60]   arm 4.1 mm
+  close     tool [+0.42 +0.00 +0.60]   fingers closed on the fruit
+  pull      tool [+0.12 -0.00 +0.60]   arm 2.3 mm
+  snap      tool [+0.12 -0.00 +0.60]   stem gave at 11.8 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.2 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=11.8218 tomato=[0.117276, -0.901969, 0.048633]
+
+=== click (-0.50, +0.20) ===
+  approach  tool [+0.27 -0.50 +0.20]   arm 4.6 mm
+  engage    tool [+0.42 -0.50 +0.20]   arm 4.9 mm
+  close     tool [+0.42 -0.50 +0.20]   fingers closed on the fruit
+  pull      tool [+0.12 -0.50 +0.20]   arm 4.0 mm
+  snap      tool [+0.12 -0.50 +0.20]   stem gave at 12.2 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.2 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=12.2365 tomato=[0.117016, -0.904888, 0.048633]
+
+=== click (+0.50, +0.20) ===
+  approach  tool [+0.27 +0.50 +0.20]   arm 4.3 mm
+  engage    tool [+0.42 +0.50 +0.19]   arm 5.2 mm
+  close     tool [+0.42 +0.50 +0.20]   fingers closed on the fruit
+  pull      tool [+0.12 +0.50 +0.20]   arm 4.1 mm
+  snap      tool [+0.12 +0.50 +0.20]   stem gave at 11.0 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.0 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=10.9869 tomato=[0.266475, -0.907192, 0.048633]
+
+=== click (-0.50, +0.90) ===
+  approach  tool [+0.27 -0.50 +0.90]   arm 5.2 mm
+  engage    tool [+0.42 -0.50 +0.90]   arm 6.0 mm
+  close     tool [+0.42 -0.50 +0.90]   fingers closed on the fruit
+  pull      tool [+0.12 -0.50 +0.90]   arm 4.7 mm
+  snap      tool [+0.12 -0.50 +0.90]   stem gave at 13.9 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.1 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=13.8932 tomato=[0.252333, -0.90659, 0.048633]
+
+=== click (+0.50, +0.90) ===
+  approach  tool [+0.27 +0.50 +0.90]   arm 5.2 mm
+  engage    tool [+0.42 +0.50 +0.90]   arm 6.2 mm
+  close     tool [+0.42 +0.50 +0.90]   fingers closed on the fruit
+  pull      tool [+0.12 +0.50 +0.90]   arm 5.3 mm
+  snap      tool [+0.12 +0.50 +0.90]   stem gave at 12.6 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 3.7 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=12.6035 tomato=[0.268455, -0.895825, 0.048633]
+
+=== click (+0.30, +0.85) ===
+  approach  tool [+0.27 +0.30 +0.85]   arm 4.2 mm
+  engage    tool [+0.42 +0.30 +0.85]   arm 5.0 mm
+  close     tool [+0.42 +0.30 +0.85]   fingers closed on the fruit
+  pull      tool [+0.12 +0.30 +0.85]   arm 3.9 mm
+  snap      tool [+0.12 +0.30 +0.85]   stem gave at 11.4 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.2 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=11.4496 tomato=[0.223077, -0.902441, 0.048633]
+
+=== click (+0.45, +0.75) ===
+  approach  tool [+0.27 +0.45 +0.75]   arm 5.1 mm
+  engage    tool [+0.42 +0.45 +0.75]   arm 5.6 mm
+  close     tool [+0.42 +0.45 +0.75]   fingers closed on the fruit
+  pull      tool [+0.12 +0.45 +0.75]   arm 4.8 mm
+  snap      tool [+0.12 +0.45 +0.75]   stem gave at 11.0 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.1 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=11.0197 tomato=[0.268965, -0.899078, 0.04862]
+
+=== click (-0.45, +0.30) ===
+  approach  tool [+0.27 -0.45 +0.30]   arm 4.5 mm
+  engage    tool [+0.42 -0.45 +0.30]   arm 4.9 mm
+  close     tool [+0.42 -0.45 +0.30]   fingers closed on the fruit
+  pull      tool [+0.12 -0.45 +0.30]   arm 3.9 mm
+  snap      tool [+0.12 -0.45 +0.30]   stem gave at 12.0 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.3 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=12.0420 tomato=[0.115187, -0.905015, 0.048633]
+
+=== click (+0.00, +0.15) ===
+  approach  tool [+0.27 -0.00 +0.15]   arm 2.9 mm
+  engage    tool [+0.42 -0.00 +0.15]   arm 3.6 mm
+  close     tool [+0.42 -0.00 +0.15]   fingers closed on the fruit
+  pull      tool [+0.12 -0.00 +0.15]   arm 2.3 mm
+  snap      tool [+0.12 -0.00 +0.15]   stem gave at 14.6 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.5 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=14.6434 tomato=[0.092867, -0.910751, 0.048633]
+
+=== click (+0.00, +0.95) ===
+  approach  tool [+0.27 +0.00 +0.95]   arm 3.1 mm
+  engage    tool [+0.42 +0.00 +0.95]   arm 4.3 mm
+  close     tool [+0.42 +0.00 +0.95]   fingers closed on the fruit
+  pull      tool [+0.12 -0.00 +0.95]   arm 2.1 mm
+  snap      tool [+0.12 -0.00 +0.95]   stem gave at 12.8 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 3.9 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=12.8090 tomato=[0.266572, -0.905285, 0.048633]
+
+=== click (-0.20, +0.45) ===
+  approach  tool [+0.27 -0.20 +0.45]   arm 3.3 mm
+  engage    tool [+0.42 -0.20 +0.45]   arm 4.3 mm
+  close     tool [+0.42 -0.20 +0.45]   fingers closed on the fruit
+  pull      tool [+0.12 -0.20 +0.45]   arm 2.7 mm
+  snap      tool [+0.12 -0.20 +0.45]   stem gave at 8.2 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.1 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=8.2056 tomato=[0.10564, -0.908736, 0.048633]
+
+=== click (+0.20, +0.70) ===
+  approach  tool [+0.27 +0.20 +0.70]   arm 3.6 mm
+  engage    tool [+0.42 +0.20 +0.70]   arm 4.5 mm
+  close     tool [+0.42 +0.20 +0.70]   fingers closed on the fruit
+  pull      tool [+0.12 +0.20 +0.70]   arm 3.2 mm
+  snap      tool [+0.12 +0.20 +0.70]   stem gave at 11.0 N (threshold 3.0 N — one cycle's overshoot)
+  transit   tool [+0.38 -0.12 +0.58]   arm 4.3 mm
+  carry     tool [+0.15 -0.80 +0.31]   arm 6.8 mm
+  release   tool [+0.15 -0.80 +0.31]   fingers opened
+  park      tool [+0.67 -0.10 +0.47]   arm 5.8 mm
+  done      tool [+0.67 -0.10 +0.47]   IN THE CRATE
+  result reached=True snapped=True in_crate=True peak_n=10.9758 tomato=[0.268646, -0.90361, 0.048633]
+
+12/12 crated
