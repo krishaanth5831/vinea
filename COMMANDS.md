@@ -843,7 +843,7 @@ It costs 22.5 s a pass and is the difference between a second arm having a map a
 
 ⚠️ ~~**Nothing checks arm against arm.**~~ **Fixed — `mission.ArmObstacles`.** Each `Guard`, `ClearanceModel` and `Planner` now takes an `others=` tuple of arm prefixes and puts those arms in the obstacle set, at `ARM_CLEARANCE` = 40 mm (the crop's budget, not structure's 15 mm — another 22 kg arm is not a thing you may scuff). Empty by default, so Weeks 1–4 are untouched.
 
-The check found a real clash the moment it existed: **the two arms were parked 83 mm inside each other**, forearm through forearm, on every two-armed scene ever built. `farm/duo.py` also serialises the arms and stows the idle one. See the Bug Log, entries 43, 54, 55, 56 and 57.
+The check found a real clash the moment it existed: **the two arms were parked 83 mm inside each other**, forearm through forearm, on every two-armed scene ever built. `farm/duo.py` now steps both arms in one physics loop and interlocks them on the shared middle of the deck, folding the non-working arm rather than parking it. See the Bug Log, entries 43, 54, 55, 56, 57 and 63–68.
 
 ⚠️ **Every launch is a different house, and it tells you which one.** `crop.spawn` always randomised; what is new is that the seed is drawn outside and printed before anything is built, so a layout that breaks the planner is reproducible with `--seed`. There is deliberately **no 200 mm minimum fruit spacing** — Week 4 removed it and `week4_place.py` records why: a close pair is a pick-order problem to be solved, not a layout to be avoided. What *is* enforced is `Z_LOCAL` = the measured `MARGINAL_Z` band and a 75 mm minimum separation against `TOUCHING` at 70 mm, so nothing spawns unpickable or interpenetrating.
 

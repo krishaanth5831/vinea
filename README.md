@@ -2,7 +2,7 @@
 
 Modular autonomous robot for Dutch commercial greenhouses. Harvesting first, scouting as a second module on the same base. Runs in existing row infrastructure — no greenhouse rebuild.
 
-> **Status: simulation-first.** No hardware budget yet, on purpose — the technical bet gets proven in software before a cent is spent on parts. A Fairino FR5 finds tomatoes with a camera, plans a route that clears the crop, and harvests them in a MuJoCo greenhouse — **without disturbing the fruit it is not picking**. Week 4 of a 4-week sprint ending 2026-08-27, whose deliverable is a recorded autonomous pick cycle with a success rate and a defensible kg/hr.
+> **Status: simulation-first.** No hardware budget yet, on purpose — the technical bet gets proven in software before a cent is spent on parts. A Fairino FR5 finds tomatoes with a camera, plans a route that clears the crop, and harvests them in a MuJoCo greenhouse — **without disturbing the fruit it is not picking**. Weeks 1–4 are built and Week 5 (a whole house on a pipe-rail trolley, two arms) is running ahead of a 4-week sprint that ends 2026-08-27. The sprint's deliverable is a recorded autonomous pick cycle with a success rate and a defensible kg/hr; **the kg/hr is the piece still outstanding.**
 
 ---
 
@@ -357,7 +357,7 @@ Everything above works **one row, from a base bolted to the floor**. That answer
 
 ⚠️ **That costs the harvest nothing and would cost a scouting product a great deal.** Only red is picked, and red is the band that works — a green fruit the map misses is one nobody was going to touch. But Vinea's second module is *scouting*, whose output is a yield forecast, and a forecast built on "we counted the fruit we could see" is wrong in the direction that flatters it. Green recall is the number to quote there, not the average.
 
-**Two gaps, stated rather than papered over.** ~~The scout camera looks one way, so the second arm's row maps **0/14**~~ — **fixed twice over**: the shared head was made to articulate and turn 180° (0/14 → 8/14), and then given up in favour of **one head per arm** (`farm/decks.py`), each over its own arm's plate at the Week 1–4 standoff of 0.60 m, scanning only its own row and never crossing the aisle. And `farm/armframe.py` rebinds other modules' globals, because `mission.py` is written in absolute world coordinates and that breaks the moment the arm rides a moving base; it is confined to one context manager that asserts it restores all 8 bindings across 4 modules, but the real fix is for `mission` to plan in the arm's frame, which means re-taking every clearance number above to prove nothing moved.
+**Two gaps, stated rather than papered over.** ~~The scout camera looks one way, so the second arm's row maps **0/14**~~ — **fixed twice over**: the shared head was made to articulate and turn 180° (0/14 → 8/14), and then given up in favour of **one head per arm** (`farm/decks.py`), each over its own arm's plate at the Week 1–4 standoff of 0.60 m, scanning only its own row and never crossing the aisle. ~~And `farm/armframe.py` rebinds other modules' globals, because `mission.py` is written in absolute world coordinates~~ — **also fixed**, and it had to be, because that rebinding was what made two arms mid-mission inexpressible. `mission.ArmFrame` carries the five world constants as a value on the `Planner` and stamps them onto the `Mission`, so a plan is self-contained and nothing global moves. The re-taking of every clearance number was done rather than deferred: the two-arm reach gate is 20/20 with every clearance and chosen route byte-identical across the refactor.
 
 ### Both arms, one row, two windows
 
@@ -367,9 +367,26 @@ Everything above works **one row, from a base bolted to the floor**. That answer
 
 The whole cycle for one full row — map, plan, travel, pick, crate — with two arms and two live windows: a **SENSORS** window (both wrist cams with the HSV ripeness overlay, both deck cams with their live pan angles) and a **MISSION** window (the map, a tracking aisle shot, the live pipeline state per arm, and per-arm pick times with a running mean). See [COMMANDS.md](COMMANDS.md).
 
-**Both arms work at the same time**, stepped inside one physics loop — one clock, one plant, two control laws. They were serialised until the two things that made concurrency *inexpressible* were removed: `armframe` rebound `mission`'s module globals per arm, so two arms mid-mission needed two conflicting sets of them in one interpreter (now `mission.ArmFrame`, a value carried on the plan), and `execute` owned its own loop, so two of them could not interleave (now `week2_pick.MissionRun`, a generator that stops each control cycle with its setpoints written and physics pending). The run reports the concurrency as a measurement — what fraction of harvest control cycles had both arms mid-mission — rather than as a claim.
+**Both arms are stepped inside one physics loop**, each with its own mission state machine — one clock, one plant, two control laws. They were *architecturally* serialised until the two things that made concurrency inexpressible were removed: `armframe` rebound `mission`'s module globals per arm, so two arms mid-mission needed two conflicting sets of them in one interpreter (now `mission.ArmFrame`, a value carried on the plan), and `execute` owned its own loop, so two of them could not interleave (now `week2_pick.MissionRun`, a generator that stops each control cycle with its setpoints written and physics pending). Neither was load-bearing for collision safety.
 
-⚠️ **What concurrency cost, and what this deck geometry would not give.** Both arms' `PARK` postures fold the elbow back across the aisle, so the arms interleave in x and are held apart only by the 500 mm stagger along the row. Swept: both parked **+110 mm**, both reaching into their own rows **+188 mm**, either one stowed **+318 mm**, but one arm *moving* while the other *sits at PARK* goes to **−40 mm**. So an arm that is not flying is folded rather than parked, and the two interlock on a single token for the legs that swing them through the middle of the deck — which is the returning half of the cycle. The picking half runs fully concurrently. So an arm that is not flying is folded rather than parked, and the two interlock on a single token for the shared middle of the deck. ⚠️ **That interlock ended up covering a whole mission, and it was narrowed four times before that — each time guided by a guard abort rather than by reasoning about the geometry, and each narrowing found another contact at 12–15 mm.** The pattern underneath is that the hazard is the arm that is *waiting*, not the one that is moving: a waiting arm has to hold some posture, every posture except the stow is within the other arm's reach somewhere in its cycle, and an arm holding a fruit cannot stow — `park_arm` is a teleport. So there is no safe point to hand the deck over mid-pick. **That is a measured mechanical limit, and it is a different kind of thing from the one it replaced**: the old serialisation was `armframe` rebinding module globals, which no measurement could have moved. This one shrinks the moment `trolley.ARM_STAGGER`, the deck width or the park posture change, with no code change. Everything other than the manipulation runs concurrently — mapping, planning, waiting, both deck heads scanning, travel — and the run reports both readings: cycles with both arms mid-mission, and cycles with both arms actually moving. Arm-vs-arm clearance is mandatory in both the planner's preview and the runtime guard, and the guard is the one that actually holds the line: `ArmObstacles` reports where the other arm is *now*, which is a measurement for the guard and a prediction for the planner.
+That removed the blocker. It did not, on this machine, buy overlapping manipulation — see immediately below, which is the more interesting result.
+
+⚠️ **The architecture is concurrent; this deck geometry is not, and the shipped default has 0% manipulation overlap.** Both arms' `PARK` postures fold the elbow back across the aisle, so the arms interleave in x and are held apart only by the 500 mm stagger along the row. Swept, worst arm-vs-arm gap: both parked **+110 mm**, both reaching into their own rows **+188 mm**, either one stowed **+318 mm**, one arm *moving* while the other *sits at PARK* **−40 mm**.
+
+So an arm that is not flying is folded rather than parked, and the two interlock on a single token for the shared middle of the deck. **That interlock ended up covering a whole mission, and it was narrowed four times first — each time guided by a guard abort rather than by reasoning about the geometry, and each narrowing found another contact at 12–15 mm.** The pattern underneath: the hazard is the arm that is *waiting*, not the one moving. A waiting arm must hold some posture, every posture except the stow is within the other arm's reach somewhere in its cycle, and an arm holding a fruit cannot stow — `park_arm` is a teleport. There is no safe point to hand the deck over mid-pick.
+
+More overlap costs fruit, monotonically, and every abort is the guard being right:
+
+| interlock | crated | guard aborts | cycles with both arms moving |
+|---|---:|---:|---:|
+| none, both arms free | — | many | ~47% |
+| the returning half | 5/7 | 2 | 19% |
+| + `extract` | 4/7 | 2 | 15% |
+| **whole mission (ships)** | **6/7** | **0** | **0%** |
+
+**This is a measured mechanical limit, and that is a different kind of thing from the one it replaced.** The old serialisation was `armframe` rebinding module globals — no measurement could have moved it. This one shrinks the moment `trolley.ARM_STAGGER`, the deck width, or a `PARK` that does not fold the elbow across the aisle changes, with no change to the code; `duo.CROSSING_LEGS` is the knob. Everything other than the manipulation runs concurrently — mapping, planning, waiting, both deck heads scanning, travel — and the run prints both readings rather than the flattering one: cycles with both arms mid-mission, and cycles with both arms actually moving.
+
+Arm-vs-arm clearance is mandatory in both the planner's preview and the runtime guard, and the guard is the one that holds the line: `ArmObstacles` reports where the other arm is *now*, which is a measurement every control cycle for the guard and a one-snapshot prediction for the planner.
 
 **Building it found four bugs that had been shipping since the second arm was fitted**, all recorded in the Bug Log (entries 43, 54, 55, 56): the two arms were **parked 83 mm inside each other** (forearm through forearm, on every two-armed scene ever built); nothing checked arm against arm, so the clash was in nobody's obstacle set; `week2_pick.execute` scored arm B's grasps against **arm A's gripper**, returning `grasped: False` on picks that had worked; and the planner previewed routes with 13 free DOF that the executor flew with 6. The first one is the instructive one — it had been visible in every render since the arm was added, and nothing was looking.
 
@@ -502,7 +519,8 @@ Only the gripper, row-width adapter and module set change between customers.
 | **Week 1** | MuJoCo fluency, IK reach, gripper mounted and picking — ✅ build items done |
 | **Week 2** | Greenhouse row, breakable stems, mission planning, **ten clean picks in a row** — ✅ 10/10, zero collateral |
 | **Week 3** | Detection: camera in sim, tomato detector, 2D→3D against ground truth — ✅ deprojection PASS at 0.39 mm, 4/5 clean on estimated positions vs 5/5 on truth |
-| **Week 4** | Closed loop with no hardcoded positions, 50+ logged picks, success rate and **kg/hr** — in progress |
+| **Week 4** | Closed loop with no hardcoded positions, 50+ logged picks, success rate and **kg/hr** — ✅ loop closed and placement is free-form; **kg/hr still outstanding** |
+| **Week 5** | A whole house on a pipe-rail trolley: scout it, route it, drive it, harvest it, two arms — ✅ built, both arms stepped in one physics loop |
 
 Then: hardware. Nothing built here gets thrown away — the sim becomes the spec for the physical prototype.
 
@@ -515,9 +533,11 @@ Then: hardware. Nothing built here gets thrown away — the sim becomes the spec
 - [x] Repeatable grasp under position jitter — 10/10 at ±20 mm
 - [x] Collision-aware mission planning, scored on collateral damage
 - [x] Failure attribution and a lesson store the planner reads
+- [x] Perception loop closed — no hardcoded fruit positions anywhere in the cycle
+- [x] A whole house: scout, route, drive, harvest — pipe-rail trolley, two arms, one physics loop
 - [ ] Grower validation — 4 interviews done, more booked
-- [ ] Perception loop closed
-- [ ] Validated kg/hr
+- [ ] **Validated kg/hr** — the sprint deliverable still outstanding
+- [ ] Two arms manipulating *concurrently* — architecture done, blocked on deck geometry (see Week 5)
 - [ ] Technical cofounder
 - [ ] Pre-seed raise
 
