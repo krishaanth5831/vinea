@@ -323,8 +323,9 @@ def pin_base(reacher, others=()):
     find a six-joint answer, which is the only kind that can be executed.
 
     ⚠️ **And it has to survive `set_speed`.** `mission._legs` gives the carrying
-    legs their own speed cap, so `_run_leg` calls `reacher.set_speed(...)` part
-    way through every mission — and `set_speed` *rebuilds* `self.limits` from
+    legs their own speed cap, so `week2_pick.MissionRun._leg` calls
+    `reacher.set_speed(...)` part way through every mission — and `set_speed`
+    *rebuilds* `self.limits` from
     `JOINTS` alone, throwing the pin away. The symptom is beautifully confusing:
     the approach, insert and pull legs arrive to 4 mm, and then `extract` — the
     first carrying leg, and the first one to change speed — is 84 mm short. So
