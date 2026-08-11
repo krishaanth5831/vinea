@@ -63,6 +63,18 @@ Run this after any machine rebuild. If it is not 6/6, nothing below is trustwort
 
 The smoke test says the *machine* works. This one says the *repo* does. Neither asserts a headline number — 42/42, 10/10 and the rest live in the build log with their assumptions written next to them, and pinning them into an assertion would turn every honest change to the physics into a failing build.
 
+```bash
+# 📝 does every point on the mousereach board still crate? ~40 s, 42 picks.
+#    Nightly, or before a commit that moves the gripper, the gaps or the crate.
+./.venv/bin/python tests/board_walk.py                  # expect 42/42
+./.venv/bin/python tests/board_walk.py --grid 11 9      # denser, ~72 s
+
+# 📝 have Week 1's two pick cycles changed? 158 lines of waypoints, diffed.
+./.venv/bin/python tests/baseline.py
+```
+
+`board_walk.py` is the guard on the claim `week1_mousereach.py` prints in its own banner — *every point on the board is pickable*. That claim was measured once, against one gripper, one `APPROACH_GAP`, one `RETRACT_GAP` and one crate position, and nothing checked it since. ⚠️ **If it fails, do not move the board.** A failing point is the claim being wrong; shrinking the board to cover it is what Bug Log 42 records the cost of. To watch a failure, the script prints the `week1_mousereach.py --click Y Z` that reproduces it in a window.
+
 ---
 
 ## Week 1 — the arm, the gripper, reaching a point
