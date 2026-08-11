@@ -807,6 +807,11 @@ class Planner:
         # plan around. Empty is Weeks 1-4. See `ArmObstacles`.
         self.others = tuple(others)
         self.tool_site = prefix + TOOL_SITE
+        # This arm's six, by name. Needed to seed the preview's posture task on
+        # `park_q` the way the executor does — see `_verify`.
+        from fr5 import JOINTS as _J
+
+        self.joints = [prefix + j for j in _J]
 
         # ⚠️ **The preview has to be pinned exactly like the executor, or the
         # planner verifies routes the arm cannot fly.** `mink.Configuration`
@@ -827,12 +832,42 @@ class Planner:
         # same contract `park_posture` already uses — `farm.duo` passes the drive
         # joint and every other arm's six.
         self.pin = tuple(pin)
-        self._limits = None
-        if self.pin:
-            import mink as _mink
 
-            self._limits = [_mink.VelocityLimit(model,
-                                                {j: 0.0 for j in self.pin})]
+        # ⚠️ **The preview gets the executor's joint speed cap, not an
+        # unlimited solver, and this is the same argument as `pin` one
+        # paragraph up carried to its conclusion.** Pinning stopped the preview
+        # using joints the executor will never move. It did nothing about the
+        # preview moving the arm's *own* joints faster than the arm can, and
+        # `reach.Reacher` caps them at `joint_velocity * speed` because a
+        # velocity limit is a constraint inside the QP rather than a scale
+        # factor afterwards — so capped and uncapped solvers take **different
+        # paths**, not the same path at different speeds.
+        #
+        # With one arm that difference was invisible, because it lives in the
+        # null space: the tool goes to the same place either way, and every
+        # clearance that mattered was against the crop, which the tool's own
+        # position dominates.
+        #
+        # With two arms it is not invisible, because the thing the other arm
+        # collides with is the **elbow**, which is exactly what the null space
+        # decides. Measured on one route, arm a reaching 0.40 m *forward* —
+        # away from arm b — while arm b sat parked:
+        #
+        #     preview, unlimited solver     lane: upperarm_link within -142 mm
+        #     same pose solved to converge                        +250 mm
+        #
+        # The planner was refusing good routes for a posture the arm does not
+        # adopt. A preview checked in a posture the arm will never adopt is a
+        # measurement of a different machine — the note above says so about
+        # pinning, and it is just as true about speed.
+        from fr5 import JOINT_VELOCITY as _JV
+
+        caps = {j: 0.0 for j in self.pin}
+        for j in self.joints:
+            caps[j] = _JV[j[len(prefix):]] * self.speed
+        import mink as _mink
+
+        self._limits = [_mink.VelocityLimit(model, caps)]
         self._cfg = mink.Configuration(model)
         self._task = mink.FrameTask(
             frame_name=self.tool_site, frame_type="site", position_cost=1.0,
@@ -1041,7 +1076,34 @@ class Planner:
 
         cfg = self._cfg
         cfg.update(self.data.qpos[: self.model.nq].copy())
-        self._posture.set_target_from_configuration(cfg)
+        # ⚠️ **The preview's null-space bias has to be the executor's, or it
+        # previews a posture the arm will never adopt.** `week2_pick.
+        # anchor_posture` points the executor's `PostureTask` at `park_q`, so
+        # the solver prefers the canonical park configuration wherever nothing
+        # else is competing for the redundant DOF. This seeded the same task
+        # from *wherever the arm happens to be*, which is a different
+        # preference, and over eighteen legs the two diverge.
+        #
+        # It was invisible with one arm because the divergence is in the null
+        # space — the tool goes to the same place either way, so every
+        # clearance that mattered was against the crop, which the tool's own
+        # position dominates. With two arms it stops being invisible: the
+        # carry to the crate swings j1 round, the preview keeps the wound-up
+        # posture through `withdraw`/`ready`/`park`, and the elbow it draws
+        # sweeps across the aisle into the other arm. Measured, that reported
+        #
+        #     park: forearm_link within -129 mm of arm b
+        #
+        # and refused every route for a posture the executor unwinds out of.
+        # Same class as the `pin` note above: a preview checked in a posture
+        # the arm will never adopt is a measurement of a different machine.
+        if self.park_q is not None:
+            seed = self.data.qpos[: self.model.nq].copy()
+            for jname, value in zip(self.joints, np.asarray(self.park_q)):
+                seed[self.model.joint(jname).qposadr[0]] = value
+            self._posture.set_target(seed)
+        else:
+            self._posture.set_target_from_configuration(cfg)
         tasks = [self._task, self._posture]
 
         crop = set(self.row.names)
@@ -1111,6 +1173,20 @@ class Planner:
                                             1e-3, limits=self._limits)
                         cfg.integrate_inplace(vel, PREVIEW_DT)
                     measure(leg)
+            elif leg.kind == "home" and leg.posture is not None:
+                # ⚠️ **The one leg that moves the arm without moving the tool,
+                # and the preview used to skip the motion entirely.** `unwind`
+                # drives the *joints* to `park_q`; measuring it at whatever
+                # posture the previous leg left behind reports the clearance of
+                # the posture the arm is unwinding *out of*, which is exactly
+                # the wound-up one. Walk the configuration to the posture the
+                # executor will ramp to, then measure there.
+                q = np.array(cfg.q).copy()
+                for jname, value in zip(self.joints,
+                                        np.asarray(leg.posture, dtype=float)):
+                    q[self.model.joint(jname).qposadr[0]] = value
+                cfg.update(q)
+                measure(leg)
             elif leg.goal is not None:
                 measure(leg)
 

@@ -265,6 +265,24 @@ def at_trolley(model, data, tag="a", verbose=False):
             setattr(mod, attr, value)
 
 
+def _deck_joints(model):
+    """The deck heads' pan/tilt joints that this model actually has.
+
+    Asked of the model rather than assumed, because `trolley.build` fits the
+    heads only with `arm_decks=True` and every Week 1-4 scene has none.
+    """
+    from farm import decks
+
+    out = []
+    for name in decks.head_joints(("a", "b")):
+        try:
+            model.joint(name)
+        except KeyError:
+            continue
+        out.append(name)
+    return out
+
+
 def pin_base(reacher, others=()):
     """Stop the IK solver from planning motion the base will never make.
 
@@ -322,6 +340,12 @@ def pin_base(reacher, others=()):
         for p in others:
             for j in JOINTS:
                 caps[p + j] = 0.0
+        # ⚠️ And the deck heads, for exactly the same reason as the drive
+        # joint. They became real hinges when the head was reparented onto the
+        # trolley (`farm.decks`), which is two more free DOF the QP will reach
+        # with and the executor will never command. See `decks.head_joints`.
+        for j in _deck_joints(reacher.model):
+            caps[j] = 0.0
         reacher.limits = [mink.VelocityLimit(reacher.model, caps)]
 
     inner = reacher.set_speed
@@ -352,7 +376,7 @@ def park_posture(model, data, tag="a", arms=None, **kw):
     it defaults to just this one, which is the single-armed behaviour.
     """
     fitted = (tag,) if arms is None else tuple(arms)
-    pin = [trolley.DRIVE_JOINT]
+    pin = [trolley.DRIVE_JOINT] + _deck_joints(model)
     for p in trolley.other_arms(tag, fitted):
         pin += [p + j for j in _JOINTS]
     # ⚠️ And the scratch has to stand where the machine stands. `PARK` below is
