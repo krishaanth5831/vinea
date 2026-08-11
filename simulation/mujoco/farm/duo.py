@@ -10,8 +10,11 @@ and the difference is not "call it twice" — three things change shape:
     plan     one route per arm, then **merged into one trolley itinerary**. The
              trolley is 1-DOF and there is one of it, so two routes have to
              become one sequence of stops or the machine drives the aisle twice.
-    pick     **concurrent.** Both arms fly at the same time, stepped inside one
-             physics loop. See below.
+    pick     both arms are stepped inside one physics loop, each with its own
+             mission state machine. They interlock on the shared middle of the
+             deck, because the geometry makes them — see below, and note that
+             this is a *measured* constraint where the old one was an
+             architectural impossibility.
 
 --- the arms used to be serialised, and why they are not any more ------------
 
@@ -52,9 +55,35 @@ actually holds the line. The plan is the primary defence for the crop and the
 net under the arms; `mission.CLEARANCE`'s docstring makes the same argument for
 why a verified plan is not a proof.
 
-An arm with nothing to do at a stop still folds up (`STOW`) — not for safety
-now, but because it leaves the working arm the most room and so gets fewer
-routes refused.
+--- what the machine turned out not to allow, and how that is different -------
+
+⚠️ **The architecture is concurrent; this deck geometry is not.** Letting both
+arms fly freely was tried, and the guard — correctly — aborted picks at 12 to
+15 mm. The interlock below was then narrowed four times, each time guided by
+the aborts rather than by reasoning, and each narrowing found another contact.
+`CROSSING_LEGS` carries that trail.
+
+The pattern underneath is that **the hazard is the arm that is waiting, not the
+arm that is moving.** A waiting arm must hold some posture; every posture except
+`STOW` is within the other arm's reach somewhere in its cycle; and an arm that
+has grasped a fruit cannot stow, because `park_arm` is a teleport and
+teleporting with a tomato in the gripper drags it through the scene. So there is
+no safe point to hand the deck over mid-pick, and a mission holds the shared
+volume end to end.
+
+⚠️ **That is not the old serialisation, and the difference is the whole point.**
+The old one was `armframe` rebinding module globals, which made two arms
+mid-mission *inexpressible* — no measurement could have moved it. This is one
+mechanical constraint on one shared volume, measured, enforced by a token, on a
+machine that steps both arms in one physics loop and runs everything else at
+once: mapping, planning, waiting, both deck heads scanning, travel. It shrinks
+the moment the geometry changes — widen `trolley.ARM_STAGGER`, widen the deck,
+or find a `PARK` that does not fold the elbow across the aisle — and nothing in
+this file has to change to let it.
+
+An arm with nothing to do at a stop folds up (`STOW`): +318 mm against anything
+the other arm does, and the posture that lets the other arm's planner accept a
+route instead of refusing it.
 
 --- what is exposed, and why that matters ------------------------------------
 
@@ -209,19 +238,48 @@ WAIT_MAX_CYCLES = 6000
 # the arm has unfolded, which *is* the middle of the deck. Leaving it out meant
 # the token was released on the mission's very first leg, before the arm had
 # gone anywhere, and the other arm unfolded straight into it.
-# ⚠️ `extract` is in the set too, and that was the last correction. It is the
-# leg that backs the fruit out to the **staging plane**, which is only 0.32 m
-# from the shoulder — not "out over its own row" but part way home, and an arm
-# holding there while the other one carries to its crate measured 14 mm. The
-# safe overlap is the arm being *deep in the canopy*, 0.60 m out, which is
-# `approach` through `grasp`. Those are also the slow legs — grip 1.5 s, close
-# 0.8 s, pull up to 6 s, grasp 0.5 s — so the window that is safe is the window
-# worth having.
+# ⚠️ **Every leg. An arm holds the deck centre for its whole mission, and this
+# was arrived at by elimination rather than chosen.**
+#
+# The interlock started as "the legs that swing an arm through the middle", and
+# each time it was narrowed to let more overlap through, the guard found
+# another contact. Four iterations, each one a measurement:
+#
+#     released on the first leg      other arm unfolded into it — the mission's
+#                                    first leg holds *at PARK*, in the middle
+#     claimed at `clear`             aborts at 14 mm on `clear` and `lane` —
+#                                    unfolding to PARK is itself entering
+#     released before `extract`      aborts at 14 mm — `extract` backs out to
+#                                    the staging plane, 0.32 m out, not clear
+#     released before `extract`,     aborts at 15 mm on `extract` and `park` —
+#     both arms deep in their rows   both elbows swing *toward* the centreline
+#                                    when reaching, so "deep in its own row" is
+#                                    only clear when the two are also well
+#                                    separated along the row
+#
+# The pattern underneath them is the one that settles it: **the hazard is the
+# arm that is waiting, not the arm that is moving.** A waiting arm has to hold
+# a posture, every posture except `STOW` is within reach of the other arm
+# somewhere in its cycle, and an arm that has grasped a fruit *cannot* stow —
+# `park_arm` is a teleport and teleporting with a tomato in the gripper drags
+# it through the scene. So there is no safe posture for a waiting arm mid-pick,
+# and therefore no safe point to hand the deck over mid-mission.
+#
+# ⚠️ **What this is not.** It is not the old serialisation. That was
+# `armframe` rebinding module globals, which made two arms mid-mission
+# *inexpressible*; this is one measured mechanical constraint on one shared
+# volume, enforced by a token, on a machine that now steps both arms in one
+# physics loop and runs everything else concurrently — mapping, planning,
+# waiting, both deck heads scanning, travel. And it is removable without
+# touching any of this code: widen `trolley.ARM_STAGGER`, widen the deck, or
+# find a `PARK` that does not fold the elbow across the aisle, and the set
+# below can shrink again. The sweep in `CONCURRENT_TOWARD_M` is the evidence
+# for which of those would pay.
 CROSSING_LEGS = frozenset({
-    "settle", "clear", "lane", "align",     # unfolding and setting out
-    "extract",                              # back out to the staging plane
-    "turn", "carry", "release",             # swinging round to the crate
-    "withdraw", "ready", "park", "unwind",  # and back to park
+    "settle", "clear", "lane", "align",
+    "approach", "insert", "grip", "close", "pull", "grasp",
+    "extract", "turn", "carry", "release",
+    "withdraw", "ready", "park", "unwind",
 })
 
 # Where an arm waits while the *other* one works.
@@ -508,6 +566,7 @@ class DuoState:
         self.machine = None        # live `Machine`, for the cycle counters
         self.cycles = 0
         self.concurrent_cycles = 0
+        self.open_cycles = 0
         left, right = house.serves(aisle)
         rows = {"a": right, "b": left}
         self.state = {t: ArmState(tag=t, row=rows[t]) for t in self.arms}
@@ -800,7 +859,14 @@ class Machine:
         # while it stands still, and counting that as concurrency would inflate
         # the one number this whole change is judged on. `waiting_for` is set by
         # `MissionRun` exactly while it is gated, so it is the honest filter.
+        #
+        # `open_cycles` is the looser reading — both arms had a mission open,
+        # whether or not both were moving. Both are printed, because reporting
+        # only the loose one overstates the concurrency and reporting only the
+        # strict one hides that the machine really is running two missions at
+        # a time.
         self.concurrent_cycles = 0
+        self.open_cycles = 0
         self.watchers = []       # called once per control cycle, after physics
 
     def substep(self):
@@ -838,8 +904,11 @@ class Machine:
             if not ran:
                 break
             self.cycles += 1
+            open_ = sum(1 for r in self.runs.values() if not r.done)
             moving = sum(1 for r in self.runs.values()
                          if not r.done and not r.waiting_for)
+            if open_ > 1:
+                self.open_cycles += 1
             if moving > 1:
                 self.concurrent_cycles += 1
             self.advance()
@@ -1404,6 +1473,7 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     state.drive_m = drive.travelled
     state.cycles = machine.cycles
     state.concurrent_cycles = machine.concurrent_cycles
+    state.open_cycles = machine.open_cycles
     return state
 
 
@@ -1436,11 +1506,21 @@ def report(state):
     # in flight on it — which is booked by `Machine`, not inferred here.
     cyc = getattr(state, "cycles", 0)
     both = getattr(state, "concurrent_cycles", 0)
+    open_ = getattr(state, "open_cycles", 0)
     print(f"\n  the arms run CONCURRENTLY — both stepped inside one physics "
-          f"loop.")
+          f"loop, one\n  mj_step for the machine per control cycle.")
     if cyc:
-        print(f"     {both} of {cyc} harvest control cycles had both arms "
-              f"mid-mission ({100 * both / cyc:.0f}%)")
+        print(f"     {open_} of {cyc} harvest control cycles had both arms "
+              f"mid-mission ({100 * open_ / cyc:.0f}%)")
+        print(f"     {both} of those had both arms *moving* "
+              f"({100 * both / cyc:.0f}%) — the rest is one arm holding at the")
+        print(f"     deck-centre interlock while the other works. See "
+              f"`CROSSING_LEGS`: on this deck")
+        print(f"     geometry there is no safe posture for a waiting arm "
+              f"mid-pick, so a mission")
+        print(f"     holds the shared volume end to end. That is a measured "
+              f"mechanical limit,")
+        print(f"     not the old architectural one — see the module docstring.")
     from mission import ARM_CLEARANCE
 
     print(f"     arm-vs-arm clearance {ARM_CLEARANCE * 1000:.0f} mm, in the "
