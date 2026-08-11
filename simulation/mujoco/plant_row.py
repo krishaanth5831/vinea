@@ -245,6 +245,12 @@ def weld_force(model, data, eq_id):
     Sanity-check it before trusting anything built on it: a 0.12 kg fruit
     hanging still must read 0.12 * 9.81 = 1.18 N. If it does not, the reading is
     wrong and so is every threshold set against it.
+
+    ⚠️ **One equality at a time, and that is what makes it expensive in a row.**
+    Each call builds two boolean masks the full length of `efc_*` — so asking
+    for every fruit costs `n_fruit * n_efc`, per physics substep. Use
+    `weld_forces` when more than one is wanted; this stays for the single-fruit
+    callers and returns exactly the same number.
     """
     import mujoco
 
@@ -252,6 +258,54 @@ def weld_force(model, data, eq_id):
         (data.efc_type == mujoco.mjtConstraint.mjCNSTR_EQUALITY)
         & (data.efc_id == eq_id))
     return float(np.linalg.norm(data.efc_force[rows][:3])) if rows.size else 0.0
+
+
+def weld_forces(model, data, eq_ids):
+    """`weld_force` for many equalities at once: `{eq_id: newtons}`.
+
+    ⚠️ **One pass over `efc_*` for the whole row, instead of one pass per
+    fruit, and it was the single largest cost in the simulation.** `Row.update`
+    runs every *physics substep* — 500 Hz, not 100 — and asked `weld_force` for
+    each of 48 fruit, each of which scanned all ~400 constraint rows twice. That
+    is 38,400 masked comparisons per substep. Profiled over one two-armed pick
+    it was **48.3 s of 123.5 s, 39% of the entire run**, and it never appeared
+    in a rendering budget because it is not rendering.
+
+    The equality rows for one constraint are contiguous and in `efc_id` order,
+    so a single `argsort`-free pass that groups by id gives every fruit's force
+    for the cost of one fruit's. The arithmetic per fruit is unchanged — same
+    rows, same `norm` of the same first three components — so every force,
+    every `peak`, and every snap decision is bit-identical to before.
+    """
+    import mujoco
+
+    out = {int(e): 0.0 for e in eq_ids}
+    eq_rows = np.flatnonzero(
+        data.efc_type == mujoco.mjtConstraint.mjCNSTR_EQUALITY)
+    if not eq_rows.size:
+        return out
+
+    ids = data.efc_id[eq_rows]
+    force = data.efc_force[eq_rows]
+    # `efc` rows are emitted in constraint order, so each equality's rows are
+    # contiguous and `return_index` gives the first of each block.
+    uniq, start, counts = np.unique(ids, return_index=True, return_counts=True)
+
+    # The first three rows of a weld are the translational ones — the same
+    # `[:3]` slice `weld_force` takes. A weld that produced fewer (it cannot
+    # today, but a disabled one produces none) is padded with zeros rather than
+    # indexed out of range.
+    off = np.arange(3)
+    idx = start[:, None] + off[None, :]
+    valid = off[None, :] < counts[:, None]
+    rows = force[np.where(valid, idx, 0)] * valid
+    norms = np.linalg.norm(rows, axis=1)
+
+    for eq_id, n in zip(uniq, norms):
+        e = int(eq_id)
+        if e in out:
+            out[e] = float(n)
+    return out
 
 
 class Row:
@@ -358,15 +412,26 @@ class Row:
 
         Returns the names that broke on this call, which is almost always
         empty and occasionally one.
+
+        ⚠️ **One `efc` pass for the whole row, not one per fruit.** This runs on
+        every *physics substep*, so the per-fruit version cost `n_fruit * n_efc`
+        masked comparisons 500 times a second — 39% of a two-armed run's total
+        time, measured. See `weld_forces`. The forces, the peaks and the snap
+        decisions are unchanged; only the number of array scans is.
         """
+        live = [n for n in self.names if self.attached(n)]
+        if not live:
+            return []
+        forces = weld_forces(self.model, self.data,
+                             [self.eq_id[n] for n in live])
         broke = []
-        for n in self.names:
-            if not self.attached(n):
-                continue
-            f = self.force(n)
-            self.peak[n] = max(self.peak[n], f)
+        peak, eq = self.peak, self.eq_id
+        for n in live:
+            f = forces[eq[n]]
+            if f > peak[n]:
+                peak[n] = f
             if f > self.snap_n:
-                self.data.eq_active[self.eq_id[n]] = 0
+                self.data.eq_active[eq[n]] = 0
                 broke.append(n)
         return broke
 
