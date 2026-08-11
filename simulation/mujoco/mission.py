@@ -499,6 +499,33 @@ def _sphere_count(pts, max_k=MAX_SPHERES_PER_GEOM):
     return int(np.clip(np.ceil(long_axis / (0.75 * thick)), 1, max_k))
 
 
+_SPHERE_CACHE = {}
+
+
+def arm_spheres(model, prefix=""):
+    """`RobotSpheres` for one arm, built once per (model, prefix).
+
+    ⚠️ **The cover depends only on the model, and it was being rebuilt for every
+    candidate route.** `_verify` constructs a fresh `ClearanceModel` per
+    candidate, which builds a `RobotSpheres` for this arm *and* one for every
+    other arm on the machine — and each of those walks all 5433 geoms, unpacks
+    the mesh vertices of the ones that belong to the arm, runs an SVD per geom
+    to size the cover and another to split it. Identical work, up to 18 times a
+    plan, twice over on a two-armed machine.
+
+    Cached on the model's id and the prefix. Nothing in the cover reads
+    `mjData` — `world()` takes the data and poses the cached local centres — so
+    this cannot go stale against a moving arm. It would go stale against a
+    *recompiled model*, which is why the key includes `id(model)` and why this
+    repo does not recompile mid-run.
+    """
+    key = (id(model), prefix)
+    got = _SPHERE_CACHE.get(key)
+    if got is None:
+        got = _SPHERE_CACHE[key] = RobotSpheres(model, prefix=prefix)
+    return got
+
+
 class RobotSpheres:
     """A conservative sphere cover of the arm and gripper, posed from mjData."""
 
@@ -611,7 +638,7 @@ class ArmObstacles:
     """
 
     def __init__(self, model, prefixes):
-        self.arms = [(p.rstrip("_") or "a", RobotSpheres(model, prefix=p))
+        self.arms = [(p.rstrip("_") or "a", arm_spheres(model, p))
                      for p in prefixes]
 
     def distances(self, data, centres, radii):
@@ -641,7 +668,7 @@ class ClearanceModel:
         # which is Weeks 1-4's behaviour exactly and leaves every number they
         # measured untouched. See `ArmObstacles`.
         self.prefix = prefix
-        self.spheres = RobotSpheres(model, prefix=prefix)
+        self.spheres = arm_spheres(model, prefix)
         self.crop = CropObstacles(model, row, target)
         self.others = ArmObstacles(model, others) if others else None
 
