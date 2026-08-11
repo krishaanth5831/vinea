@@ -621,7 +621,34 @@ WINDOW 1 — "vinea — SENSORS"        WINDOW 2 — "vinea — MISSION"
 
 ⚠️ **The two arms interlock on one token, for the returning half of the cycle only.** Both `PARK` postures fold the elbow across the aisle, so an arm sitting at PARK is in the shared middle of the deck. Measured: both parked +110 mm, both reaching into their own rows +188 mm, either stowed +318 mm, one moving while the other sits at PARK **−40 mm**. So a non-flying arm is folded (`duo.STOW`), and `duo.DeckCentre` lets only one arm at a time run the legs that swing it through the middle — unfolding and setting out, and the swing round to the crate and back to park. Approach, insert, grip, pull and extract run with both arms moving.
 
-⚠️ **The pipeline text is read out of the running mission, not scripted.** `farm.duo.ArmState` is written where the work happens, and the current leg is read live from `mission.Guard.leg`, which `week2_pick.execute` sets as it flies.
+⚠️ **The pipeline text is read out of the running mission, not scripted.** `farm.duo.ArmState` is written where the work happens, and the current leg is read live off `week2_pick.MissionRun.leg`, which the executor sets as it flies. The panel also shows, per arm: the target with its ripeness class, the map's estimated position and the error against ground truth; whether the planner accepted or refused and how many candidates it tried; the refusal's breach in mm against the 40 mm budget; the guard's live minimum clearance and the leg it is on; the distance any abort happened at; what the arm is waiting on, including waiting for the other arm; and the running picks / mean / refusals / misses. Everything the panel wanted that the mission objects did not already expose was **added to `ArmState`**, not reconstructed in the viewer.
+
+#### Where the time actually goes
+
+⚠️ **The docstring used to say the camera cadences were the performance story. They are not.** Profiled headless, with the renderer switched off entirely — one two-armed pick, 123.5 s of work:
+
+| cost | | |
+|---|---:|---|
+| `plant_row.weld_force` | 48.3 s | 39% — one `efc` scan per fruit per physics substep |
+| `daqp` IK solve | 44.1 s | 36% — a QP over **317 DOF** to move a 6-DOF arm |
+| `mink` task objective | 7.4 s | 6% |
+| `mj_step` | 5.7 s | 5% |
+| guard clearance | 2.5 s | 2% |
+| rendering | 0.0 s | 0% — there was none |
+
+The panels are ~5% of a harvest control cycle. So the win was taken where the time was: `plant_row.weld_forces` reads the whole row's weld forces in **one** `efc` pass instead of one per fruit — 3.690 ms → 0.125 ms per call, **29.5×**, verified bit-identical over 300 steps × 48 fruit. Same command, same seed, per-phase panel rate:
+
+| phase | before | after |
+|---|---:|---:|
+| pick | 2.2 fps | **3.5 fps** |
+| map | 8.7 fps | 8.5 fps |
+| travel | 19.8 fps | 20.1 fps |
+
+The pick phase is where the run spends its time and it is 59% faster. The *overall* mean is not comparable between runs that harvested different numbers of fruit; read the per-phase rates, which is why they are printed.
+
+⚠️ **288 of those 317 IK DOF are tomato free joints**, and a crop-free model solves the same IK 45× faster (14.14 ms → 0.31 ms). That is recorded and **not** fixed — it needs a reduced model for the solver, which changes IK answers, so it wants its own measurement pass rather than a drive-by. Bug Log 67.
+
+⚠️ **EGL was already on the NVIDIA card.** `GL_RENDERER` reports `NVIDIA RTX 1000 Ada Generation Laptop GPU/PCIe/SSE2`, driver 595.84 — `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` sorts ahead of `50_mesa.json`, so nothing was landing on the AMD iGPU and there was no offload to force.
 
 ### 🪟 `farm/watch.py` — six panels, one arm, including the map
 
