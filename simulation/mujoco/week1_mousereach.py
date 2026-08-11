@@ -89,6 +89,7 @@ from fr5 import (  # noqa: E402
     reset_home,
 )
 from pickcycle import Plan, Pull, run_cycle  # noqa: E402
+from pickcycle import park_pose as pickcycle_park_pose  # noqa: E402
 from reach import (  # noqa: E402
     CTRL_DT,
     DEFAULT_SPEED,
@@ -346,17 +347,11 @@ def place_tomato(model, data, eq_id, world_pos):
 # the pick
 # ---------------------------------------------------------------------------
 
-def park_pose(model):
-    """Where `tool0` sits at the arm's home posture.
-
-    Computed on a scratch MjData so asking the question does not move the arm
-    that is currently holding a tomato.
-    """
-    import mujoco
-
-    scratch = mujoco.MjData(model)
-    reset_home(model, scratch)
-    return scratch.site(TOOL_SITE).xpos.copy()
+# `park_pose` moved to `pickcycle` when the cycle did — both demos need it now,
+# and a helper that answers "where does this cycle end" belongs beside the
+# cycle. Re-exported here because this is where it has always been imported
+# from and there is no reason to break that.
+park_pose = pickcycle_park_pose
 
 
 def pick_cycle(reacher, gripper, eq_id, tomato_pos, park=None, on_tick=None,

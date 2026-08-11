@@ -57,7 +57,7 @@ from fr5 import (  # noqa: E402
     exit_without_teardown,
     reach_fraction,
 )
-from pickcycle import Lift, Plan, run_cycle  # noqa: E402
+from pickcycle import Lift, Plan, park_pose, run_cycle  # noqa: E402
 from reach import (  # noqa: E402
     CTRL_DT,
     DEFAULT_SPEED,
@@ -159,27 +159,48 @@ def run_pick(reacher, gripper, on_tick=None, verbose=True):
     where the pre-grasp point is, and that the fruit comes free by being lifted
     rather than by a stem giving out.
     """
-    data = reacher.data
+    model, data = reacher.model, reacher.data
     tomato = data.body("tomato")
 
     above = TOMATO_POS + np.array([0, 0, PREGRASP_UP])
     plan = Plan(
         approach=above,
         grasp=TOMATO_POS,
-        # ⚠️ **entry 16, still live here, and entry 7 is where it was found.**
-        # "Home" is read from wherever the tool is standing when the cycle
-        # starts, so one aborted pick leaves the next one parking somewhere
-        # new. `week1_mousereach` computes a *fixed* pose from the home joint
-        # angles and does not have this. Passed as it always was rather than
-        # fixed in the same commit that moved the code, because a refactor that
-        # changes a measured demo is two changes wearing one commit — see
-        # tests/baseline.py.
-        park=data.site(reacher.tool_site).xpos.copy(),
+        # A *fixed* pose, computed from the home joint angles on a scratch
+        # MjData — entry 16. This used to read the tool's current position at
+        # the top of each cycle, which makes "home" mean "wherever I happened
+        # to start": one aborted pick leaves the next one parking somewhere
+        # new, and the one after that somewhere newer. `week1_mousereach` was
+        # fixed in Week 1 and this copy was not, which is entry 7's point.
+        #
+        # Free to fix, and that is worth knowing rather than assuming: this
+        # scene runs one cycle from a fresh reset, where the tool is already at
+        # the home posture, so the old expression and this one agree to the
+        # last digit. The whole demo is byte-identical across the change. The
+        # drift only ever appeared on a second cycle, which this file has never
+        # run — which is exactly why nothing caught it.
+        park=park_pose(model),
         park_label="home",
         park_hold_s=0.5,
-        # ⚠️ **entry 17, the same way.** No transit waypoint, so a long carry
-        # from the far side of the workspace can walk `mink` into a corner and
-        # stall short. This scene's one hardcoded tomato never triggers it.
+        # ⚠️ **entry 17 is live here, and it is much weaker than in the row
+        # scene.** No transit waypoint, so a long carry can walk `mink` — which
+        # is differential IK, and therefore local — into a corner and stall
+        # short of the crate. Swept 23 reachable start postures straight to
+        # this crate: **2 stall, worst 201 mm short**, from [0.45, +0.40, 1.00].
+        #
+        # The entry predicts this hits "from the right starting posture" and it
+        # does, but *not* from the posture entry 17 itself names — a direct
+        # carry from [0.42, +0.25, 1.00] arrives here at 3.2 mm, against the
+        # 378 mm stall the same move produced in `week1_mousereach`. The
+        # difference is the crate, not the arm: run the identical sweep against
+        # that scene's crate at [0.15, -0.80] and it is **11 of 23, worst
+        # 447 mm**. A crate 300 mm further out in -y is what turns a long move
+        # into an unreachable one.
+        #
+        # Left as None deliberately. Fixing it means choosing a transit point
+        # for *this* scene — the row scene's does not belong to it — and that
+        # is a tuned constant, which is not a thing to add overnight on a
+        # branch. The measurement is in BUGSWEEP.md; the decision is yours.
         transit=None,
         release=BIN_POS + np.array([0, 0, BIN_DROP_UP]),
         engage_label="descend",   # tool0 is between the fingertips, so driving

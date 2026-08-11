@@ -39,6 +39,25 @@ from typing import Callable, Optional
 import numpy as np
 
 
+def park_pose(model, prefix=""):
+    """Where the named arm's tool sits at its home posture.
+
+    Computed on a scratch `MjData` so asking the question does not move the arm
+    that is currently holding a tomato.
+
+    This is the answer to entry 16. A cycle has to end where it began or it
+    drifts, and "where it began" has to be a property of the arm rather than of
+    whatever the tool was doing a moment ago.
+    """
+    import mujoco
+
+    from fr5 import reset_home, tool_site_name
+
+    scratch = mujoco.MjData(model)
+    reset_home(model, scratch)
+    return scratch.site(tool_site_name(prefix)).xpos.copy()
+
+
 @dataclass
 class Plan:
     """One pick, described. Every field is a difference between the two demos.
