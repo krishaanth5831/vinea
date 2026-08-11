@@ -57,6 +57,7 @@ from fr5 import (  # noqa: E402
     exit_without_teardown,
     reach_fraction,
 )
+from pickcycle import Lift, Plan, run_cycle  # noqa: E402
 from reach import (  # noqa: E402
     CTRL_DT,
     DEFAULT_SPEED,
@@ -152,64 +153,52 @@ def build_scene():
 def run_pick(reacher, gripper, on_tick=None, verbose=True):
     """One full pick, start to finish. Returns a dict of what happened.
 
-    Written as a flat sequence on purpose. Every step is "put the tool here" or
-    "move the fingers", and reading it top to bottom should tell you exactly
-    what the arm is about to do. When Week 4 turns this into something that
-    retries and skips, this sequence becomes the body of the loop.
+    The sequence itself lives in `pickcycle.run_cycle`, shared with
+    `week1_mousereach` — see bug log entry 7, which is why it is shared rather
+    than copied. What is left here is the part that is actually about a table:
+    where the pre-grasp point is, and that the fruit comes free by being lifted
+    rather than by a stem giving out.
     """
     data = reacher.data
     tomato = data.body("tomato")
 
-    def say(state, note=""):
-        if verbose:
-            pos = data.site(TOOL_SITE).xpos
-            print(f"  {state:<9} tool [{pos[0]:+.2f} {pos[1]:+.2f} {pos[2]:+.2f}]"
-                  f"   {note}")
-
-    def go(state, target, note=""):
-        result = reacher.drive_to(target, on_tick=on_tick)
-        arrived = f"arm {result['arm_mm']:.1f} mm" if result["reached"] \
-            else f"DID NOT ARRIVE — {result['arm_mm']:.0f} mm short"
-        say(state, f"{arrived}   {note}".rstrip())
-        return result
-
-    home_tool = data.site(TOOL_SITE).xpos.copy()
-    start_height = float(tomato.xpos[2])
-
-    # 1. Approach — above the fruit, fingers open, touching nothing.
-    gripper.open()
     above = TOMATO_POS + np.array([0, 0, PREGRASP_UP])
-    go("approach", above, f"{reach_fraction(above, MAX_REACH_GRIPPER) * 100:.0f}% of reach")
-
-    # 2. Descend — tool0 sits between the fingertips, so driving it to the
-    #    centre of the tomato puts the fruit between the open pads.
-    go("descend", TOMATO_POS)
-
-    # 3. Close. The arm holds position while the fingers travel.
-    gripper.close()
-    hold(reacher, TOMATO_POS, GRIP_S, on_tick)
-    say("close", f"fingers commanded to {GRIPPER_CLOSED:.0f}")
-
-    # 4. Lift. This is the honest test of the grasp: if the fingers did not
-    #    hold, the tomato stays on the table and only the arm goes up.
-    lifted = TOMATO_POS + np.array([0, 0, LIFT_UP])
-    go("lift", lifted)
-    holding = float(tomato.xpos[2]) - start_height > LIFT_UP * 0.5
-    say("check", "holding the tomato" if holding else "GRASP FAILED — fruit left behind")
-
-    # 5. Carry to the crate and drop it in.
-    over_bin = BIN_POS + np.array([0, 0, BIN_DROP_UP])
-    go("carry", over_bin)
-    gripper.open()
-    hold(reacher, over_bin, GRIP_S, on_tick)
-    say("release", "fingers opened")
-
-    # 6. Out of the way, so the next cycle starts from a known posture.
-    go("home", home_tool)
-    hold(reacher, home_tool, 0.5, on_tick)
+    plan = Plan(
+        approach=above,
+        grasp=TOMATO_POS,
+        # ⚠️ **entry 16, still live here, and entry 7 is where it was found.**
+        # "Home" is read from wherever the tool is standing when the cycle
+        # starts, so one aborted pick leaves the next one parking somewhere
+        # new. `week1_mousereach` computes a *fixed* pose from the home joint
+        # angles and does not have this. Passed as it always was rather than
+        # fixed in the same commit that moved the code, because a refactor that
+        # changes a measured demo is two changes wearing one commit — see
+        # tests/baseline.py.
+        park=data.site(reacher.tool_site).xpos.copy(),
+        park_label="home",
+        park_hold_s=0.5,
+        # ⚠️ **entry 17, the same way.** No transit waypoint, so a long carry
+        # from the far side of the workspace can walk `mink` into a corner and
+        # stall short. This scene's one hardcoded tomato never triggers it.
+        transit=None,
+        release=BIN_POS + np.array([0, 0, BIN_DROP_UP]),
+        engage_label="descend",   # tool0 is between the fingertips, so driving
+                                  # it to the fruit centre puts the tomato
+                                  # between the open pads
+        approach_note=f"{reach_fraction(above, MAX_REACH_GRIPPER) * 100:.0f}% of reach",
+        close_note=f"fingers commanded to {GRIPPER_CLOSED:.0f}",
+        grip_s=GRIP_S,
+        detach=Lift(
+            to=TOMATO_POS + np.array([0, 0, LIFT_UP]),
+            body=tomato,
+            start_height=float(tomato.xpos[2]),
+            clearing=LIFT_UP * 0.5,
+        ),
+    )
+    res = run_cycle(reacher, gripper, plan, on_tick=on_tick, verbose=verbose)
 
     in_bin = crate_contains(tomato.xpos, BIN_POS, BIN_HALF, BIN_WALL)
-    return {"grasped": holding, "in_bin": in_bin,
+    return {"grasped": res["grasped"], "in_bin": in_bin,
             "tomato": tomato.xpos.copy()}
 
 

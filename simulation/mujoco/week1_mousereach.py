@@ -88,6 +88,7 @@ from fr5 import (  # noqa: E402
     reach_fraction,
     reset_home,
 )
+from pickcycle import Plan, Pull, run_cycle  # noqa: E402
 from reach import (  # noqa: E402
     CTRL_DT,
     DEFAULT_SPEED,
@@ -362,25 +363,16 @@ def pick_cycle(reacher, gripper, eq_id, tomato_pos, park=None, on_tick=None,
                verbose=True):
     """Approach, grip, snap the stem, crate it. Returns what happened.
 
-    Same shape as `week1_gripper.run_pick`, with one real difference: the fruit
-    is attached to the plant, so getting it loose is a step of its own rather
-    than something that happens for free. That step is the harvest.
+    The sequence itself lives in `pickcycle.run_cycle`, shared with
+    `week1_gripper` — see bug log entry 7, which is why it is shared rather
+    than copied. What is left here is the part that is actually about a row:
+    approaching along the panel normal, and that the fruit is *attached*, so
+    getting it loose is a step of its own rather than something that happens
+    for free. That step is the harvest.
     """
     model, data = reacher.model, reacher.data
     tomato = data.body("tomato")
     normal = panel_normal()
-
-    def say(state, note=""):
-        if verbose:
-            p = data.site(TOOL_SITE).xpos
-            print(f"  {state:<9} tool [{p[0]:+.2f} {p[1]:+.2f} {p[2]:+.2f}]   {note}")
-
-    def go(state, target, tick=None, note=""):
-        r = reacher.drive_to(target, on_tick=tick or on_tick)
-        arrived = (f"arm {r['arm_mm']:.1f} mm" if r["reached"]
-                   else f"DID NOT ARRIVE — {r['arm_mm']:.0f} mm short")
-        say(state, f"{arrived}   {note}".rstrip())
-        return r
 
     # Where the arm parks between picks. A *fixed* pose, from the home joint
     # posture — reading the tool's current position here instead would make
@@ -390,66 +382,36 @@ def pick_cycle(reacher, gripper, eq_id, tomato_pos, park=None, on_tick=None,
     if park is None:
         park = park_pose(model)
 
-    # 1. Approach along the row normal, square-on, fingers open. Coming at the
-    #    fruit diagonally is how you knock it off the plant.
-    gripper.open()
-    reached = go("approach", tomato_pos + APPROACH_GAP * normal)
-    if not reached["reached"]:
-        say("abort", "cannot get to the pre-grasp point — too high, or out of reach")
-        go("park", park)
-        return {"reached": False, "snapped": False, "in_crate": False,
-                "peak_n": 0.0, "tomato": tomato.xpos.copy()}
+    def release_weld():
+        data.eq_active[eq_id] = 0
 
-    # 2. Close the last stretch with the fingers open around the fruit.
-    go("engage", tomato_pos)
-
-    # 3. Grip. The stem holds the fruit still while the fingers travel, which
-    #    is why this is more reliable than grabbing a loose ball off a table.
-    gripper.close()
-    hold(reacher, tomato_pos, GRIP_S, on_tick)
-    say("close", "fingers closed on the fruit")
-
-    # 4. Pull. The stem carries the load until it does not. Nothing commands
-    #    the break — the arm just backs off, and the constraint gives out.
-    snap = {"broken": False, "peak": 0.0, "at": 0.0}
-
-    def pull_tick(t):
-        f = weld_force(model, data, eq_id)
-        snap["peak"] = max(snap["peak"], f)
-        if not snap["broken"] and f > SNAP_N:
-            data.eq_active[eq_id] = 0
-            snap["broken"] = True
-            snap["at"] = f
-        if on_tick is not None:
-            on_tick(t)
-
-    go("pull", tomato_pos + RETRACT_GAP * normal, tick=pull_tick)
-    if snap["broken"]:
-        # The load is checked once per control cycle — every 10 ms — and a stiff
-        # arm retracting at speed loads the stem far faster than that. So the
-        # force it actually breaks at overshoots the threshold, often by a lot.
-        # The threshold is a floor, not the number the stem sees. Slow the pull
-        # or check every physics step if that gap ever needs to be small.
-        say("snap", f"stem gave at {snap['at']:.1f} N "
-                    f"(threshold {SNAP_N:.1f} N — one cycle's overshoot)")
-    else:
-        say("snap", f"stem HELD — peak only {snap['peak']:.1f} N of {SNAP_N:.1f} N")
-
-    # 5. Carry and drop, via the transit point — see TRANSIT for why one move
-    #    is not enough.
-    go("transit", TRANSIT)
-    go("carry", CRATE_POS + np.array([0, 0, CARRY_UP]))
-    gripper.open()
-    hold(reacher, CRATE_POS + np.array([0, 0, CARRY_UP]), GRIP_S, on_tick)
-    say("release", "fingers opened")
-
-    go("park", park)
-    hold(reacher, park, 0.4, on_tick)
-
-    in_crate = crate_contains(tomato.xpos, CRATE_POS, CRATE_HALF, CRATE_WALL)
-    say("done", "IN THE CRATE" if in_crate else "not in the crate")
-    return {"reached": True, "snapped": snap["broken"], "in_crate": in_crate,
-            "peak_n": snap["peak"], "tomato": tomato.xpos.copy()}
+    plan = Plan(
+        # Approach along the row normal, square-on. Coming at the fruit
+        # diagonally is how you knock it off the plant.
+        approach=tomato_pos + APPROACH_GAP * normal,
+        grasp=tomato_pos,
+        transit=TRANSIT,
+        release=CRATE_POS + np.array([0, 0, CARRY_UP]),
+        park=park,
+        grip_s=GRIP_S,
+        abort_note="cannot get to the pre-grasp point — too high, or out of reach",
+        done_note=lambda ok: "IN THE CRATE" if ok else "not in the crate",
+        crated=lambda: crate_contains(tomato.xpos, CRATE_POS, CRATE_HALF,
+                                      CRATE_WALL),
+        detach=Pull(
+            to=tomato_pos + RETRACT_GAP * normal,
+            force=lambda: weld_force(model, data, eq_id),
+            release_weld=release_weld,
+            snap_n=SNAP_N,
+        ),
+    )
+    res = run_cycle(reacher, gripper, plan, on_tick=on_tick, verbose=verbose)
+    # Rebuilt key by key rather than splatted, so the insertion order is the
+    # one this function has always returned. Nothing reads a result dict in
+    # order, but "byte-identical" should not have an asterisk on it.
+    return {"reached": res["reached"], "snapped": res["snapped"],
+            "in_crate": res["in_crate"], "peak_n": res["peak_n"],
+            "tomato": tomato.xpos.copy()}
 
 
 # ---------------------------------------------------------------------------
