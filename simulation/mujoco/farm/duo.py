@@ -164,8 +164,19 @@ CONCURRENT_TOWARD_M = 0.30
 # which is a much worse number to publish, because it looks like the planner
 # could not find a route. The short interval means it takes its turn promptly.
 # Still bounded, so a real deadlock ends as a reported refusal, not a hang.
-PLAN_RETRIES = 400
+PLAN_RETRIES = 6
 PLAN_RETRY_CYCLES = 10
+
+# How long an arm will hold folded waiting for the deck to clear, in control
+# cycles. 6000 is 60 s of simulated time — longer than the 20-25 s pick it is
+# waiting on, with room for the other arm to be on its second fruit. Bounded so
+# a real deadlock ends as a reported give-up rather than a hang.
+#
+# ⚠️ The waiting itself is cheap (`park_is_clear`, about a millisecond a cycle),
+# which is what makes a long patient wait affordable. `PLAN_RETRIES` is small
+# because a *re-plan* is the expensive thing and it now only happens once the
+# cheap gate says unfolding is actually clear.
+WAIT_MAX_CYCLES = 6000
 
 # The legs that put an arm through the middle of the deck, where the other arm
 # also has to pass. Only one arm may be in one of these at a time.
@@ -933,7 +944,8 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     from carrytrace import CarryTrace
     from fr5 import JOINTS
     from incident import Blackbox
-    from mission import ARM_CLEARANCE, Guard, Planner, park_arm, reset_park
+    from mission import (ARM_CLEARANCE, ClearanceModel, Guard, Planner,
+                         park_arm, reset_park)
     from outcomes import classify
     from plant_row import Row
     from reach import Gripper
@@ -1062,6 +1074,33 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         for p in others:
             pin += [p + j for j in JOINTS]
 
+        # ⚠️ **A cheap "could I unfold right now?" probe, so waiting does not
+        # cost a plan.** The first cut re-ran `planner.plan()` on every retry.
+        # A refused plan is 18 candidates and up to 70 s of wall time, and an
+        # arm waiting out the other one's 20 s pick retries many times — so the
+        # *waiting* cost orders of magnitude more than the working. And it was
+        # asking the expensive question ("is there a route?") to learn the cheap
+        # one ("has the other arm moved yet?").
+        #
+        # This evaluates the arm-vs-arm clearance at the posture this arm is
+        # about to adopt — `park_q`, written into a scratch `MjData` and
+        # forwarded — against wherever the other arm is *now*. One
+        # `mj_forward` and one sphere pass, about a millisecond, and it is the
+        # question that actually gates unfolding.
+        probe_data = mujoco.MjData(model)
+        probe_model = ClearanceModel(model, row, None, prefix=prefix,
+                                     others=others)
+        park_adr = [model.joint(prefix + j).qposadr[0] for j in JOINTS]
+
+        def park_is_clear():
+            probe_data.qpos[:] = data.qpos
+            for adr, value in zip(park_adr, parks[tag]):
+                probe_data.qpos[adr] = value
+            mujoco.mj_forward(model, probe_data)
+            gaps = [v[0] for k, v in probe_model.per_obstacle(probe_data).items()
+                    if k.startswith("arm ")]
+            return (min(gaps) if gaps else float("inf")) >= ARM_CLEARANCE
+
         standing = [t.name for t in trusses if row.attached(t.name)]
         ident = associate(fruit_here, model, data, standing)
         for fi, nm in ident.items():
@@ -1117,8 +1156,14 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             # 14 mm — the other arm had already unfolded into the space.
             m = None
             for attempt_i in range(PLAN_RETRIES):
+                # Two cheap gates, both polled per control cycle, neither of
+                # them a plan: the deck-centre token, and then "would PARK
+                # actually clear the other arm right now".
                 waited = 0
-                while not centre.claim(tag, "clear"):
+                while waited < WAIT_MAX_CYCLES and (
+                        not centre.claim(tag, "clear")
+                        or not park_is_clear()):
+                    centre.release(tag)
                     me.waiting_on = ("other arm to clear the deck centre "
                                      "before unfolding")
                     me.say("idle-waiting", me.waiting_on)
@@ -1126,7 +1171,14 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                     yield
                 if waited and verbose:
                     print(f"    {me.name} held folded for {waited} cycles "
-                          f"waiting for the deck centre")
+                          f"({waited * 0.01:.1f} s) waiting for the deck centre")
+                if waited >= WAIT_MAX_CYCLES:
+                    me.say("idle-waiting", "gave up waiting for the other arm")
+                    if verbose:
+                        print(f"    {me.name} {name}: gave up waiting for the "
+                              f"other arm after {waited * 0.01:.0f} s")
+                    break
+                centre.claim(tag, "clear")
                 me.waiting_on = ""
                 # ⚠️ **Unfold to PARK *before* planning, and plan from there,
                 # because a mission has to be flown from the posture it was
