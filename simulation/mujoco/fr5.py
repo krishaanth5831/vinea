@@ -540,8 +540,13 @@ def main():
 
     model = build_fr5(gripper=args.gripper)
     data = mujoco.MjData(model)
-    mujoco.mj_resetDataKeyframe(model, data, 0)
-    mujoco.mj_forward(model, data)
+    # `reset_home`, not the keyframe — see its docstring, and the comment on
+    # `spec.add_key` above. The keyframe is six numbers long and MuJoCo pads a
+    # short one with zeros, so any free body in the scene is teleported to the
+    # world origin rather than left at its spawn pose. There is no free body
+    # here today; there was none in `week1_reach` either, which is exactly how
+    # this survived being written twice.
+    reset_home(model, data)
 
     print(f"FR5 loaded from {URDF.name}")
     print(f"  {model.nq} DoF, {model.nbody} bodies, {model.ngeom} geoms, {model.nu} actuators")
