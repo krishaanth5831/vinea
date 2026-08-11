@@ -209,8 +209,17 @@ WAIT_MAX_CYCLES = 6000
 # the arm has unfolded, which *is* the middle of the deck. Leaving it out meant
 # the token was released on the mission's very first leg, before the arm had
 # gone anywhere, and the other arm unfolded straight into it.
+# ⚠️ `extract` is in the set too, and that was the last correction. It is the
+# leg that backs the fruit out to the **staging plane**, which is only 0.32 m
+# from the shoulder — not "out over its own row" but part way home, and an arm
+# holding there while the other one carries to its crate measured 14 mm. The
+# safe overlap is the arm being *deep in the canopy*, 0.60 m out, which is
+# `approach` through `grasp`. Those are also the slow legs — grip 1.5 s, close
+# 0.8 s, pull up to 6 s, grasp 0.5 s — so the window that is safe is the window
+# worth having.
 CROSSING_LEGS = frozenset({
     "settle", "clear", "lane", "align",     # unfolding and setting out
+    "extract",                              # back out to the staging plane
     "turn", "carry", "release",             # swinging round to the crate
     "withdraw", "ready", "park", "unwind",  # and back to park
 })
