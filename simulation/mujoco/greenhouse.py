@@ -48,7 +48,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fr5 import add_crate, build_fr5_spec  # noqa: E402
+from fr5 import add_crate, build_fr5_spec, tool_pos  # noqa: E402
 from plant_row import ROW_X, SUPPORT_Z, add_row  # noqa: E402
 
 # --- the one contact number that decides whether a pick survives -------------
@@ -648,7 +648,10 @@ def main():
                      if model.geom(i).contype[0] or model.geom(i).conaffinity[0])
     print(f"  collidable geoms: {collidable}   "
           f"(scenery adds {model.ngeom - collidable} that cannot be hit)")
-    print(f"  arm parked at {data.site('tool0').xpos.round(3)}, "
+    # prefix "": this scene builds one arm, and it is the unprefixed one. Said
+    # through `tool_pos` rather than by name so the day it is not, the caption
+    # and the number cannot disagree without someone choosing it. Entry 58.
+    print(f"  arm parked at {tool_pos(data).round(3)}, "
           f"PARK is {PARK.round(3)}")
 
     # What the decor costs per physics step — it must be ~nothing, because it is

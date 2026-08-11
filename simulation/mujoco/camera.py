@@ -40,7 +40,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fr5 import FLANGE_Z, PINCH_Z  # noqa: E402
+from fr5 import FLANGE_Z, PINCH_Z, tool_pos  # noqa: E402
 from plant_row import FRUIT_R  # noqa: E402
 
 # --- the mount ---------------------------------------------------------------
@@ -661,6 +661,14 @@ def main():
     cams = [args.camera] if args.camera else [CAM_NAME, "row"]
     passed = True
 
+    # Which arm the pose captions describe. This gate builds one arm and it is
+    # the unprefixed one, so "" reproduces every number this file has ever
+    # printed. It is named rather than assumed because the caption and the
+    # calibration error underneath it have to be about the same arm — a gate
+    # that passes at 0.39 mm while captioning the wrong tool is worse than one
+    # that fails. Entry 58; `add_wrist_camera` already took a prefix.
+    prefix = getattr(args, "arm", "") or ""
+
     for cam in cams:
         intr = Intrinsics.from_model(model, cam, args.width, args.height)
         print(f"\n{'=' * 78}\n  camera '{cam}' · fovy "
@@ -676,7 +684,7 @@ def main():
             print(f"    background pixel reads {depth.max():.2f} m "
                   f"({100 * (depth >= DEPTH_MAX).mean():.0f}% of the frame)")
             passed &= _report(f"pose 1 — parked, tool0 at "
-                              f"{data.site('tool0').xpos.round(3)}",
+                              f"{tool_pos(data, prefix).round(3)}",
                               calibration_error(model, data, cam, intr,
                                                 sensor=sensor), args.gate)
 
@@ -685,7 +693,7 @@ def main():
             # can be right by accident when two sign errors cancel.
             stage(model, data, q, np.array([STAGE_X, 0.10, 0.66]), row)
             passed &= _report(f"pose 2 — staged, tool0 at "
-                              f"{data.site('tool0').xpos.round(3)}",
+                              f"{tool_pos(data, prefix).round(3)}",
                               calibration_error(model, data, cam, intr,
                                                 sensor=sensor), args.gate)
 
@@ -694,7 +702,7 @@ def main():
             # z-depth-treated-as-range goes wrong, so it has to be sampled.
             stage(model, data, q, np.array([STAGE_X, -0.18, 0.58]), row)
             passed &= _report(f"pose 3 — staged low, tool0 at "
-                              f"{data.site('tool0').xpos.round(3)}",
+                              f"{tool_pos(data, prefix).round(3)}",
                               calibration_error(model, data, cam, intr,
                                                 sensor=sensor), args.gate)
         finally:

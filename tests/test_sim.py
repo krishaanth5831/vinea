@@ -245,6 +245,54 @@ def _reset_home_on_keyframe_scenes():
     return f"HOME restored in {', '.join(out)}"
 
 
+# --- 5. the single-arm names, on a machine with two arms --------------------
+
+@check("a two-armed scene answers for the arm it was asked about")
+def _prefix_addresses_arm_b():
+    """Entry 58, and the reason it is worth doing rather than leaving latent.
+
+    `data.site("tool0")` is not "the tool". It is *arm A's* tool, because arm A
+    is deliberately the unprefixed arm so Weeks 1-4 keep working. Every one of
+    these call sites is correct today and none is reachable from a two-armed
+    run — which is exactly the condition under which the bug ships, because the
+    failure mode is a plausible number rather than a `KeyError`.
+
+    Two halves. `fr5.tool_pos` is the expression itself, now named; and
+    `week4_watch.Thoughts` is one of the six signatures the entry lists, called
+    with a prefix and asked whether it answers for arm B. The default has to
+    keep giving arm A, or every number measured before the parameter existed
+    moves.
+    """
+    import mujoco
+    import week4_watch
+    from farm import trolley
+    from fr5 import reset_home, tool_pos
+
+    model = trolley.build(aisle=0, arms=("a", "b"), crate=False, leafy=False)
+    data = mujoco.MjData(model)
+    reset_home(model, data)
+
+    a = tool_pos(data).copy()
+    b = tool_pos(data, trolley.ARM_PREFIX["b"]).copy()
+    apart = float(np.linalg.norm(a - b))
+    assert apart > 1.0, (f"the two arms' tools are {apart * 1000:.0f} mm apart — "
+                         f"the prefix is not selecting a different arm")
+
+    # One of the six signatures the entry names, asked about arm B.
+    told_b = week4_watch.Thoughts(model, data, None, None,
+                                  prefix=trolley.ARM_PREFIX["b"])
+    got = data.site_xpos[told_b.tool_site]
+    assert np.allclose(got, b), (
+        f"asked for arm B, answered {got.round(3)} — arm A is at {a.round(3)}")
+
+    # And the default still means arm A, exactly as before.
+    told_default = week4_watch.Thoughts(model, data, None, None)
+    assert np.allclose(data.site_xpos[told_default.tool_site], a), \
+        "the default prefix stopped meaning arm A — every Week 1-4 number moves"
+    return (f"arm A {a.round(2)} vs arm B {b.round(2)}, "
+            f"{apart * 1000:.0f} mm apart; default still arm A")
+
+
 def main():
     print("Vinea simulation tests")
     print("=" * 72)

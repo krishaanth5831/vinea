@@ -38,6 +38,11 @@ JOINTS = ["j1", "j2", "j3", "j4", "j5", "j6"]
 LINKS = ["base_link", "shoulder_link", "upperarm_link", "forearm_link",
          "wrist1_link", "wrist2_link", "wrist3_link"]
 
+# The last link — what the gripper and the wrist camera bolt to, and the body
+# anything asking "where is the hand" reaches for. Named so callers stop
+# spelling it, for the same reason TOOL_SITE is named: see `tool_pos`.
+WRIST_LINK = LINKS[-1]
+
 # Rotor inertia reflected through the gearbox. The URDF has none — it describes
 # the linkage, not the drivetrain — which leaves the wrist joints with almost
 # no inertia and makes a stiff position servo numerically explosive. Every real
@@ -126,6 +131,35 @@ def reach_fraction(pos, max_reach: float = MAX_REACH) -> float:
     percentage you print understates how far the arm can actually go.
     """
     return float(np.linalg.norm(np.asarray(pos, dtype=float) - SHOULDER) / max_reach)
+
+
+def tool_site_name(prefix: str = "") -> str:
+    """The name of one arm's tool site. `""` is the unprefixed Week 1-4 arm."""
+    return prefix + TOOL_SITE
+
+
+def tool_id(model, prefix: str = "") -> int:
+    """`data.site_xpos` index for one arm's tool site."""
+    return model.site(tool_site_name(prefix)).id
+
+
+def tool_pos(data, prefix: str = ""):
+    """Where one arm's tool is, in world coordinates.
+
+    ⚠️ **This exists because writing it out by hand has now been a bug three
+    times** — entries 55, 68 and 58. `data.site("tool0").xpos` is not "the
+    tool", it is *arm A's* tool, because arm A is deliberately the unprefixed
+    arm so Weeks 1-4 keep working. Called on a two-armed scene under arm B's
+    label it returns arm A's answer, and the failure mode is a plausible number
+    rather than a `KeyError` — around a metre, which reads as a bad grasp
+    rather than as the wrong arm.
+
+    The point of giving the expression a name is that the prefix slot is now
+    part of the question. Someone who does not know there are two arms writes
+    `tool_pos(data)` and gets today's behaviour; someone who does has somewhere
+    to put the answer.
+    """
+    return data.site(tool_site_name(prefix)).xpos
 
 
 def exit_without_teardown():
