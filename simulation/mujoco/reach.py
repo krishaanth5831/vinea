@@ -348,15 +348,31 @@ class Reacher:
         got = self.data.site(self.tool_site).xmat.reshape(3, 3)[:, 2]
         return float(np.degrees(np.arccos(np.clip(float(want @ got), -1.0, 1.0))))
 
-    def step(self, ball, direction=None):
-        """One control cycle. Returns (ik_error_m, arm_error_m).
+    # ⚠️ **`step` is split into `command` and `advance`, and the split is what
+    # lets two arms share one physics loop.** A control cycle is two distinct
+    # things: decide what to ask the servos for, and let the world run. Fused,
+    # every arm that takes a cycle also takes a *physics* step — so two arms
+    # stepping in turn advance the simulation twice per control cycle, at half
+    # the timestep the model was tuned for, with arm b seeing a world arm a has
+    # already moved through. That is not two arms working together, it is two
+    # simulations interleaved.
+    #
+    # Split, a machine commands every arm and *then* steps once:
+    #
+    #     for arm in arms: arm.command(...)     # all setpoints written
+    #     advance_once()                        # one 5x mj_step for the machine
+    #
+    # which is what a real dual-arm controller does — one clock, one plant, two
+    # control laws. `step` below is the two of them back to back, so every
+    # single-armed caller in Weeks 1-4 is untouched.
 
-        Both are measured against the aim point, not the tomato — the aim point
-        is what the arm is trying to hit. The gap between the two errors is the
-        servos losing to gravity and inertia.
+    def command(self, ball, direction=None):
+        """Solve IK and write this arm's setpoints. **Steps no physics.**
+
+        Returns the aim point, which `errors` needs and which the caller
+        otherwise has to recompute.
         """
         import mink
-        import mujoco
 
         goal = approach_point(ball, direction, self.standoff)
 
@@ -388,24 +404,55 @@ class Reacher:
         # command — whatever the caller last asked for stays untouched, so a
         # closed gripper stays closed while the arm carries the fruit.
         self.data.ctrl[self.arm_ctrl] = self.config.q[self.arm_qpos]
+        return goal
+
+    def advance(self):
+        """Run the plant on for one control cycle. Commands nothing.
+
+        ⚠️ **On a machine with more than one arm, exactly one caller may do
+        this per control cycle.** See the note above `command`. `farm.duo`'s
+        machine loop owns it there; here it is called by `step`, which is what
+        every single-armed caller uses.
+        """
+        import mujoco
+
         for _ in range(TICKS_PER_CTRL):
             mujoco.mj_step(self.model, self.data)
             if self.on_substep is not None:
                 self.on_substep()
 
+    def errors(self, ball, direction=None):
+        """(ik_error_m, arm_error_m) against the aim point, read right now."""
+        goal = approach_point(ball, direction, self.standoff)
         ik_pos = self.config.get_transform_frame_to_world(
             self.tool_site, "site").translation()
-        ik_err = float(np.linalg.norm(ik_pos - goal))
-        arm_err = float(np.linalg.norm(self.data.site(self.tool_site).xpos - goal))
-        return ik_err, arm_err
+        return (float(np.linalg.norm(ik_pos - goal)),
+                float(np.linalg.norm(self.data.site(self.tool_site).xpos
+                                     - goal)))
 
-    def drive_to(self, ball, direction=None, on_tick=None):
-        """Run until the arm arrives or stops getting closer.
+    def step(self, ball, direction=None):
+        """One control cycle. Returns (ik_error_m, arm_error_m).
 
-        Stopping on a stall rather than a fixed timeout matters once the arm
-        is running slowly: a target it cannot reach should be called quickly at
-        any speed, and the honest signal for that is "it stopped improving",
-        not "the clock ran out".
+        Both are measured against the aim point, not the tomato — the aim point
+        is what the arm is trying to hit. The gap between the two errors is the
+        servos losing to gravity and inertia.
+        """
+        self.command(ball, direction)
+        self.advance()
+        return self.errors(ball, direction)
+
+    def drive_to_steps(self, ball, direction=None):
+        """`drive_to` as a generator: one `yield` per control cycle.
+
+        ⚠️ **It yields with the setpoints written and physics not yet run**, so
+        the driver's contract is `next(gen)` then advance the plant then
+        `next(gen)` again. That is the whole protocol two arms share a loop
+        through, and it is why the arrival and stall tests below sit *after* the
+        yield — they read where the arm actually got to, which is only true once
+        the world has run.
+
+        Returns (via `StopIteration.value`) the same `attempt` dict the blocking
+        version always did.
         """
         held = stalled = t = 0.0
         best = best_axis = float("inf")
@@ -414,10 +461,10 @@ class Reacher:
         oriented = self.orientation_cost > 0.0
 
         while t < GIVE_UP_S:
-            ik_err, arm_err = self.step(ball, direction)
+            self.command(ball, direction)
+            yield
+            ik_err, arm_err = self.errors(ball, direction)
             t += CTRL_DT
-            if on_tick is not None:
-                on_tick(t)
 
             # Arriving means both, when orientation is being asked for. A move
             # that is on the spot but pointing the wrong way has not finished:
@@ -443,6 +490,50 @@ class Reacher:
 
         return attempt(ball, held >= HOLD_S, ik_err, arm_err, t, direction,
                        self.standoff, self.max_reach, axis_err)
+
+    def drive_to(self, ball, direction=None, on_tick=None):
+        """Run until the arm arrives or stops getting closer.
+
+        Stopping on a stall rather than a fixed timeout matters once the arm
+        is running slowly: a target it cannot reach should be called quickly at
+        any speed, and the honest signal for that is "it stopped improving",
+        not "the clock ran out".
+
+        The logic lives in `drive_to_steps`; this drains it, stepping physics
+        itself. One arm, one loop — exactly what it always did.
+        """
+        return drain(self.drive_to_steps(ball, direction), self.advance,
+                     on_tick)
+
+
+def drain(gen, advance, on_tick=None):
+    """Run a one-arm control generator to completion, stepping physics for it.
+
+    The bridge between the two worlds: `drive_to_steps` and friends describe a
+    motion as a sequence of control cycles and leave the plant to somebody else,
+    which is what a two-armed machine needs. Every single-armed caller in Weeks
+    1-4 wants a function that just does it, and this is that function.
+
+    `on_tick` is handed the elapsed seconds, exactly as the blocking loops used
+    to pass them. Returns whatever the generator returned.
+    """
+    n = 0
+    try:
+        while True:
+            next(gen)
+            advance()
+            n += 1
+            if on_tick is not None:
+                on_tick(n * CTRL_DT)
+    except StopIteration as done:
+        return done.value
+
+
+def hold_steps(reacher, target, seconds, direction=None):
+    """`hold` as a generator. See `Reacher.drive_to_steps` for the protocol."""
+    for _ in range(int(seconds / CTRL_DT)):
+        reacher.command(target, direction)
+        yield
 
 
 class Gripper:
@@ -492,13 +583,24 @@ class Gripper:
         Robotiq does anyway — it has a speed setting — and it keeps the peak
         near the settled value instead of an order of magnitude above it.
         """
+        drain(self.ramp_steps(reacher, target, seconds, value, direction),
+              reacher.advance,
+              None if on_tick is None else (lambda _t: on_tick(0)))
+
+    def ramp_steps(self, reacher, target, seconds, value=GRIPPER_CLOSED,
+                   direction=None):
+        """`ramp` as a generator. See `Reacher.drive_to_steps` for the protocol.
+
+        The finger command is written alongside the arm's setpoints, before the
+        yield, so a machine stepping two arms at once ramps both grippers
+        against the same physics step rather than one per step.
+        """
         start = float(self.data.ctrl[self.index])
         steps = max(1, int(seconds / CTRL_DT))
         for i in range(steps):
             self.set(start + (value - start) * (i + 1) / steps)
-            reacher.step(target, direction)
-            if on_tick is not None:
-                on_tick(0)
+            reacher.command(target, direction)
+            yield
 
 
 def hold(reacher, target, seconds, on_tick=None, direction=None):
@@ -508,10 +610,8 @@ def hold(reacher, target, seconds, on_tick=None, direction=None):
     setpoint and it sags. So "waiting" is an active instruction rather than an
     absence of one, which is true of the real arm too.
     """
-    for _ in range(int(seconds / CTRL_DT)):
-        reacher.step(target, direction)
-        if on_tick is not None:
-            on_tick(0)
+    drain(hold_steps(reacher, target, seconds, direction), reacher.advance,
+          None if on_tick is None else (lambda _t: on_tick(0)))
 
 
 def attempt(ball, reached, ik_err, arm_err, seconds, direction=None,

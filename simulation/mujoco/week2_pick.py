@@ -78,7 +78,14 @@ from mission import (  # noqa: E402
     reset_park,
 )
 from plant_row import FRUIT_R, ROW_X, SNAP_N, Row  # noqa: E402
-from reach import CTRL_DT, DEFAULT_SPEED, Gripper, Reacher, hold  # noqa: E402
+from reach import (  # noqa: E402
+    CTRL_DT,
+    DEFAULT_SPEED,
+    Gripper,
+    Reacher,
+    hold,
+    hold_steps,
+)
 
 # Arrival tolerance for the loaded arm — the 1.05 kg gripper droops ~5.2 mm and
 # a P+D position servo cannot null out a constant gravity load. It still grasps
@@ -149,98 +156,324 @@ def make_reacher(model, data, speed=DEFAULT_SPEED, prefix="", frame=None):
                    prefix=prefix)
 
 
-def _run_leg(leg, reacher, gripper, row, target, tick, say):
-    """Do what one leg says. This is the whole executor — the thinking is in the
-    plan, and that separation is the point: the route is decided and checked
-    while the arm is stationary, then replayed by something with no opinions."""
-    if leg.approach is not None:
-        reacher.approach = leg.approach
-    reacher.roll = leg.roll
-    reacher.set_orientation_cost(leg.orientation_cost, roll_cost=leg.roll_cost)
-    if abs(reacher.speed - leg.speed) > 1e-9:
-        reacher.set_speed(leg.speed)
+class MissionRun:
+    """One arm flying one planned mission, advanced one control cycle at a time.
 
-    # ⚠️ `reacher.tool_site`, not the bare `TOOL_SITE`. On a two-armed machine
-    # the constant is arm a's, so a leg with no goal flown by arm b would hold
-    # position at *arm a's* tool. See the note in `execute`.
-    goal = (reacher.data.site(reacher.tool_site).xpos.copy() if leg.goal is None
-            else np.asarray(leg.goal, dtype=float))
+    ⚠️ **This is `execute` turned inside out, and that is what lets two arms
+    work at once.** The old executor owned the loop: it drove each leg to
+    completion, stepping physics itself, and did not return until the fruit was
+    in the crate. Two of those cannot interleave — the second one only starts
+    when the first has finished, which is the definition of serialised.
 
-    if leg.kind == "move":
-        r = reacher.drive_to(goal, on_tick=tick)
-        say(leg.name, f"arm {r['arm_mm']:.1f} mm · {r['axis_deg']:.1f}°"
+    Here the mission is a generator that stops every control cycle with its
+    setpoints written and the plant not yet run. A driver commands every arm,
+    steps physics **once** for the machine, and comes back round:
+
+        while any still flying:
+            for run in runs: run.command()   # every arm's ctrl written
+            advance_once()                   # one 5x mj_step, one world
+            on_tick()                        # one panel frame
+
+    One clock, one plant, two control laws — which is what a real dual-arm
+    controller is. `farm.duo.Machine` is that driver. `execute` below is the
+    same thing with one arm in the list, so every Week 1-4 caller is unchanged.
+
+    ⚠️ **The abort path is a generator too.** Backing out of the row after a
+    guard trip takes control cycles like anything else, so it cannot be a
+    blocking call inside an `except` — it is `yield from self._escape()`, and
+    the other arm keeps flying through it.
+
+    Read `leg`, `clock` and `result` for what it is doing; they are written
+    where the work happens, which is what the MISSION window reads.
+    """
+
+    def __init__(self, mission, reacher, gripper, row, box=None, guard=None,
+                 on_tick=None, verbose=False):
+        self.mission = mission
+        self.reacher = reacher
+        self.gripper = gripper
+        self.row = row
+        self.box = box
+        self.guard = guard
+        self.on_tick = on_tick
+        self.verbose = verbose
+
+        self.data = reacher.data
+        self.tool_site = reacher.tool_site
+        self.target = mission.target
+        self.fruit = self.data.body(mission.target)
+        self.frame = mission.arm_frame
+
+        self.clock = 0.0
+        self.leg = ""
+        self.grasped = False
+        self.aborted = None
+        self.result = None
+        self.done = False
+        self._gen = self._fly()
+
+    # -- the driver's half ----------------------------------------------------
+
+    def command(self):
+        """Finish the previous control cycle and write the next one's setpoints.
+
+        Returns True while the mission is still flying. The caller must advance
+        physics exactly once between calls — see the class docstring.
+        """
+        if self.done:
+            return False
+        try:
+            next(self._gen)
+            return True
+        except StopIteration:
+            self.done = True
+            return False
+
+    def run(self, advance):
+        """Fly the whole mission here and now, stepping physics with `advance`.
+
+        What `execute` uses. Identical to what the blocking executor did.
+        """
+        while self.command():
+            advance()
+        return self.result
+
+    # -- the per-cycle hook ---------------------------------------------------
+
+    def _after_cycle(self):
+        """Everything that has to happen once physics has run.
+
+        The guard is checked here and nowhere else: it measures where the arm
+        *is*, so checking it before the plant has run measures the last cycle
+        twice and the current one never.
+        """
+        self.clock += CTRL_DT
+        if self.guard is not None and not self.guard.check():
+            raise Aborted(self.guard.tripped)
+        if self.on_tick is not None:
+            self.on_tick(None)
+
+    def _pump(self, gen):
+        """Run one of `reach`'s control generators, adding this arm's per-cycle
+        work. Forwards the generator's return value."""
+        while True:
+            try:
+                next(gen)
+            except StopIteration as finished:
+                return finished.value
+            yield
+            self._after_cycle()
+
+    def _say(self, state, note=""):
+        if self.verbose:
+            p = self.data.site(self.tool_site).xpos
+            print(f"    {state:<9} tool [{p[0]:+.2f} {p[1]:+.2f} {p[2]:+.2f}]"
+                  f"   {note}")
+
+    # -- one leg --------------------------------------------------------------
+
+    def _leg(self, leg):
+        """Do what one leg says, a control cycle at a time.
+
+        This is the whole executor — the thinking is in the plan, and that
+        separation is the point: the route is decided and checked while the arm
+        is stationary, then replayed by something with no opinions.
+        """
+        reacher, gripper, row = self.reacher, self.gripper, self.row
+        if leg.approach is not None:
+            reacher.approach = leg.approach
+        reacher.roll = leg.roll
+        reacher.set_orientation_cost(leg.orientation_cost,
+                                     roll_cost=leg.roll_cost)
+        if abs(reacher.speed - leg.speed) > 1e-9:
+            reacher.set_speed(leg.speed)
+
+        # ⚠️ `reacher.tool_site`, not the bare `TOOL_SITE`. On a two-armed
+        # machine the constant is arm a's, so a leg with no goal flown by arm b
+        # would hold position at *arm a's* tool. See the note in `execute`.
+        goal = (self.data.site(reacher.tool_site).xpos.copy()
+                if leg.goal is None else np.asarray(leg.goal, dtype=float))
+
+        if leg.kind == "move":
+            r = yield from self._pump(reacher.drive_to_steps(goal))
+            self._say(leg.name,
+                      f"arm {r['arm_mm']:.1f} mm · {r['axis_deg']:.1f}°"
                       if r["reached"] else
                       f"DID NOT ARRIVE — {r['arm_mm']:.0f} mm short")
-        return r
+            return r
 
-    if leg.kind == "settle":
-        hold(reacher, goal, leg.seconds, tick)
-    elif leg.kind == "grip":
-        # Ramped, never a step input. Commanded shut in one cycle the pads
-        # arrive at speed and the peduncle went 1.18 -> 91 -> 164 N inside
-        # 10 ms — twenty-seven times SNAP_N — so every stem snapped on contact
-        # and the pull that followed lifted an already-loose tomato.
-        gripper.ramp(reacher, goal, leg.seconds, on_tick=tick)
-    elif leg.kind == "release":
-        gripper.open()
-        hold(reacher, goal, leg.seconds, tick)
-    elif leg.kind == "pull":
-        # Stop the moment it lets go. Driving the full stroke regardless keeps
-        # yanking after the peduncle has parted, and the compliant weld has
-        # stretched by then — the release fires that stored energy into a fruit
-        # held by two pads and knocks it 22 mm off the pinch centre.
-        t = 0.0
-        while row.attached(target) and t < PULL_MAX_S:
-            reacher.step(goal)
-            tick()
-            t += CTRL_DT
-        say(leg.name, f"peak {row.peak[target]:.2f} N vs SNAP_N "
+        if leg.kind == "settle":
+            yield from self._pump(hold_steps(reacher, goal, leg.seconds))
+        elif leg.kind == "grip":
+            # Ramped, never a step input. Commanded shut in one cycle the pads
+            # arrive at speed and the peduncle went 1.18 -> 91 -> 164 N inside
+            # 10 ms — twenty-seven times SNAP_N — so every stem snapped on
+            # contact and the pull that followed lifted an already-loose tomato.
+            yield from self._pump(
+                gripper.ramp_steps(reacher, goal, leg.seconds))
+        elif leg.kind == "release":
+            gripper.open()
+            yield from self._pump(hold_steps(reacher, goal, leg.seconds))
+        elif leg.kind == "pull":
+            # Stop the moment it lets go. Driving the full stroke regardless
+            # keeps yanking after the peduncle has parted, and the compliant
+            # weld has stretched by then — the release fires that stored energy
+            # into a fruit held by two pads and knocks it 22 mm off the pinch
+            # centre.
+            t = 0.0
+            while row.attached(self.target) and t < PULL_MAX_S:
+                reacher.command(goal)
+                yield
+                self._after_cycle()
+                t += CTRL_DT
+            self._say(leg.name,
+                      f"peak {row.peak[self.target]:.2f} N vs SNAP_N "
                       f"{row.snap_n:.1f} N — "
-                      f"{'released' if not row.attached(target) else 'STILL ON'}")
-    elif leg.kind == "home":
-        # Joint space, not tool space. Ramped over `seconds` so the servos are
-        # given a trajectory rather than a step, and stepped through the same
-        # substep hook as everything else so a stem that breaks during it is
-        # still seen and still recorded.
-        import mujoco
+                      f"{'released' if not row.attached(self.target) else 'STILL ON'}")
+        elif leg.kind == "home":
+            yield from self._home(leg)
+        elif leg.kind == "turn":
+            t = 0.0
+            while (reacher.tool_axis_error_deg(goal) > leg.tilt_stop
+                   and t < leg.seconds):
+                reacher.command(goal)
+                yield
+                self._after_cycle()
+                t += CTRL_DT
+            self._say(leg.name,
+                      f"tool {reacher.tool_axis_error_deg(goal):.1f}° "
+                      f"off target axis in {t:.1f}s")
+        else:
+            raise ValueError(f"unknown leg kind {leg.kind!r}")
+        return None
 
-        from fr5 import JOINTS
-        from reach import TICKS_PER_CTRL
+    def _home(self, leg):
+        """The `home` leg: joint space, not tool space.
 
-        data = reacher.data
-        start = np.array([data.joint(j).qpos[0] for j in JOINTS])
+        Ramped over `seconds` so the servos are given a trajectory rather than a
+        step, and stepped through the same machine loop as everything else so a
+        stem that breaks during it is still seen and still recorded.
+
+        ⚠️ **`reacher.joints`, not the bare `JOINTS`.** This read the unprefixed
+        names, so on a two-armed machine arm b's home leg ramped *from arm a's
+        current joint angles* to arm b's park posture — a trajectory starting
+        from a posture arm b was never in. It was latent while the arms were
+        serialised and both happened to be near park; it is not latent once they
+        fly at once. Same shape as Bug Log 55 and 58.
+        """
+        reacher = self.reacher
+        data = self.data
+        start = np.array([data.joint(j).qpos[0] for j in reacher.joints])
         want = np.asarray(leg.posture, dtype=float)
         steps = max(1, int(leg.seconds / CTRL_DT))
         for i in range(steps):
             data.ctrl[reacher.arm_ctrl] = start + (want - start) * (i + 1) / steps
-            for _ in range(TICKS_PER_CTRL):
-                mujoco.mj_step(reacher.model, data)
-                if reacher.on_substep is not None:
-                    reacher.on_substep()
-            tick()
+            yield
+            self._after_cycle()
         # The IK solver has been bypassed for this leg, so tell it where the arm
         # actually ended up. Without this the next mission plans from a stale
         # configuration and the whole exercise repeats one level up.
         reacher.sync()
-        say(leg.name, f"joints to park, {np.degrees(np.abs(want - start)).max():.0f}° "
-                      f"largest change")
-    elif leg.kind == "turn":
-        t = 0.0
-        while (reacher.tool_axis_error_deg(goal) > leg.tilt_stop
-               and t < leg.seconds):
-            reacher.step(goal)
-            tick()
-            t += CTRL_DT
-        say(leg.name, f"tool {reacher.tool_axis_error_deg(goal):.1f}° "
-                      f"off target axis in {t:.1f}s")
-    else:
-        raise ValueError(f"unknown leg kind {leg.kind!r}")
-    return None
+        self._say(leg.name,
+                  f"joints to park, "
+                  f"{np.degrees(np.abs(want - start)).max():.0f}° largest change")
+
+    # -- the mission ----------------------------------------------------------
+
+    def _escape(self):
+        """Back out of the row after a guard trip, then let the caller park.
+
+        Along -x, which is the one direction that always moves away from the
+        crop. The guard stays off for it: it has already fired, and re-firing
+        during the escape would strand the arm in the row.
+        """
+        reacher = self.reacher
+        self.guard.armed = False
+        here = self.data.site(self.tool_site).xpos.copy()
+        reacher.set_orientation_cost(ORIENTATION_COST)
+        reacher.approach = self.frame.into_row
+        yield from self._pump(reacher.drive_to_steps(
+            np.array([self.mission.stage_x, here[1], here[2]])))
+
+    def _fly(self):
+        """The mission, as a sequence of control cycles."""
+        row, box, guard = self.row, self.box, self.guard
+        self.gripper.open()
+        # Taken before the settle leg so it can be put back afterwards. See
+        # Row.settle: on any pick after the first in a sequence, a blanket reset
+        # re-welds already-harvested fruit to their stems and drags them out of
+        # the crate.
+        attached_before = row.attachment()
+        try:
+            for i, leg in enumerate(self.mission.legs):
+                self.leg = leg.name
+                if box is not None:
+                    box.leg = leg.name
+                if guard is not None:
+                    guard.leg = leg.name
+                yield from self._leg(leg)
+
+                if i == 0:
+                    # ⚠️ Nothing before this point counts. The weld overshoots
+                    # for ~50 ms on startup and the peak is above SNAP_N, so a
+                    # recorder armed any earlier reports the whole row falling
+                    # off the plant before the arm has moved. The settle leg
+                    # exists to let it find its resting force; the books open
+                    # afterwards.
+                    row.settle(attached_before)
+                    if box is not None:
+                        box.rebase(self.target)
+                    if guard is not None:
+                        guard.armed = True
+                elif leg.name == "extract":
+                    held = float(np.linalg.norm(
+                        self.fruit.xpos - self.data.site(self.tool_site).xpos))
+                    self.grasped = held < FRUIT_R * 2.0
+                    self._say("check",
+                              f"fruit {held * 1000:.0f} mm from the tool — "
+                              f"{'holding' if self.grasped else 'DROPPED'}")
+        except Aborted as stop:
+            self.aborted = stop.why
+            self._say("ABORT", f"{stop.why[3]} within {stop.why[1] * 1000:.0f} mm "
+                               f"during `{stop.why[0]}`")
+            yield from self._escape()
+
+        self.leg = ""
+        self.result = self._score()
+
+    def _score(self):
+        """What happened, including what it cost."""
+        row, box, guard = self.row, self.box, self.guard
+        incidents = box.sweep() if box is not None else []
+        return {
+            "fruit": self.target,
+            "target": self.mission.target,
+            "in_bin": bool(crate_contains(self.fruit.xpos, self.frame.bin_pos,
+                                          BIN_HALF, BIN_WALL)),
+            "grasped": bool(self.grasped),
+            "broke": bool(not row.attached(self.target)),
+            "peak_n": float(row.peak[self.target]),
+            "seconds": self.clock,
+            "aborted": self.aborted,
+            "incidents": incidents,
+            "lost": sum(1 for h in incidents if h.detached),
+            "disturbed": sum(1 for h in incidents if not h.detached),
+            "clearance": (float(guard.min_seen) if guard is not None
+                          and np.isfinite(guard.min_seen) else float("nan")),
+            "planned": self.mission.clearance,
+            "lane": self.mission.lane,
+            "applied": list(self.mission.applied),
+        }
 
 
 def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
             verbose=False):
-    """Fly a planned mission. Returns what happened, including what it cost.
+    """Fly a planned mission here and now. Returns what happened.
+
+    A thin drainer over `MissionRun`, which is where the executor actually
+    lives. One arm, one loop — exactly what this function always did, and every
+    Week 1-4 caller keeps its numbers. `farm.duo.Machine` drives the same
+    `MissionRun` differently, which is how two arms share one physics loop.
 
     ⚠️ **Which arm this is comes from the `reacher`, never from `TOOL_SITE`.**
     That constant is `"tool0"`, which on a two-armed machine is arm a's — arm a
@@ -256,22 +489,6 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
     worked, `outcomes.classify` binned them as drops, and arm b would have looked
     like an arm that cannot hold a tomato.
     """
-    data = reacher.data
-    tool_site = reacher.tool_site
-    target = mission.target
-    fruit = data.body(target)
-    clock = [0.0]
-    grasped = [False]
-
-    # ⚠️ **The crate and the escape direction come off the mission, not off this
-    # module's globals, and that is the fix for the bug in the comment below.**
-    # `from mission import BIN_POS` copied the Week 1-4 crate at the world
-    # origin into this module at import time, so `farm.armframe` had to rebind
-    # it here as well as in `mission` — and rebinding is what made two arms
-    # mid-mission impossible. A plan now carries its own frame, so this reads
-    # the crate belonging to the arm that flew the plan. See `mission.ArmFrame`.
-    fr = mission.arm_frame
-
     # ⚠️ Per *physics* step, not per control cycle, and the difference is not
     # academic: polled at 100 Hz a stiff arm pulling on a weld drove the force
     # to 77 N before a 12 N threshold was noticed — an effective detach force
@@ -280,85 +497,9 @@ def execute(mission, reacher, gripper, row, box=None, guard=None, on_tick=None,
     # and the evidence for it are read on the same step.
     reacher.on_substep = row.update if box is None else box.substep
 
-    def tick(_t=None):
-        clock[0] += CTRL_DT
-        if guard is not None and not guard.check():
-            raise Aborted(guard.tripped)
-        if on_tick is not None:
-            on_tick(_t)
-
-    def say(state, note=""):
-        if verbose:
-            p = data.site(tool_site).xpos
-            print(f"    {state:<9} tool [{p[0]:+.2f} {p[1]:+.2f} {p[2]:+.2f}]"
-                  f"   {note}")
-
-    gripper.open()
-    # Taken before the settle leg so it can be put back afterwards. See
-    # Row.settle: on any pick after the first in a sequence, a blanket reset
-    # re-welds already-harvested fruit to their stems and drags them out of the
-    # crate.
-    attached_before = row.attachment()
-    aborted = None
-    try:
-        for i, leg in enumerate(mission.legs):
-            if box is not None:
-                box.leg = leg.name
-            if guard is not None:
-                guard.leg = leg.name
-            _run_leg(leg, reacher, gripper, row, target, tick, say)
-
-            if i == 0:
-                # ⚠️ Nothing before this point counts. The weld overshoots for
-                # ~50 ms on startup and the peak is above SNAP_N, so a recorder
-                # armed any earlier reports the whole row falling off the plant
-                # before the arm has moved. The settle leg exists to let it find
-                # its resting force; the books open afterwards.
-                row.settle(attached_before)
-                if box is not None:
-                    box.rebase(target)
-                if guard is not None:
-                    guard.armed = True
-            elif leg.name == "extract":
-                held = float(np.linalg.norm(fruit.xpos
-                                            - data.site(tool_site).xpos))
-                grasped[0] = held < FRUIT_R * 2.0
-                say("check", f"fruit {held * 1000:.0f} mm from the tool — "
-                             f"{'holding' if grasped[0] else 'DROPPED'}")
-    except Aborted as stop:
-        aborted = stop.why
-        say("ABORT", f"{stop.why[3]} within {stop.why[1] * 1000:.0f} mm "
-                     f"during `{stop.why[0]}`")
-        # Back out along -x, which is the one direction that always moves away
-        # from the crop, then park. The guard stays off for it: it has already
-        # fired, and re-firing during the escape would strand the arm in the row.
-        guard.armed = False
-        here = data.site(tool_site).xpos.copy()
-        reacher.set_orientation_cost(ORIENTATION_COST)
-        reacher.approach = fr.into_row
-        reacher.drive_to(np.array([mission.stage_x, here[1], here[2]]),
-                         on_tick=tick)
-
-    incidents = box.sweep() if box is not None else []
-    return {
-        "fruit": target,
-        "target": mission.target,
-        "in_bin": bool(crate_contains(fruit.xpos, fr.bin_pos, BIN_HALF,
-                                      BIN_WALL)),
-        "grasped": bool(grasped[0]),
-        "broke": bool(not row.attached(target)),
-        "peak_n": float(row.peak[target]),
-        "seconds": clock[0],
-        "aborted": aborted,
-        "incidents": incidents,
-        "lost": sum(1 for h in incidents if h.detached),
-        "disturbed": sum(1 for h in incidents if not h.detached),
-        "clearance": (float(guard.min_seen) if guard is not None
-                      and np.isfinite(guard.min_seen) else float("nan")),
-        "planned": mission.clearance,
-        "lane": mission.lane,
-        "applied": list(mission.applied),
-    }
+    run = MissionRun(mission, reacher, gripper, row, box=box, guard=guard,
+                     on_tick=on_tick, verbose=verbose)
+    return run.run(reacher.advance)
 
 
 def _plan_blind(planner, row, name):
