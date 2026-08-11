@@ -60,10 +60,15 @@ routes refused.
 
 ⚠️ Every string the viewer prints comes from `ArmState`, which is written **at
 the point the thing happens** — `phase` is set beside the call it describes, and
-`leg` is read live out of `mission.Guard.leg`, which `week2_pick.execute` sets
-per leg as it flies. Nothing here is a script of captions replayed on a timer. If
-the planner refuses a fruit, the panel says so because `refuse()` was called with
-the breach the planner returned, not because a refusal was due.
+`leg` is read live off `week2_pick.MissionRun.leg`, which the executor sets per
+leg as it flies. Nothing here is a script of captions replayed on a timer. If
+the planner refuses a fruit, the panel says so because `ArmState.route` was
+handed the `Mission` the planner returned and read the breach off it, not
+because a refusal was due.
+
+`ArmState.begin`, `route`, `follow_leg` and `finish` are the four places that
+write it, and they sit next to the four things that happen: a target is chosen,
+a route comes back, a leg starts, a pick ends.
 
     ./.venv/bin/python simulation/mujoco/farm/duo.py            # headless, a row
     ./.venv/bin/python simulation/mujoco/farm/duo.py --stops 2  # short
@@ -97,19 +102,25 @@ STOP_MERGE_M = 0.25
 # How far an arm may reach **toward the other arm**, in metres along the row,
 # while that arm is also working.
 #
-# ⚠️ **This is the price of concurrency and it is a measured number, not a
-# margin picked to be safe.** Both arms' park postures fold the elbow back over
-# the shoulder — which is the whole reason `PARK` exists (`mission.PARK`: home
-# is inside the canopy) — and folding it back puts arm a's upper arm at
-# x = 0.716 and arm b's at x = 0.884. **They interleave across the aisle**, and
-# the only thing holding them apart is the 500 mm `trolley.ARM_STAGGER` along
-# the row. So an arm reaching for a fruit *behind* itself swings its elbow down
-# the row straight through the other arm's parked volume.
+# ⚠️ **A measured number, not a margin picked to be safe** — though it is not on
+# its own what makes concurrency safe; `STOW` and `DeckCentre` are. Both arms'
+# park postures fold the elbow back over the shoulder — which is the whole
+# reason `PARK` exists (`mission.PARK`: home is inside the canopy) — and folding
+# it back puts arm a's upper arm at x = 0.716 and arm b's at x = 0.884. **They
+# interleave across the aisle**, and the only thing holding them apart is the
+# 500 mm `trolley.ARM_STAGGER` along the row. So an arm reaching for a fruit
+# *behind* itself swings its elbow down the row straight through where the other
+# arm's parked volume would be.
 #
 # While the arms were serialised this could not happen: the idle arm was stowed
 # (+318 mm, see `STOW`) and the working arm had the deck to itself. It is the
 # first thing that broke when both were let fly, and it broke correctly — the
 # planner refused, with `park: forearm_link within -129 mm of arm b`.
+#
+# ⚠️ What this constant buys is that each arm's fruit are biased to **its own
+# side of the stagger**, so the two arms' work is spatially separated at every
+# stop rather than overlapping in the middle. That reduces how often they have
+# to wait for each other; it is not what stops them touching.
 #
 # Swept with arm a driven to three crop heights at each offset from its own
 # base, worst arm-vs-arm sphere gap over the three:
@@ -761,10 +772,14 @@ class Machine:
         self.model, self.data, self.row = model, data, row
         self.on_tick = on_tick
         self.boxes = {}          # tag -> CarryTrace, only while that arm flies
+        self.runs = {}           # tag -> MissionRun, only while that arm flies
         self.cycles = 0
-        # Both arms flying at once is only ever true for the cycles where both
-        # have a mission; booked so the run can prove concurrency happened
-        # rather than claim it.
+        # ⚠️ **Counts cycles where both arms were actually *executing a leg*,
+        # not cycles where both merely had a mission open.** An arm held at the
+        # deck-centre gate still has its mission and its recorder registered
+        # while it stands still, and counting that as concurrency would inflate
+        # the one number this whole change is judged on. `waiting_for` is set by
+        # `MissionRun` exactly while it is gated, so it is the honest filter.
         self.concurrent_cycles = 0
         self.watchers = []       # called once per control cycle, after physics
 
@@ -803,7 +818,9 @@ class Machine:
             if not ran:
                 break
             self.cycles += 1
-            if len(self.boxes) > 1:
+            moving = sum(1 for r in self.runs.values()
+                         if not r.done and not r.waiting_for)
+            if moving > 1:
                 self.concurrent_cycles += 1
             self.advance()
             for w in self.watchers:
@@ -1041,7 +1058,7 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         # The drive joint, every other arm's six, and both deck heads' pan and
         # tilt — everything in the model this arm's IK must not reach with. See
         # `armframe.pin_base` and `decks.head_joints`.
-        pin = [trolley.DRIVE_JOINT] + armframe._deck_joints(model)
+        pin = [trolley.DRIVE_JOINT] + armframe.deck_joints(model)
         for p in others:
             pin += [p + j for j in JOINTS]
 
@@ -1210,6 +1227,7 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             run_ = MissionRun(m, reacher, gripper, row, box=trace, guard=guard,
                               gate=lambda leg, _t=tag: centre.claim(_t, leg))
             me.run = run_
+            machine.runs[tag] = run_
             try:
                 while run_.command():
                     me.follow_leg()
@@ -1223,6 +1241,7 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                     yield
             finally:
                 machine.boxes.pop(tag, None)
+                machine.runs.pop(tag, None)
                 centre.release(tag)
                 me.run = None
                 me.waiting_on = ""

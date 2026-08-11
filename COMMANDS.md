@@ -586,6 +586,11 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 # 🎬 record both windows: <out>_sensors.mp4 and <out>_mission.mp4
 ./.venv/bin/python simulation/mujoco/two_arm_farm.py --out twoarm
+
+# 🪟🪟 cheaper live view: render the panels at half size and scale up.
+#     The window layout and the mp4 dimensions do not change, and the HSV
+#     detector keeps its own resolution — this is a display cost knob only.
+./.venv/bin/python simulation/mujoco/two_arm_farm.py --panel-scale 0.5
 ```
 
 `python 2armfarm.py` runs the same thing — it is a shim that execs the real module. ⚠️ A module name starting with a digit is not a legal Python identifier, so `2armfarm.py` can be *run* but never *imported*; all the code lives in `two_arm_farm.py` and nothing but the shim refers to the digit name.
@@ -710,7 +715,26 @@ WINDOW 1 — "vinea — SENSORS"        WINDOW 2 — "vinea — MISSION"
 # 🖼 aim the two heads apart, render both, print the angle between them.
 #    Writes twoarm_deck_a.png and twoarm_deck_b.png. PASS if > 30 deg.
 ./.venv/bin/python simulation/mujoco/farm/decks.py --split
+
+# 📝 drive the whole aisle with both heads sweeping, and log the
+#    camera-to-trolley offset every control cycle. PASS if it never moves.
+./.venv/bin/python simulation/mujoco/farm/decks.py --offset
 ```
+
+**`--offset` is the check that the two deck-camera bugs are gone**, and it is a measurement rather than a look at the render. Both bugs were one mechanism: the head was a worldbody **mocap body** driven from Python while its own mast was a geom on the **trolley body**, so one rigid assembly moved by two transports. `Drive.drive_to` steps physics for a whole traverse and never called `follow`, so the camera sat frozen for the drive and then jumped the full distance (the *teleport*); and nothing calls `follow` at all during the harvest, so the mast rode away and left the camera behind (the *desync*).
+
+The head is now a child body of the trolley — `deck_yaw_<tag>` → `deck_head_<tag>`, pan and tilt hinges, position-servoed — so position is inherited through the model tree and only articulation is driven from Python. There is no second mechanism and so nothing to desync. On seed 7:
+
+```
+  driving -3.60 m to +3.60 m, both heads articulating
+  2084 control cycles, trolley odometer 7.20 m
+
+  arm            pan swept   pivot offset dev    lens offset dev
+  A       -30.0.. +30.0 deg           0.000 mm            50.0 mm
+  B       -30.0.. +30.0 deg           0.000 mm            50.2 mm
+```
+
+⚠️ **The pivot offset is the invariant; the lens offset is not.** The head's own axis must never move relative to the trolley — that is what "bolted to it" means, and it is exactly 0.000 mm. The lens *should* move, by up to 50 mm, because that is the pan turning it on a 90 mm yoke. Both are printed so the two can never be mistaken for each other.
 
 **Prints two lines and writes two stills.** `farm/scout.py`'s head is *one* pan-tilt unit on the aisle centreline that turns 180° at every stop to serve both rows. These are **two heads, one per arm**, each over its own arm's mount plate and each scanning only its own row — so they can look different ways at once, which is what `--split` measures: **103.4°** between the two lines of sight on seed 7, arm A on r1 and arm B on r0.
 
