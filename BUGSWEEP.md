@@ -269,3 +269,100 @@ have not swept for the others — gripper actuator names, pad geom sets, joint
 lists — beyond what entry 55 already fixed. `farm/trolley.py:147` carries a
 comment saying `week2_pick` and `carrytrace` "all look up `j1`, `tool0`,
 `wrist3_link`", which suggests there is a `j1` version of this waiting.
+
+---
+
+### Bug 7 — the pick state machine exists twice — **DONE**, commits `40d2bab` + `72cb554`
+
+Split into two commits on purpose, so you can drop the behaviour change and
+keep the extraction, or the reverse.
+
+**What it was.** `week1_gripper.run_pick` and `week1_mousereach.pick_cycle`
+were the same seven-state sequence written twice — the `say` and `go` reporting
+helpers were character-for-character identical in both — and had already
+diverged on the two things that matter.
+
+**Did it reproduce.** Yes for the duplication, and yes for entry **16**. **No
+for entry 17**, and that is the finding — see below.
+
+**What I changed.** `simulation/mujoco/pickcycle.py`: one `run_cycle`, a `Plan`
+describing a pick, and two `Detach` strategies — `Lift` (a table; the grasp is
+the whole test) and `Pull` (a truss; the stem carries the load until it does
+not). Four parameters cover every real difference. 126 lines deleted from the
+two demos, 77 added.
+
+**The bar, and why it is not the one the entry names.** See **C1**. Held to
+`tests/baselines/`, recorded in commit `03df1a4` *before* the refactor: both
+cycles over 12 points, 158 and 9 lines of every waypoint, arrival error and
+snap force.
+
+| check | result |
+|---|---|
+| `tests/baselines/week1_mousereach.txt` | **158 lines byte-identical** |
+| `tests/baselines/week1_gripper.txt` | **9 lines byte-identical** |
+| all three documented invocations + `--wave` | byte-identical |
+| the abort branch (no board point reaches it) | byte-identical, including dict key order |
+| `tests/test_sim.py` | 6/6 |
+
+The baseline files do not appear in `40d2bab`'s diff, which is the point of
+having recorded them two commits earlier.
+
+**Entry 16 — fixed, and it was free.** `week1_gripper` read "home" from
+wherever the tool was standing at the top of the cycle. Fixed to `park_pose`,
+and the demo is byte-identical across the change, because it runs one cycle
+from a fresh reset where the tool is *already* at the home posture. The drift
+only ever appeared on a second cycle, which this file has never run — entry
+62's shape again: the untested path is the one nobody types.
+
+**⚠️ Entry 17 — does NOT reproduce, and the entry's account of it is wrong.**
+
+The entry says `week1_gripper` "would hit bugs 16 and 17 again from the right
+starting posture". Bug 16, yes. Bug 17, not from the posture entry 17 names:
+
+| carry, direct to crate | `week1_gripper` scene | `week1_mousereach` scene |
+|---|---|---|
+| from `[0.42, +0.25, 1.00]` — entry 17's own case | **arrives, 3.2 mm** | 378 mm short (entry 17) |
+| 23 reachable start postures swept | **2 stall, worst 201 mm** | **11 stall, worst 447 mm** |
+
+So it is live but weak, and **the variable is the crate, not the arm**. The row
+scene's crate sits at `[0.15, -0.80]`, 300 mm further out in -y than the
+table scene's `[0.30, -0.50]`, and that is what turns a long move into one
+`mink` cannot walk to.
+
+I did **not** add a transit waypoint. Doing so means choosing a transit point
+for this scene — the row scene's does not belong to it — and that is a tuned
+constant. It is in the ranked list below as a decision for you.
+
+---
+
+### Bug 5 — the board's guarantee is unguarded — **DONE**, commit `1cf79c6`
+
+**What it was.** `week1_mousereach` promises, in its banner, that every click
+on the board is pickable. Nothing checked it, and the numbers behind it were
+measured against one gripper, one `APPROACH_GAP`, one `RETRACT_GAP` and one
+crate position.
+
+**Did it reproduce.** The *absence* of the check, yes. The guarantee itself
+turns out to hold.
+
+**What I built.** `tests/board_walk.py` — a grid over the advertised extent
+with endpoints included, one full pick per point, drawn as the board's own map.
+
+**Result: 42/42 on 7×6, and 99/99 on 11×9.** The guarantee holds everywhere I
+tested. That 42 is also the first time the build log's "42/42 mouse picks" has
+come out of a command rather than out of counting by hand in a window — see
+**C1**.
+
+**I checked that it bites rather than merely passes.** Moving the crate to
+Week 2's `[0.30, -0.52]` — the move entry 42 blames — takes the same walk to
+**18/20**, one unreachable and one dropped. So the guard catches the change it
+exists to catch.
+
+⚠️ One caveat worth recording: entry **15**'s own stated crate position,
+`[0.15, -0.55]`, does **not** fail today — 20/20. The gaps and the gripper have
+both moved since that entry was written, so its geometry no longer describes
+this scene. It is a fixed entry so this is not a contradiction, but anyone
+reaching for it as a regression case should know it is no longer one.
+
+Runtime ~31 s for 42 points, ~72 s for 99. Nightly or pre-commit, as the entry
+asks — not in `test_sim.py`.
