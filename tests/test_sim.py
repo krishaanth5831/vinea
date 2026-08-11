@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""The tests that have to pass before a commit.
+
+Bug log entry 6: every check in this repo was ad-hoc, run by hand, and its
+result lived in a terminal that is now closed. This is the minimum that entry
+asks for, and no more:
+
+    1. one pick completes end to end
+    2. the weld holds within 1 mm, and releases on eq_active = 0
+    3. tool0 sits on the gripper's own pinch site
+    4. reset_home puts a free body at its spawn pose
+
+    ./.venv/bin/python tests/test_sim.py
+
+Exits non-zero if any check fails. Same shape as `scripts/phase0_smoketest.py`
+deliberately — that file already passes 6/6 and a second convention for saying
+PASS would be one convention too many. There is no test framework here on
+purpose: the repo has none, and adding pytest to run four assertions would be a
+dependency bought with somebody else's money.
+
+**These are correctness checks, not measurements.** None of them asserts a
+headline number. A test that pins 42/42 or 10/10 into an assertion turns every
+honest change to the physics into a failing build, and the numbers belong in
+the build log where their assumptions are written next to them. What these
+check is that the mechanisms those numbers are built on still work at all.
+
+Runtime is a few seconds. Anything slower than that does not get run before
+every commit, whatever the README claims.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# MuJoCo needs an offscreen GL backend when there is no display attached. None
+# of these checks renders, but building a model can still touch GL.
+os.environ.setdefault("MUJOCO_GL", "egl")
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "simulation" / "mujoco"))
+
+import numpy as np  # noqa: E402
+
+RESULTS = []
+
+
+def check(name):
+    """Decorator: run a check, record pass/fail, never raise."""
+
+    def wrap(fn):
+        try:
+            detail = fn()
+            RESULTS.append((True, name, detail))
+        except Exception as exc:  # noqa: BLE001 - a test run reports, never crashes
+            RESULTS.append((False, name, f"{type(exc).__name__}: {exc}"))
+        return fn
+
+    return wrap
+
+
+# --- 1. one pick completes end to end ---------------------------------------
+
+@check("a pick completes end to end")
+def _pick_end_to_end():
+    """Week 1's table pick, run headless, scored on where the fruit ended up.
+
+    Deliberately the *whole* cycle rather than a stubbed one. The states —
+    approach, descend, close, lift, carry, release, home — are the same states
+    Week 4 harvests with, and a cycle that reports a grasp it did not make is
+    the failure this repo has hit most often (entries 33, 34, 36, 55).
+    """
+    import mujoco
+    import week1_gripper
+    from fr5 import MAX_REACH_GRIPPER
+    from reach import Gripper, Reacher
+
+    model = week1_gripper.build_scene()
+    data = mujoco.MjData(model)
+    reacher = Reacher(model, data, standoff=0.0, max_reach=MAX_REACH_GRIPPER,
+                      reached_mm=week1_gripper.REACHED_MM_LOADED)
+    gripper = Gripper(model, data)
+    gripper.open()
+
+    res = week1_gripper.run_pick(reacher, gripper, verbose=False)
+    assert res["grasped"], "the fingers closed but the fruit stayed on the table"
+    assert res["in_bin"], f"carried but not crated — fruit ended at {res['tomato'].round(3)}"
+    return f"grasped and crated, fruit at {res['tomato'].round(3)}"
+
+
+# --- 2. the weld holds, and releases ----------------------------------------
+
+@check("weld holds within 1 mm and releases on eq_active=0")
+def _weld_holds_and_releases():
+    """The detachment model, which is the one real difference from a table pick.
+
+    Two halves, and the second is the one that has bitten. A weld that holds is
+    easy to see; a weld that has been switched off but is still carrying load
+    looks exactly like a weld that is working. So this asserts the fruit is
+    held at the stem *and* that it leaves once the constraint is cleared.
+
+    1 mm is the tolerance the bug log names. For scale, entry 19's un-zeroed
+    weld anchor sagged this same fruit 160 mm with nothing pulling on it, and
+    threw no error.
+    """
+    import mujoco
+    import week1_mousereach as mr
+
+    model = mr.build_scene()
+    data = mujoco.MjData(model)
+    eq_id = model.equality("peduncle").id
+
+    pos = mr.tomato_on_panel(mr.panel_to_world(0.0, 0.60))
+    mr.place_tomato(model, data, eq_id, pos)
+
+    # Let gravity have a go at it. A weld with a bad anchor sags over about
+    # this long, so a single mj_forward would not catch entry 19.
+    for _ in range(500):
+        mujoco.mj_step(model, data)
+    held = float(np.linalg.norm(data.body("tomato").xpos - data.mocap_pos[mr.STEM_MOCAP]))
+    assert held < 0.001, f"weld sagged {held * 1000:.1f} mm — anchor or solref wrong"
+
+    # A hanging fruit reads its own weight. If it does not, the force this
+    # repo snaps stems on is not a force. 0.12 kg x 9.81 = 1.18 N.
+    f = mr.weld_force(model, data, eq_id)
+    assert 0.9 < f < 1.5, f"a still fruit reads {f:.2f} N, not its own 1.18 N"
+
+    z_before = float(data.body("tomato").xpos[2])
+    data.eq_active[eq_id] = 0
+    for _ in range(500):
+        mujoco.mj_step(model, data)
+    dropped = z_before - float(data.body("tomato").xpos[2])
+    assert dropped > 0.02, (f"eq_active=0 and the fruit still hangs "
+                            f"({dropped * 1000:.1f} mm of fall in 1.0 s)")
+    return (f"held to {held * 1000:.3f} mm at {f:.2f} N, "
+            f"fell {dropped * 1000:.0f} mm once released")
+
+
+# --- 3. the tool frame ------------------------------------------------------
+
+@check("tool0 sits on the gripper's pinch site")
+def _tool_on_pinch():
+    """PINCH_Z is a measured offset, and everything downstream trusts it.
+
+    `tool0` is this repo's own site on wrist3; `gr_pinch` is the one Menagerie
+    ships inside the 2F85. Every waypoint in every pick is written as "put
+    tool0 here", so if these two drift apart, every grasp misses by the gap and
+    nothing anywhere reports an error.
+
+    Checked at more than one posture on purpose: two frames on the same rigid
+    body agree everywhere or nowhere, and a single check at home cannot tell
+    "the offset is right" from "the offset is wrong in a direction home hides".
+    """
+    import mujoco
+    from fr5 import GRIPPER_PREFIX, JOINTS, TOOL_SITE, build_fr5, reset_home
+
+    model = build_fr5(gripper=True)
+    data = mujoco.MjData(model)
+
+    gaps = []
+    for bend in (0.0, 0.4, -0.7):
+        reset_home(model, data)
+        for j in JOINTS:
+            data.joint(j).qpos[0] += bend
+        mujoco.mj_forward(model, data)
+        gaps.append(float(np.linalg.norm(
+            data.site(GRIPPER_PREFIX + "pinch").xpos - data.site(TOOL_SITE).xpos)))
+
+    worst = max(gaps)
+    assert worst < 0.001, (f"tool0 is {worst * 1000:.2f} mm off the pinch site — "
+                           f"PINCH_Z is wrong and every grasp misses by it")
+    return f"worst gap {worst * 1000:.3f} mm over 3 postures"
+
+
+# --- 4. reset_home ----------------------------------------------------------
+
+@check("reset_home puts a free body at its spawn pose")
+def _reset_home_free_body():
+    """Entry 11, and the reason entry 3 exists.
+
+    `mj_resetDataKeyframe` reads a keyframe, and `spec.add_key` stored a flat
+    six-number vector back when six numbers described the whole scene. MuJoCo
+    pads a short keyframe with **zeros** rather than each body's spawn pose, so
+    every free body in the scene is teleported to the world origin — through
+    the floor — silently. `qpos0` had it right all along.
+
+    So this checks both directions: `reset_home` restores the spawn pose, and
+    the keyframe does not. The second assertion is the one that matters. If it
+    ever starts passing, MuJoCo changed its padding behaviour and this test is
+    the only thing that will say so.
+    """
+    import mujoco
+    import week1_gripper
+    from fr5 import reset_home
+
+    model = week1_gripper.build_scene()
+    data = mujoco.MjData(model)
+    spawn = week1_gripper.TOMATO_POS
+
+    # Shove it somewhere it certainly does not belong, then reset.
+    reset_home(model, data)
+    jnt = model.body("tomato").jntadr[0]
+    qadr = model.jnt_qposadr[jnt]
+    data.qpos[qadr:qadr + 3] = [1.4, 1.4, 1.4]
+    mujoco.mj_forward(model, data)
+
+    reset_home(model, data)
+    err = float(np.linalg.norm(data.body("tomato").xpos - spawn))
+    assert err < 1e-6, f"reset_home left the fruit {err * 1000:.1f} mm off its spawn pose"
+
+    # And the reset that lies about it.
+    keyed = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, keyed, 0)
+    mujoco.mj_forward(model, keyed)
+    strayed = float(np.linalg.norm(keyed.body("tomato").xpos - spawn))
+    assert strayed > 0.1, (
+        "mj_resetDataKeyframe no longer teleports free bodies to the origin — "
+        "MuJoCo's short-keyframe padding changed, so re-read bug log entries 3 and 11")
+    return (f"spawn restored to {err * 1e6:.1f} um; "
+            f"the keyframe strands it {strayed * 1000:.0f} mm away")
+
+
+@check("reset_home homes every scene that used the keyframe")
+def _reset_home_on_keyframe_scenes():
+    """The two scenes bug 3 names: `week1_reach`'s and `fr5.main`'s.
+
+    Neither has a free body today, which is exactly why the keyframe was safe
+    in them and why nothing caught it. This asserts the property the fix is
+    for: after `reset_home` the arm is at HOME in both, so the two call sites
+    can be switched without anything moving.
+    """
+    import mujoco
+    import week1_reach
+    from fr5 import HOME, JOINTS, build_fr5, reset_home
+
+    out = []
+    scenes = [("week1_reach", week1_reach.build_scene()),
+              ("fr5.main", build_fr5(gripper=False))]
+    for name, model in scenes:
+        data = mujoco.MjData(model)
+        reset_home(model, data)
+        q = np.array([data.joint(j).qpos[0] for j in JOINTS])
+        err = float(np.abs(q - HOME).max())
+        assert err < 1e-9, f"{name}: arm is {err:.2e} rad off HOME after reset_home"
+        out.append(name)
+    return f"HOME restored in {', '.join(out)}"
+
+
+def main():
+    print("Vinea simulation tests")
+    print("=" * 72)
+    width = max(len(n) for _, n, _ in RESULTS)
+    for ok, name, detail in RESULTS:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name.ljust(width)}  {detail}")
+    print("=" * 72)
+    failed = [n for ok, n, _ in RESULTS if not ok]
+    if failed:
+        print(f"{len(failed)} check(s) failed: {', '.join(failed)}")
+        return 1
+    print(f"All {len(RESULTS)} checks passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

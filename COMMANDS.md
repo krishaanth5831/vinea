@@ -55,6 +55,14 @@ If you want to see the robot do something interesting, in order:
 
 Run this after any machine rebuild. If it is not 6/6, nothing below is trustworthy.
 
+```bash
+# 📝 the mechanisms every demo below is built on — a pick, the weld, the tool
+#    frame, the reset. About a second; run it before every commit.
+./.venv/bin/python tests/test_sim.py
+```
+
+The smoke test says the *machine* works. This one says the *repo* does. Neither asserts a headline number — 42/42, 10/10 and the rest live in the build log with their assumptions written next to them, and pinning them into an assertion would turn every honest change to the physics into a failing build.
+
 ---
 
 ## Week 1 — the arm, the gripper, reaching a point
