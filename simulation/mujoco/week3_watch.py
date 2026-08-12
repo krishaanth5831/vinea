@@ -389,7 +389,18 @@ class Sink:
     QUIT_W, QUIT_H, QUIT_PAD = 140, 36, 12
 
     def __init__(self, live=True, out=None, fps=30, title="vinea - week 3",
-                 on_click=None, on_key=None):
+                 on_click=None, on_key=None, on_move=None):
+        # `on_move(x, y)` receives the pointer position, in window pixels,
+        # whenever it moves over the window. Added for `farm.mousereach`, which
+        # shows what a click *would* do — which band it would land in, whether
+        # it would be refused and why — before the button goes down. A demo
+        # that only tells you after you clicked has already made the mistake in
+        # front of the person watching.
+        #
+        # ⚠️ Cheap on purpose: this fires at pointer rate, so the callback is
+        # expected to store two integers and nothing else. Anything that
+        # composites a frame belongs on the panel path, not here.
+        self.on_move = on_move
         # `on_click(x, y)` receives every left-click that is not on the QUIT
         # button, in window pixels. Week 4 uses it to place fruit by clicking
         # the deck panel; leaving it None keeps Week 3's behaviour exactly.
@@ -419,6 +430,10 @@ class Sink:
     def _on_mouse(self, event, x, y, flags, param):
         import cv2
 
+        if event == cv2.EVENT_MOUSEMOVE:
+            if self.on_move is not None:
+                self.on_move(x, y)
+            return
         if event != cv2.EVENT_LBUTTONDOWN:
             return
         if self._quit_rect is not None:

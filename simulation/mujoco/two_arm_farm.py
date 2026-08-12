@@ -10,11 +10,22 @@ fed from offscreen EGL renders:
     | HSV ripeness | HSV ripeness |    | what it found, | trolley + both |
     +--------------+--------------+    | and what it    | arms working   |
     | arm1 deck    | arm2 deck    |    | did about it   |                |
-    | own row, own | own row, own |    +----------------+----------------+
-    | pan/tilt     | pan/tilt     |    | PIPELINE       | PER-ARM STATS  |
+    | HSV ripeness | HSV ripeness |    +----------------+----------------+
+    | own row+pan  | own row+pan  |    | PIPELINE       | PER-ARM STATS  |
     +--------------+--------------+    | what each arm  | pick times,    |
                                        | is doing NOW   | running mean   |
                                        +----------------+----------------+
+
+⚠️ **All four camera panels draw the same classifier, and there is only one of
+it.** `farm.overlay`, over `farm.scout.StageDetector` and `stage_of` — which is
+the code `duo.DuoScout.look` calls to build the map, so a deck box is a *view*
+of a decision the robot already makes rather than a second opinion computed for
+the display. The deck panels additionally print the two measured ways that
+classifier is wrong — per-band recall, green weakest at 74%, and touching fruit
+being dropped rather than merged — because an overlay is the most persuasive
+thing in the window and the easiest place to lie. Both numbers were re-measured
+on *these* cameras rather than carried over from the shared scouting head, which
+sits 100 mm further off the row and does worse; see `farm.overlay.RECALL`.
 
 ⚠️ **Both windows are OpenCV windows over offscreen EGL renders, and there is no
 GLFW viewer anywhere in this process.** `mujoco.viewer.launch_passive` needs a
@@ -156,8 +167,10 @@ class DuoMapPanel:
     and for the same reason.
     """
 
-    def __init__(self, w=MISS_W, h=MISS_H, pad=30):
+    def __init__(self, w=MISS_W, h=MISS_H, pad=30, underlay=None, title=None):
         self.w, self.h, self.pad = w, h, pad
+        self.underlay = underlay
+        self.title = title
         self.y0, self.y1 = -house.HOUSE_HALF_Y - 0.6, house.HOUSE_HALF_Y + 0.6
         self.x0 = house.ROW_X0 - 0.9
         self.x1 = house.row_x(house.N_ROWS - 1) + 0.9
@@ -169,6 +182,19 @@ class DuoMapPanel:
         u = self.pad + (y - self.y0) * self.s
         v = self.pad + 26 + (x - self.x0) * self.s
         return int(round(u)), int(round(v))
+
+    def unpx(self, u, v):
+        """Panel pixel -> world (x, y). The inverse of `px`, and its neighbour.
+
+        ⚠️ **Written here rather than in whatever wants to click**, because the
+        two have to agree exactly and a second copy of `pad + 26` somewhere else
+        is a copy that gets left behind the next time this panel is re-laid out.
+        `farm.mousereach` places fruit through this, so a drift between the two
+        would be a tomato appearing somewhere other than where the cursor was.
+        """
+        y = self.y0 + (u - self.pad) / self.s
+        x = self.x0 + (v - self.pad - 26) / self.s
+        return float(x), float(y)
 
     def draw(self, state, data):
         import cv2
@@ -199,9 +225,17 @@ class DuoMapPanel:
         # about as empty and the two it ignores as full. A faint marker that
         # cannot be seen against its own background is not restraint, it is a
         # missing feature.
-        for t in state.trusses:
-            u, v = self.px(t.pos[0], t.pos[1])
+        for p in state.truth_points():
+            u, v = self.px(p[0], p[1])
             cv2.circle(img, (u, v - 6), 2, (120, 120, 120), -1, cv2.LINE_AA)
+
+        # --- anything the caller wants drawn in world coordinates -------------
+        # ⚠️ A hook, not a feature: `farm.mousereach` draws the reachable bands
+        # and the cursor here, and it has to be *under* the mapped dots so a
+        # band never hides a fruit. Nothing else uses it and the default is
+        # None, so an ordinary run composites exactly what it did before.
+        if self.underlay is not None:
+            self.underlay(img, self)
 
         # --- the routes ------------------------------------------------------
         ax = house.aisle_x(aisle)
@@ -277,7 +311,7 @@ class DuoMapPanel:
                     pass
 
         # --- legend ----------------------------------------------------------
-        _title(img, "THE MAP  —  what the robot believes it found")
+        _title(img, self.title or "THE MAP  —  what the robot believes it found")
         y = self.h - 8
         x = 8
         for nm in ("green", "breaker", "turning", "red"):
@@ -552,7 +586,23 @@ class Windows:
     """
 
     def __init__(self, model, data, state, fps=10, hsv_hz=3.0, out=None,
-                 arms=("a", "b"), panel_scale=1.0):
+                 arms=("a", "b"), panel_scale=1.0, on_click=None, on_key=None,
+                 on_move=None, record=None, live=None, map_panel=None):
+        """`out` records *instead of* showing; `record` records *as well as*.
+
+        ⚠️ **Two parameters and not one, because they are different requests.**
+        `--out` is the batch recorder and has always implied headless — it is
+        how the repo's videos are made. `--record` is "I am about to demo this
+        live and I will forget to screen-capture it", which means the windows
+        have to be up and clickable while the mp4 is being written. `Sink`
+        already does both independently; it was this constructor that tied
+        `live` to `out is None`.
+
+        `on_click(x, y)` and `on_key(code)` are routed to the **MISSION**
+        window only. The sensors window has no click target — the panels there
+        are camera views, and placing a fruit by clicking a camera view means
+        ray-casting through a lens that is panning while you aim at it.
+        """
         import mujoco
 
         from week3_watch import Sink
@@ -568,7 +618,7 @@ class Windows:
         self.rh = max(64, int(SENS_H * self.scale))
         self.aw = max(64, int(MISS_W * self.scale))
         self.ah = max(64, int(MISS_H * self.scale))
-        self.map = DuoMapPanel()
+        self.map = DuoMapPanel() if map_panel is None else map_panel
         self.detector = None
         self._boxes = {}
         self.frames = 0
@@ -626,12 +676,20 @@ class Windows:
         #
         # Panel *captions* are unaffected — `cv2.putText` renders an em dash
         # fine — so the dashes inside the frames stay.
-        self.sensors = Sink(live=out is None, out=None if out is None
-                            else f"{out}_sensors.mp4", fps=fps,
+        # ⚠️ Three states, not two: show, show-and-record, and neither. The
+        # last one is not "do less work" — the panels are still composed, the
+        # HSV overlay still runs and the map is still drawn, so a headless
+        # regression run exercises the same code the live window does. It only
+        # skips `cv2.imshow`.
+        stem = out if out is not None else record
+        show = (out is None) if live is None else bool(live)
+        self.sensors = Sink(live=show, out=None if stem is None
+                            else f"{stem}_sensors.mp4", fps=fps,
                             title="vinea - SENSORS (2 wrist + 2 deck)")
-        self.mission = Sink(live=out is None, out=None if out is None
-                            else f"{out}_mission.mp4", fps=fps,
-                            title="vinea - MISSION (map, aisle, pipeline)")
+        self.mission = Sink(live=show, out=None if stem is None
+                            else f"{stem}_mission.mp4", fps=fps,
+                            title="vinea - MISSION (map, aisle, pipeline)",
+                            on_click=on_click, on_key=on_key, on_move=on_move)
 
     def close(self):
         for r in self.r.values():
@@ -690,8 +748,33 @@ class Windows:
                     f"{'held' if stale else 'live'}", ARM_COL[tag])
         return img
 
-    def _deck_panel(self, tag):
+    def _deck_panel(self, tag, fresh=True):
+        """One arm's deck camera, with the ripeness call drawn on it.
+
+        ⚠️ **The same classifier the wrist panels use and the same one the
+        mapping pass scores itself with** — `farm.overlay`, over
+        `farm.scout.StageDetector` and `farm.scout.stage_of`, banded against
+        `farm.crop.STAGES`. There is deliberately no second classifier here: the
+        deck path already calls exactly this code in `duo.DuoScout.look`, which
+        is where every ripeness on the map comes from, so drawing it is a *view*
+        of a decision the robot already makes.
+
+        ⚠️ **These boxes are not the map's boxes, and the panel says so.** The
+        mapping pass detects on a 1280x960 `SensorCamera` render with depth;
+        this is a 480x360 view render with none. Same thresholds, same code,
+        smaller frame — so a fruit can be boxed here and missed there, or the
+        reverse. `banner`'s recall line is the number that says how often. The
+        wrist panels have had this property since they were written; naming it
+        is new.
+
+        ⚠️ **Display-only.** Nothing in this method is read by the router, the
+        planner, the guard or the executor, and nothing it computes is stored
+        anywhere they can see. `self._boxes` is a viewer cache keyed by camera
+        name and read only by `draw`.
+        """
         import cv2
+
+        from farm.scout import StageDetector
 
         cam = self.deck[tag]
         img = self._render(cam, SENS_W, SENS_H)
@@ -701,15 +784,43 @@ class Windows:
                             "build with arm_decks=True")
         pan, tilt = (st.head.current(self.data) if st.head is not None
                      else (0.0, 0.0))
-        _title(img, f"{st.name.upper()} DECK  —  row r{st.row}  —  "
-                    f"pan {pan:+.0f}deg", ARM_COL[tag])
-        # On its own strip rather than floated over the render — text at
+
+        # Same cadence and the same held-box handling as `_wrist_panel`: the
+        # detector runs at `--hsv-hz`, the calls are cached, and the boxes are
+        # redrawn thinner on the frames in between so a held box is not a claim
+        # about the frame under it. See that method for why caching the counts
+        # alone was wrong.
+        stale = not (fresh or cam not in self._boxes)
+        if not stale:
+            if self.detector is None:
+                self.detector = StageDetector()
+            # ⚠️ The deck panel is the one place in this window that knows its
+            # own range: the head sits over its arm's plate at
+            # `house.WORK_STANDOFF` from the row it works and never leaves it.
+            # So "how big is one tomato in this frame" is arithmetic here and a
+            # guess anywhere else, and the size half of `looks_fused` is only
+            # switched on where it is arithmetic.
+            self._boxes[cam] = overlay.find(
+                img, detector=self.detector,
+                fruit_px=overlay.fruit_diameter_px(SENS_H, decks.SCOUT_FOVY,
+                                          house.WORK_STANDOFF))
+        calls = self._boxes.get(cam, [])
+        overlay.draw(img, calls, stale=stale)
+
+        _title(img, f"{st.name.upper()} DECK  -  row r{st.row}  -  "
+                    f"pan {pan:+.0f}deg  -  HSV "
+                    f"{'held' if stale else 'live'}", ARM_COL[tag])
+        # Counts by band, the measured recall, and the cluster limitation — on
+        # their own strip rather than floated over the render, because text at
         # `SENS_H - 10` sits on the tile seam and the descenders are clipped by
-        # the `vstack` below it.
-        cv2.rectangle(img, (0, SENS_H - 22), (img.shape[1], SENS_H),
+        # the `vstack` below it. What the arm is doing keeps its line above the
+        # strip: it was here before the overlay was and the PIPELINE panel is a
+        # whole window away.
+        overlay.banner(img, calls)
+        cv2.rectangle(img, (0, SENS_H - 60), (img.shape[1], SENS_H - 42),
                       (24, 24, 24), -1)
-        cv2.putText(img, f"{st.phase}  {st.detail}"[:52], (8, SENS_H - 7),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, DIM, 1, cv2.LINE_AA)
+        cv2.putText(img, f"{st.phase}  {st.detail}"[:52], (6, SENS_H - 47),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, DIM, 1, cv2.LINE_AA)
         return img
 
     def compose_sensors(self, fresh):
@@ -723,7 +834,7 @@ class Windows:
                                           "run with --arms 2"))
                 continue
             tiles_top.append(self._wrist_panel(tag, fresh))
-            tiles_bot.append(self._deck_panel(tag))
+            tiles_bot.append(self._deck_panel(tag, fresh))
         return np.vstack([np.hstack(tiles_top), np.hstack(tiles_bot)])
 
     def compose_mission(self):
@@ -748,15 +859,26 @@ class Windows:
                             "PER-ARM STATS  —  from execute()'s seconds")
         return np.vstack([np.hstack([m, aisle]), np.hstack([pipe, stats])])
 
+    def push_frame(self, fresh=None):
+        """Compose and push both windows once. `fresh=None` follows `--hsv-hz`.
+
+        Split out of `tick` so a caller with its own loop — the placement phase
+        of `farm.mousereach`, which is not being driven by a run at all — can
+        put frames up at the same cadence and with the same detector rate
+        instead of re-detecting on every frame it happens to draw.
+        """
+        self._panel_n += 1
+        if fresh is None:
+            fresh = (self._panel_n % self.hsv_every) == 0
+        self.sensors.push(self.compose_sensors(fresh))
+        self.mission.push(self.compose_mission())
+
     def tick(self, _t=None):
         """The `on_tick` handed to the runner. Cheap on the frames it skips."""
         self.frames += 1
         if self.frames % self.every:
             return
-        self._panel_n += 1
-        fresh = (self._panel_n % self.hsv_every) == 0
-        self.sensors.push(self.compose_sensors(fresh))
-        self.mission.push(self.compose_mission())
+        self.push_frame()
         # ⚠️ Booked per phase, not as one average. The mapping pass renders two
         # 1280x960 depth+RGB sensor pairs per scan pose on top of the panels,
         # and the harvest does not — so a single mean over the whole run is a
@@ -779,9 +901,7 @@ class Windows:
 
     def flush(self, n=1):
         for _ in range(n):
-            self._panel_n += 1
-            self.sensors.push(self.compose_sensors(True))
-            self.mission.push(self.compose_mission())
+            self.push_frame(fresh=True)
 
 
 # --- stills ------------------------------------------------------------------
@@ -859,6 +979,17 @@ def main():
     import argparse
     import os
     import time
+
+    # ⚠️ **A subcommand, checked before argparse sees anything.** `mousereach`
+    # is the same machine, the same windows and the same `duo.run` with a person
+    # holding the mouse instead of `crop.spawn` — so it belongs on this command
+    # rather than in a fork of it, and it takes its own flags. Dispatching here
+    # rather than through `add_subparsers` keeps every existing invocation
+    # byte-identical: `two_arm_farm.py --seed 7` never reaches this branch.
+    if len(sys.argv) > 1 and sys.argv[1] == "mousereach":
+        from farm import mousereach
+
+        return mousereach.main(sys.argv[2:])
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--aisle", type=int, default=0)

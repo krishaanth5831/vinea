@@ -615,6 +615,42 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 `python 2armfarm.py` runs the same thing — it is a shim that execs the real module. ⚠️ A module name starting with a digit is not a legal Python identifier, so `2armfarm.py` can be *run* but never *imported*; all the code lives in `two_arm_farm.py` and nothing but the shim refers to the digit name.
 
+#### 🪟🪟 `mousereach` — hand somebody the mouse
+
+```bash
+# 🪟🪟 THE DEMO. Click a band to hang a tomato, SPACE to send the machine.
+python 2armfarm.py mousereach
+./.venv/bin/python simulation/mujoco/two_arm_farm.py mousereach
+
+# 🎬 the same, live AND recording — --record shows the windows and writes the
+#    mp4s; --out is the batch recorder and shows nothing
+python 2armfarm.py mousereach --record demo
+
+# 📝 the reproducible version: hang an exact set, no mouse, no window
+./.venv/bin/python simulation/mujoco/two_arm_farm.py mousereach --headless \
+    --script "a:+1.20:mid:red,b:-0.35:low:green"
+```
+
+| key | |
+|---|---|
+| click a band | hang a tomato there |
+| `T` / `1` `2` `3` `4` | red / turning / breaker / green — **only red gets picked** |
+| `Z` | hang height, low / mid / high inside the measured band |
+| `SPACE` | survey, route, drive, pick |
+| `A` `C` | auto-fill · clear |
+| `R` | reset the scene without restarting the process |
+| `Q` / Esc / QUIT | quit |
+
+**Clicking is in THE MAP, the top-left panel of the MISSION window**, and nowhere else. That panel is the only view whose world↔pixel mapping is linear and pose-independent — the aisle shot is a perspective camera that lags a trolley travelling eight metres, so the same click would mean different things at different times, and the two deck cams are panning while you aim at them.
+
+**The reachable region is a band down each row, not a board.** Week 4's green board is the envelope of an arm bolted to a floor; on the trolley it is that same envelope **swept along the rail**, once per arm, on opposite sides of the aisle. Both bands are drawn, in each arm's own colour, and which arm gets a fruit is decided by which side of the aisle you hang it on.
+
+⚠️ **A click outside a band is refused at click time, with the reason, before the tomato exists** — and the cursor says what it would do *before* the button goes down. The worst thing this demo can do in front of a grower is accept a placement and discover eight metres later that nothing can reach it.
+
+⚠️ **Placement hands the router nothing.** `use_truth` is off; the deck cameras still have to find the fruit, band its colour and estimate where it is. Every run prints, per fruit, how far the estimate the arm was sent to was from where the tomato actually hung — a column of zeros there would mean the demo had become a puppet show.
+
+⚠️ **Adding a fruit mid-run voids every checked plan**, exactly as `week4_place.py` does it: the crop version ticks, the itinerary is thrown away, the aisle is re-surveyed and re-routed, and the window says `replan  crop changed - replanning` rather than letting it look like a stutter. It is noticed between picks and never mid-leg — a leg is the unit a route was verified in, and an arm holding a detached tomato cannot stow. What covers the gap is that the running `Guard`'s obstacle membership is frozen over the **whole pool**, parked fruit included with their welds live, so a fruit hung during a flight is in the guard's set from the cycle it appears.
+
 **What you actually see: two OpenCV windows.**
 
 ```
@@ -847,6 +883,19 @@ Each head also sits **0.60 m** from its own row against the shared head's 0.70 m
 | turning | 14 | yes — **98.2%** (52/57 → 56/57) |
 | breaker | 29 | yes — 100% |
 | green | 49 | **no** — a stem is 55, a leaf is 62. Banded right when found, but **most are never found at all** |
+
+⚠️ **That table is the *shared* scouting head, and there are now two different cameras.** `farm/scout.py --recall` drives `scout.Scout`: one head on the aisle centreline, 0.70 m from both rows, one look per stop. `farm.decks` — what `two_arm_farm.py` and `mousereach` use — is one head per arm over its own plate, **0.60 m**, three pan poses, never crossing the aisle. Re-measured with `duo.DuoScout` + `scout.score`, four houses (seeds 7/11/23/41), both worked rows, 96 fruit:
+
+| stage | in house | mapped | recall | banded right |
+|---|---|---|---|---|
+| green | 42 | 31 | **74%** | 100% |
+| breaker | 16 | 16 | 100% | 94% |
+| turning | 14 | 13 | 93% | 85% |
+| red | 24 | 24 | 100% | **92%** ← the one that gets picked |
+
+Both are true of their own camera; keep them labelled. `farm.overlay.RECALL` holds the deck figures and the deck panels print them, because quoting the shared head's numbers on a panel showing a different lens would be a measurement of a camera that is not in the frame. Note **red is only 92% correctly banded at deck range** — about one ripe fruit in twelve is called something else and walked past, which is a worse headline than the green number and had not been measured before.
+
+⚠️ **Touching fruit are dropped, not merged, at deck range.** The recorded failure — four in a 70 mm cluster fusing into one detection 48 mm off — was measured on the Week 4 chassis mast at 1.3 m. On `farm.decks` at 0.60 m, head-on: one fruit → 1 detection (37×36 px); a pair at 100 mm → 2, the far one misbanded `turning`; a pair at **70 mm → 0**; four at 71 mm pitch → **0**. The fused contour fails `scout.RIPE_CIRCULARITY` and the cluster is dropped entirely. Across a whole survey the pair returns as **three** sightings for two fruit (and a 200 mm control as **four**), because `scout._fuse` cannot merge what arrives more than `FUSE_M` apart — so at this range the map's problem is phantoms, not fusion.
 
 ⚠️ **`stage_of` used to average the whole bounding box while its docstring claimed it averaged "its own pixels".** A tomato's projection is round and its box is square, so ~21% of what it sampled was corner, and the saturation floor does not reject a *breaker* tomato one truss behind — which is exactly what pulls a red fruit's mean hue up into `turning`, so the map calls it unripe and the harvest walks past it. Sampling the **inscribed disc** fixes it. No band moved; the function now reads the pixels it always claimed to. Eight houses, 156 matched fruit: red 96.2% → **98.7%**, turning 91.2% → **98.2%**, green and breaker 100% either way.
 
