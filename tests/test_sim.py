@@ -369,6 +369,156 @@ def _scout_head_rides_the_trolley():
             f"{drift * 1000:.0f} mm")
 
 
+@check("a truss is six fruit on one stem weighing 0.8 kg")
+def _truss_is_a_cluster():
+    """The crop the truss variant is about, as a compiled body.
+
+    Three things the brief fixed and nothing else checks: at least six fruit per
+    cluster, 0.80 kg for the whole thing, and — the one that is easy to get
+    wrong silently — the body **origin at the grasp point**, not at the centroid
+    of the fruit. `mission.Planner.plan` routes the gripper to `row.pos(name)`,
+    so an origin in the middle of the cluster would aim the pads into a tomato
+    and every truss pick would be a collision the planner thought was fine.
+
+    Also checks the fruit do not interpenetrate. A cluster whose spheres overlap
+    is fired apart by MuJoCo on the first step, which reads as an exploding crop
+    rather than as a layout error.
+    """
+    import mujoco
+    from farm import truss as ft
+
+    ts = ft.spawn(n_per_row=3, seed=7)
+    assert ts, "no trusses spawned"
+    assert all(t.n_fruit >= 6 for t in ts), (
+        f"a truss came back with {min(t.n_fruit for t in ts)} fruit — "
+        f"the brief asks for at least 6")
+
+    model = ft.build(aisle=0, arms=("a",), crate=False, leafy=False, trusses=ts)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    t0 = ts[0]
+    mass = float(model.body(t0.name).mass[0])
+    assert abs(mass - 0.80) < 1e-6, (
+        f"a truss weighs {mass:.3f} kg, not the 0.80 kg the brief fixed")
+
+    # The origin is the grasp point: the collar the pads close on is at z=0 in
+    # the body frame, and every fruit hangs below it.
+    grasp = data.body(t0.name).xpos
+    assert np.allclose(grasp, t0.pos, atol=1e-9), (
+        f"body origin {np.round(grasp, 3)} is not the spawned grasp point "
+        f"{np.round(t0.pos, 3)} — Planner would aim at the wrong place")
+    fruit = np.array([data.geom(f"{t0.name}_f{k}").xpos
+                      for k in range(t0.n_fruit)])
+    assert (fruit[:, 2] < grasp[2]).all(), \
+        "a fruit sits at or above the grasp point — the pads would close on it"
+
+    gaps = [float(np.linalg.norm(a - b))
+            for i, a in enumerate(fruit) for b in fruit[i + 1:]]
+    assert min(gaps) > 2 * ft.FRUIT_R, (
+        f"two fruit are {min(gaps) * 1000:.0f} mm apart against "
+        f"{2 * ft.FRUIT_R * 1000:.0f} mm of diameter — the cluster "
+        f"interpenetrates and MuJoCo will fire it apart")
+
+    # And it hangs there rather than tearing off under its own weight.
+    for _ in range(600):
+        mujoco.mj_step(model, data)
+    drift = float(np.linalg.norm(data.body(t0.name).xpos - t0.pos))
+    assert drift < 0.01, (
+        f"the truss sagged {drift * 1000:.0f} mm in 1.2 s — the weld is not "
+        f"carrying {ft.TRUSS_MASS} kg")
+    return (f"{t0.n_fruit} fruit, {mass:.2f} kg, closest pair "
+            f"{min(gaps) * 1000:.0f} mm, sag {drift * 1000:.1f} mm")
+
+
+@check("a truss weighs more than its own stem will hold at the loose SNAP_N")
+def _truss_needs_its_own_snap_force():
+    """Why `truss.TRUSS_SNAP_N` exists, as an assertion rather than a comment.
+
+    ⚠️ Two-sided, in the manner of `_reset_home_free_body`. The cluster's static
+    weight has to be **over** `plant_row.SNAP_N`, because that is the finding —
+    a 0.8 kg truss on the loose crop's 12 N pedicel breaks under gravity before
+    the gripper arrives, and the whole reason the truss carries a peduncle
+    strength from published data instead. And it has to be comfortably **under**
+    `TRUSS_SNAP_N`, or the truss variant would have shipped the same bug.
+
+    If the first assertion ever fails, the crop got lighter and the constant
+    should be re-derived rather than left as folklore.
+    """
+    from farm import truss as ft
+    from plant_row import SNAP_N
+
+    weight = ft.TRUSS_MASS * 9.81
+    assert weight > SNAP_N * 0.6, (
+        f"a truss now weighs {weight:.1f} N against the loose crop's "
+        f"{SNAP_N} N snap threshold — the margin this variant was built "
+        f"around has moved, re-read farm.truss.TRUSS_SNAP_N")
+    headroom = ft.TRUSS_SNAP_N / weight
+    assert headroom > 5.0, (
+        f"the truss peduncle carries only {headroom:.1f}x the cluster's own "
+        f"weight — a handling transient will break it")
+    return (f"cluster weighs {weight:.2f} N; loose SNAP_N {SNAP_N} N would "
+            f"leave {SNAP_N - weight:.1f} N; TRUSS_SNAP_N "
+            f"{ft.TRUSS_SNAP_N} N gives {headroom:.1f}x")
+
+
+@check("the cluster rule counts colour and the grouper finds the clusters")
+def _cluster_cv_rule():
+    """The take/leave decision, and the grouping it is computed over.
+
+    ⚠️ **The threshold sweep is checked for monotonicity, not for a value.**
+    Pinning "3 of 6" into an assertion is exactly what this file's own docstring
+    forbids — it is a measurement, it lives in `truss.RIPE_FRACTION` with the
+    table it was read off, and an honest change to the crop should move it
+    without failing the build. What must never change is the *shape*: a stricter
+    threshold cannot take more trusses, and cannot cut more green fruit. If that
+    inverts, the rule is wired backwards and every number in the sweep is
+    meaningless.
+
+    The grouper is checked the way it is actually used — on the true fruit
+    positions, where it must recover exactly the trusses that were planted.
+    """
+    from farm import truss as ft
+    from farm.scout import Sighting
+
+    ts = ft.spawn(n_per_row=6, seed=11)
+
+    rows = ft.sweep(ts)
+    takes = [r["trusses"] for r in rows]
+    greens = [r["green_taken"] for r in rows]
+    assert takes == sorted(takes, reverse=True), \
+        f"a stricter threshold took more trusses: {takes}"
+    assert greens == sorted(greens, reverse=True), \
+        f"a stricter threshold cut more green fruit: {greens}"
+
+    # The rule itself, on a cluster built by hand so the arithmetic is visible.
+    def cluster(*stages):
+        return ft.Cluster(members=[Sighting(pos=np.zeros(3), stage=s,
+                                            hue=float("nan")) for s in stages])
+
+    half = cluster("red", "red", "red", "turning", "green", "green")
+    assert abs(half.red_fraction - 0.5) < 1e-9
+    assert half.ripe_at(0.5) and not half.ripe_at(0.51), \
+        "the threshold is not being compared inclusively"
+
+    # And the grouping, over the crop's own fruit positions.
+    sightings = [Sighting(pos=p, stage=s, hue=float("nan"))
+                 for t in ts for p, s in zip(t.fruit_pos(), t.stages)]
+    groups = ft.group(sightings)
+    assert len(groups) == len(ts), (
+        f"grouped {len(sightings)} fruit into {len(groups)} trusses, "
+        f"not the {len(ts)} that were planted")
+    assert all(g.n_fruit == ft.FRUIT_PER_TRUSS for g in groups), \
+        "a group came back with the wrong number of fruit"
+    err = max(float(np.min([np.linalg.norm(g.pos - t.pos) for t in ts]))
+              for g in groups)
+    assert err < 0.02, (
+        f"a grouped grasp point is {err * 1000:.0f} mm off the real one")
+    return (f"sweep monotone over {len(rows)} thresholds; "
+            f"{len(groups)}/{len(ts)} trusses grouped, grasp point within "
+            f"{err * 1000:.0f} mm")
+
+
 def main():
     print("Vinea simulation tests")
     print("=" * 72)

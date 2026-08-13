@@ -1052,7 +1052,7 @@ def assign(itinerary, state, verbose=True):
 def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         use_truth=False, max_stops=None, on_tick=None, stride=None,
         verbose=True, scout_cls=DuoScout, crop_version=None, truth=None,
-        after_reset=None):
+        after_reset=None, snap_n=None, on_pick=None, truth_map=None):
     """Map, plan, travel, pick, crate — one full row, both arms, concurrently.
 
     The scene is passed in rather than built here: a `mujoco.Renderer` binds to
@@ -1096,6 +1096,29 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     destroys a hand-placed one (it was compiled in a parking bay). The hook is
     handed the `Row` this function built so the crop and the harvest share one,
     rather than two views of the same `eq_active` disagreeing about `home`.
+
+    --- growing a second crop through the same engine -------------------------
+
+    Three parameters exist so `two_arm_farm_truss.py` can run a **truss** crop
+    here rather than fork this function. Left `None` every one of them is
+    exactly the loose-fruit behaviour, unchanged, and no caller that predates
+    them reads differently.
+
+    `snap_n` is the force the plant lets go at, handed to `Row`. A truss weighs
+    0.8 kg against a loose fruit's 0.12, and `plant_row.SNAP_N` is below the
+    cluster's own static load — see `farm.truss.TRUSS_SNAP_N`, which carries the
+    published figure and the measurement of what happens without it.
+
+    `on_pick(tag, name, gripper, prefix)` is called as each mission starts and
+    may return a zero-argument callable, which is then run **once per control
+    cycle for the life of that mission** and dropped when it ends. It is how
+    `farm.truss.Cutter` gets a blade into this loop: a truss is severed at the
+    stem rather than pulled off it, and the cut has to happen on the cycle the
+    pads close rather than at some point a leg boundary could express.
+
+    `truth_map(trusses, aisle)` replaces the `use_truth` shortcut's map. The
+    built-in one reads `t.stage` off each fruit, and a truss has six of them —
+    so a crop whose unit is a cluster has to build its own.
     """
     import mujoco
 
@@ -1127,7 +1150,8 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         park_arm(model, data, parks[t], prefix=trolley.ARM_PREFIX[t])
     mujoco.mj_forward(model, data)
 
-    row = Row(model, data, names=names, homes={t.name: t.pos for t in trusses})
+    row = Row(model, data, names=names, homes={t.name: t.pos for t in trusses},
+              **({} if snap_n is None else {"snap_n": snap_n}))
     mujoco.mj_forward(model, data)
     if after_reset is not None:
         after_reset(row)
@@ -1184,7 +1208,9 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         if verbose:
             print(f"\n{'=' * 78}\n  1. MAP — two deck heads, one per arm, "
                   f"each on its own row  ({why})")
-        if use_truth:
+        if use_truth and truth_map is not None:
+            hm = truth_map(trusses, aisle)
+        elif use_truth:
             hm = HouseMap(
                 sightings=[Sighting(pos=t.pos, stage=t.stage, hue=float("nan"),
                                     row=t.row, truth=t) for t in trusses],
@@ -1479,6 +1505,16 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                               gate=lambda leg, _t=tag: centre.claim(_t, leg))
             me.run = run_
             machine.runs[tag] = run_
+            # ⚠️ Registered on the machine's per-cycle watchers, not on this
+            # arm's loop, for the same reason the black box is: the machine is
+            # what steps physics, so a hook that must fire on the cycle a
+            # condition becomes true has to live where the cycles are counted.
+            # Dropped in the `finally` alongside the recorder, so an aborted
+            # mission does not leave a blade watching an arm that has stopped.
+            watcher = None if on_pick is None else on_pick(tag, name, gripper,
+                                                           prefix)
+            if watcher is not None:
+                machine.watchers.append(watcher)
             try:
                 while run_.command():
                     me.follow_leg()
@@ -1493,6 +1529,8 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             finally:
                 machine.boxes.pop(tag, None)
                 machine.runs.pop(tag, None)
+                if watcher is not None and watcher in machine.watchers:
+                    machine.watchers.remove(watcher)
                 centre.release(tag)
                 me.run = None
                 me.waiting_on = ""
