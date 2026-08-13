@@ -12,6 +12,8 @@ Everything below is in `simulation/mujoco/` and runs on one laptop. No ROS, no h
 
 📖 **[COMMANDS.md](COMMANDS.md) lists every command with what you actually see** — which open a window, which you can click in, which only print numbers, which record silently.
 
+It harvests **two crops**, and they are two different jobs rather than one with a flag: loose fruit (Weeks 1–5, everything down to [Week 5](#week-5--a-whole-house-scout-it-plan-it-harvest-it)) and **tomatoes-on-the-vine** — six fruit on one stem, cut as a cluster and graded whole ([Week 5b](#week-5b--the-same-house-grown-as-trusses)).
+
 ```bash
 ./.venv/bin/python scripts/phase0_smoketest.py          # 6 checks, toolchain health
 ```
@@ -480,6 +482,8 @@ simulation/mujoco/
   week4_run.py        the throughput campaign across crop densities
   legacy_cycle.py     the unplanned cycle, kept as the baseline to beat
   week1_*.py          the Week 1 demos
+  two_arm_farm.py     both arms on one trolley, two live windows
+  two_arm_farm_truss.py   the same machine, on trusses
   farm/               Week 5: the whole house, kept separate from weeks 1-4
     house.py          four rows at real Venlo dimensions, pipe rails and all
     trolley.py        the pipe-rail trolley the arm rides, room for a 2nd arm
@@ -489,6 +493,12 @@ simulation/mujoco/
     run.py            a whole shift: scout, plan, harvest into the crate
     watch.py          all of it in six panels, including the live map
     armframe.py       makes the world-frame planner work for a moving arm
+    duo.py            two arms in one physics loop, and the deck interlock
+    decks.py          one survey head per arm, each over its own row
+    throughput.py     kg/hr from numbers already measured, with provenance
+    truss.py          Week 5b: the truss crop, the cluster CV, and the blade
+    trussrun.py       a truss shift: scout, judge the cluster, cut, crate
+    watch_truss.py    the truss shift in six panels, the map drawn as clusters
   parked/             the cradle-and-blade gripper — early, not abandoned
 simulation/lessons.json   what it has learned so far
 third_party/          Fairino URDF, MuJoCo Menagerie — never edited
@@ -505,6 +515,7 @@ Every module runs standalone and prints the numbers it stands on:
 ./.venv/bin/python simulation/mujoco/incident.py     # the old cycle, with the black box on
 ./.venv/bin/python simulation/mujoco/lessons.py      # real failures -> constraints
 ./.venv/bin/python simulation/mujoco/greenhouse.py   # render the house from three cameras
+./.venv/bin/python simulation/mujoco/farm/truss.py --sweep   # the cluster threshold, measured
 ```
 
 A bare run harvests the whole row and leaves the window open when it finishes; `--trials N` is the jittered repeatability measurement instead. Captures are named after the script that produced them — `week2_pick.py` writes `week2_pick.mp4` — so a video in the repo root always says which code made it.
