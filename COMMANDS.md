@@ -800,18 +800,24 @@ Same six-panel layout as `farm/watch.py`. **The map panel is what differs**: eve
 
 `python 2armfarmtruss.py` runs the same thing — the same kind of shim as `2armfarm.py`, and it carries the same warning about digit-leading module names.
 
-⚠️ **KNOWN GAP, and it is in this sim only.** The two-arm truss run maps, judges, routes and **cuts** correctly — the blade goes through on 2 of 3 attempts — but the cluster is lost during the carry and nothing reaches the crate. The single-arm truss sims (`farm/watch_truss.py`, `farm/trussrun.py`) crate reliably on the same crop, so this is `farm/duo.py`'s executor path rather than the truss model.
+⚠️ **KNOWN GAP, narrowed but not closed, and it is in this sim only.** The two-arm truss run now **crates** — the carry fixes above apply here too, via `duo.run(plan_opts=…, score_in_bin=…)` — but on `--truth --stops 2 --seed 7` it gets 1 of 3, against the single-arm sims' 7 of 7 on the same crop. It used to get **0** of 3 with "nothing reaches the crate", so what is left is a smaller and much better-described problem.
 
-What has been ruled out, each by a run:
+**The blade is no longer a suspect, with numbers.** Instrumenting `truss.Cutter` over that run, per pick — best pad load seen while in reach, and the finger speed at the moment the gate was satisfied:
 
-* **not the second arm** — `--arms 1` through `duo` fails identically
-* **not arm speed** — `--speed 0.15` and `--speed 0.5` both fail the same way
-* **not the blade** — it fires, and the loose two-arm sim still crates cleanly through the same modified `duo.run`, so the three new hooks did not break it
-* **not the cluster rule or the routing** — both produce the same decisions the working single-arm sims act on
+| truss | arm | cut | cycles in reach | best pad L/R | stall | outcome |
+|---|---|---|---|---|---|---|
+| c010 | arm1 | **yes** | 171 | 30.3 / 44.8 N | 0.034 | **clean, crated** |
+| c011 | arm1 | **yes** | 194 | 54.1 / 41.4 N | 0.047 | `grasp_failed` |
+| c007 | arm2 | no | **16** | **0.0 / 0.0 N** | — | `grasp_failed` |
 
-The difference is that `duo` drives `week2_pick.MissionRun` through `Machine` while the single-arm path uses `week2_pick.execute`. One concrete asymmetry found while looking: `execute` calls `CarryTrace.tick` every control cycle and `Machine.drive` does not, so `peak_n` and `peak_held_ms` from a two-arm run are not trustworthy either. That is the thread to pull next.
+So the two failures are **two different things, and neither is the blade or the truss model**:
 
-⚠️ **The concurrency engine is not forked.** `farm/duo.py` gained three optional hooks (`snap_n`, `on_pick`, `truth_map`) and both two-arm sims run through it, so the deck-centre interlock and the arm-vs-arm clearance have exactly one implementation. Pass none of them and it is byte-for-byte the loose behaviour.
+* **c011** was cut on a genuine 54 N / 41 N grip and then lost *before `extract`* — a carry-side failure inside `duo`'s executor path
+* **c007** was never gripped at all: arm2's tool was within `CUT_REACH` of the collar for 16 control cycles out of 1524 and **the pads never touched it once**. That is a reach/arrival failure on the mirrored arm, upstream of anything the blade could do about it
+
+The difference remains that `duo` drives `week2_pick.MissionRun` through `Machine` while the single-arm path uses `week2_pick.execute`. One concrete asymmetry, still open: `execute` calls `CarryTrace.tick` every control cycle and `Machine.drive` does not, so `peak_n` and `peak_held_ms` from a two-arm run are not trustworthy either. Those are the two threads to pull next, and they are now separable.
+
+⚠️ **The concurrency engine is not forked.** `farm/duo.py` gained five optional hooks (`snap_n`, `on_pick`, `truth_map`, `plan_opts`, `score_in_bin`) and both two-arm sims run through it, so the deck-centre interlock and the arm-vs-arm clearance have exactly one implementation. Pass none of them and it is byte-for-byte the loose behaviour.
 
 ### 📝 `farm/truss.py` — the crop, and the threshold measurement
 
@@ -860,6 +866,13 @@ The difference is that `duo` drives `week2_pick.MissionRun` through `Machine` wh
 
 # 📝 score the cluster CV against the real trusses, then stop
 ./.venv/bin/python simulation/mujoco/farm/trussrun.py --recall
+
+# 📝 the same house every time — what the carry numbers below were read off
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --truth --seed 7
+
+# 📝 a dense row: 12 trusses a row instead of 6, so a stop has 5–7 picks in it
+#    and the crate fills up during the shift
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --truth --seed 13 -n 12
 ```
 
 `--recall` is the honest look at the perception. On seed 7: **0 phantom clusters**, grasp point median 23 mm out, and the take/leave verdict agreed with ground truth on **13 of 14** trusses — but only 3 of 14 clusters came back with all six fruit, the rest occluded by their own neighbours.
@@ -871,6 +884,43 @@ The difference is that `duo` drives `week2_pick.MissionRun` through `Machine` wh
 ⚠️ **A 0.8 kg cluster breaks its own stem at the loose crop's snap threshold.** `plant_row.SNAP_N` is 12 N and says of itself, at length, that it is assumed rather than measured. A truss hangs at **7.85 N** before anything touches it, against a grasp transient `plant_row` measures at 6.0–8.6 N — so every truss snapped during the approach and was on the floor before the gripper closed. `truss.TRUSS_SNAP_N` is 75 N instead, from published tensile tests of the tomato abscission zone (40.3 N at 5–6 mm, 44.8 N at 6–7 mm, 72.0 N at 7–8 mm, ~1.5 MPa), scaled to the thicker stem a six-fruit truss hangs on. That is 9.6× the cluster's static weight — the same margin `plant_row`'s 12 N gives its 1.18 N fruit.
 
 ⚠️ **And then pull-to-snap fails anyway, which is why there is a blade.** With the stem strong enough to survive the approach, the arm loads it to 75 N and the release throws the cluster out of the pads: measured at 75.2 N and 81.4 N on two trusses, both `grasp_failed`, both 730–830 mm from the tool by `extract`. The grip was never the problem — holding to 75 N of pull *is* the grip working. `truss.Cutter` severs the peduncle once the pads have closed, with no stored load; peak force drops from 75 N to 18 N and the pick comes out clean. This is `plant_row.SNAP_N`'s own note about the Vinea cradle-and-blade design — "it severs rather than pulls" — built for the crop that needs it.
+
+### The carry is a different job too, and five things assumed it was not
+
+The blade above fixed the *detach*. Everything after it still ran on a loose tomato's geometry, and a truss is not one: it is a 0.24 m cluster hanging below the point the pads are holding. **Five defects, each measured, each one either dropping the cluster or mis-scoring a pick that worked.** Reproduce the whole set with `farm/trussrun.py --truth --seed 7`.
+
+**1. The blade fired on the gripper *command*, not on a grip.** The gate was `ctrl >= 0.55 × 255` on the stated grounds that the pads had met the 20 mm collar by then. Closing the 2F85 on nothing and measuring the gap between the pad centres:
+
+| ctrl | 0 | 80 | 120 | **140** | 180 | 200 | 220 | 255 |
+|---|---|---|---|---|---|---|---|---|
+| pad gap mm | 93.2 | 68.5 | 54.9 | **47.9** | 33.5 | 26.2 | 18.8 | 8.8 |
+
+The pads meet each other at 8.8 mm, so a 20 mm collar is held at ~29 mm — `ctrl ≈ 200`. At the 140 the blade was firing at, **the pads are 44 mm apart around a 20 mm stem** and the pad forces show exactly one of them touching (9.6 N / 0.0 N). The weld was released there, into a gripper that had not closed, and 0.80 kg fell.
+
+⚠️ **It sometimes got away with it, which is worse than failing.** The closing pads would scoop the falling truss and it would land in the crate — the shift report's own *"the fruit was flung and happened to land in the crate, so the clean rate is partly luck"* line was this bug.
+
+**2. Force on both pads is not a grip either.** The obvious fix — cut when both pads are loaded — still dropped trusses, because the pads sweep in on an arc and the first to arrive *pushes the cluster across into the second*. Both read load while still 55 mm apart and closing at full speed. Per control cycle:
+
+| | pads first both loaded | fingers stalled |
+|---|---|---|
+| seed 23 | 19 / 29 N, gap 55.0 mm, \|v\| **0.52** | 32 / 47 N, gap 47.3 mm, \|v\| **0.02** |
+| seed 7 | 33 / 23 N, gap 51.5 mm, \|v\| **0.28** | 50 / 35 N, gap 45.6 mm, \|v\| **0.05** |
+
+So the blade now asks three questions and cuts only on all three — the tool is within `CUT_REACH` of *this* collar, both pads carry `CUT_HOLD_N`, and the fingers have **stopped** (`CUT_STALL_V`). The stall is the one that separates a hold from a sweep, by more than an order of magnitude.
+
+**3. The wrist turned the cluster over.** The `turn` leg points the tool `DOWNWARD` before carrying, which is right for a sphere sitting in the pads and wrong for 0.80 kg hanging on a quarter-metre lever: pad forces went from a 40 N hold to **53 N / 180 N** during the turn and the cluster was levered out 0.6 s into `carry` and thrown 460 mm. It is also unnecessary — a truss held by the stem already hangs straight down, so `mission.Planner(carry_axis="into_row")` leaves the wrist where it gripped and the release drops the cluster straight in.
+
+**4. The crate was a loose fruit's crate, twice over.** `mission.BIN_DROP_UP` is 0.28 m because a tomato ends 33 mm below the tool; a truss ends **271 mm** below it, so the bottom fruit sat *below the crate floor* and `carry` swept the cluster through the crate wall. `truss.CRATE_DROP_UP` derives the height from the rachis instead — and `truss.drop_height` raises it as the crate fills, because the crate is 120 mm deep and the *first* truss settles with its top fruit at z 0.391 against a rim at 0.386, so the second was carried in at a height chosen for an empty crate and struck the first.
+
+**And a pick that worked was scored as a miss.** `fr5.crate_contains` reads one point — `data.body(name).xpos` — which for a loose tomato is the middle of the tomato and for a truss is the **grasp point**, a quarter of a metre above the fruit lying in the crate. Every correctly crated truss failed the height test. `truss.in_crate` asks the crate about the tomatoes instead.
+
+**5. And the planner could not see a cluster at all.** `mission.CropObstacles` modelled every crop body as one 66 mm ball at its origin — for a truss, a ball floating at the top of the stem with six tomatoes and 238 mm of rachis hanging below it, in none of the planner's or the guard's obstacle sets. It now reads the body's own collidable geoms, which returns **exactly one sphere of `FRUIT_R`** for a loose fruit (so every Week 1–4 clearance is untouched) and seven for a truss. Stacked into one distance matrix it is also **faster than the wrong model it replaced** — 0.49 ms against 0.70 ms on a 48-truss house, agreeing with the direct norm to 1.8e-15 m.
+
+**Result on the single-arm sims**, `--truth`, seeds 5/7/11/23/41: **7 of 7 trusses cut and crated, `clean` on every one, and `grasp instability` fires on none of them** — against a before-state where the same runs dropped the cluster or crated it by luck.
+
+⚠️ **A dense row is still weak, and that is a different problem.** At `-n 12` — 5–7 picks in one stop, and the crate filling during the shift — seed 13 goes 2/5 → **4/5** and seed 3 goes 2/7 → **3/7**: **7 of 12 against 4 of 12 before**, which is better and is not good.
+
+What is left there is mostly **`grasp_failed`, not `carry_dropped`** — the cluster is lost during `grip`, before any of the carry geometry above is in play. Tracing the contacts on seed 13's one failure, the truss is struck by unnamed geoms during `grip` and is on the floor by `close`: those are glasshouse **leaves**. `mission.CropObstacles` covers the crop bodies, the support bar and the back panel, and the canopy is in none of them, so neither the planner's preview nor the runtime guard knows a leaf exists. A 66 mm tomato mostly gets away with that; a 0.24 m cluster on a crowded row does not. It is a pre-existing limit the loose crop shares, it is upstream of the blade, and it is the next thing to fix — not the carry.
 
 ### 📝 The pieces, each runnable on its own
 

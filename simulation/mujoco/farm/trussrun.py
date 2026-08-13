@@ -361,10 +361,28 @@ def run(seed=None, aisle=0, n_per_row=6, speed=0.4, use_truth=False,
                 left=len(stop.fruit) - fi, cluster=cluster)
             p0 = _time.perf_counter()
             with armframe.at_trolley(model, data) as fr:
+                # ⚠️ `bin_drop_up`, and it is the difference between crating a
+                # truss and dragging it through the crate wall. The default is
+                # a loose fruit's 0.28 m, which puts the bottom of a cluster
+                # hanging 0.27 m below the tool *under the crate floor*. See
+                # `truss.CRATE_DROP_UP`, which derives it from the rachis —
+                # and `truss.drop_height`, which raises it as the crate fills,
+                # because the second truss of a stop is carried in over the
+                # first one and struck it.
+                #
+                # ⚠️ `carry_axis="into_row"` — the wrist does **not** turn
+                # down. A truss hangs from the collar the pads are holding, so
+                # turning the tool through 90° swings 0.80 kg on a quarter-metre
+                # lever and pries the cluster out of the pads. It hangs straight
+                # down as gripped, and the release drops it straight in. See
+                # `Planner.carry_axis`, which carries the measurement.
+                drop_up = ft.drop_height(model, data, names, fr.bin_pos)
                 planner = Planner(model, data, row, lessons=None,
                                   clearance=0.040, park_q=park_q, speed=speed,
-                                  frame=fr)
+                                  frame=fr, bin_drop_up=drop_up,
+                                  carry_axis="into_row")
                 m = planner.plan(name)
+            rec["drop_up"] = float(drop_up)
             rec["t_plan"] = _time.perf_counter() - p0
 
             if not m.ok:
@@ -410,6 +428,15 @@ def run(seed=None, aisle=0, n_per_row=6, speed=0.4, use_truth=False,
                        "peak_n": 0.0, "clearance": float("nan")}
                 aborted = stop_why.why
             shift.pick_s += res["seconds"]
+            # ⚠️ **Re-scored on the fruit.** `week2_pick` scores `in_bin` with
+            # `fr5.crate_contains(body.xpos, ...)`, and a truss body's origin is
+            # its grasp point — 274 mm above the fruit once the cluster is
+            # standing in the crate, so the height test fails on every correctly
+            # crated truss. `truss.in_crate` asks the crate about the tomatoes.
+            # Overridden here rather than in `week2_pick` so the loose-fruit
+            # pipeline keeps scoring exactly as Weeks 1-4 measured it.
+            res["in_bin"] = ft.in_crate(model, data, name,
+                                        m.arm_frame.bin_pos)
             rec.update({
                 "in_bin": bool(res["in_bin"]), "grasped": bool(res["grasped"]),
                 "broke": bool(res["broke"]), "peak_n": float(res["peak_n"]),

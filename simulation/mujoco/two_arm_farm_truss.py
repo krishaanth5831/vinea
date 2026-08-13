@@ -167,20 +167,41 @@ def main():
     # `after_reset` is the one hook that is handed it, and it fires long before
     # the first pick — so by the time `on_pick` runs this is populated.
     #
-    # ⚠️ The tool site is the **arm's own**, via `prefix`. `tool0` unprefixed is
-    # arm a's, and a blade that measured its proximity against arm a while arm b
-    # was doing the cutting would refuse to cut anything arm b reached — the
-    # same trap `week2_pick.execute` documents at length for the grasp check.
+    # ⚠️ The tool site **and the pad geoms** are the arm's own, via `prefix`.
+    # `tool0` unprefixed is arm a's, and a blade that measured its proximity
+    # against arm a while arm b was doing the cutting would refuse to cut
+    # anything arm b reached — the same trap `week2_pick.execute` documents at
+    # length for the grasp check. The pads are the same trap one level down:
+    # the blade now fires on measured pad load (see `truss.CUT_HOLD_N`), so
+    # arm b reading arm a's pads would never see a grip at all. One `prefix`
+    # feeds both.
     _row = [None]
 
     def grab_row(row):
         _row[0] = row
 
     def on_pick(tag, name, gripper, prefix):
-        c = ft.Cutter(model, data, _row[0], name, gripper,
-                      tool_site=prefix + "tool0")
+        c = ft.Cutter(model, data, _row[0], name, gripper, prefix=prefix)
         cutters[name] = c
         return c.tick
+
+    # ⚠️ **The carry is the truss's, not the loose crop's, and both halves of
+    # it are the same argument.** A cluster hangs `RACHIS_LEN` below the collar
+    # the pads are holding, so the release height has to clear the crate *and
+    # whatever is already in it* (`truss.drop_height`), and the wrist must not
+    # turn the cluster over on the way (`carry_axis`). `farm.trussrun` passes
+    # exactly these; this is the two-armed spelling of it, and each arm asks
+    # about its own crate — one crate per arm, mirrored with it. See
+    # `trolley._crate_local`.
+    _names = [t.name for t in trusses]
+
+    def plan_opts(model_, data_, tag, fr):
+        return {"bin_drop_up": ft.drop_height(model_, data_, _names,
+                                              fr.bin_pos),
+                "carry_axis": "into_row"}
+
+    def score_in_bin(model_, data_, name, fr):
+        return ft.in_crate(model_, data_, name, fr.bin_pos)
 
     t0 = time.perf_counter()
     try:
@@ -189,7 +210,8 @@ def main():
                 on_tick=on_tick, stride=args.stride, verbose=True,
                 scout_cls=TrussDuoScout, snap_n=ft.TRUSS_SNAP_N,
                 on_pick=on_pick, after_reset=grab_row,
-                truth_map=lambda ts, aisle: ftr.truth_map(ts, aisle=aisle))
+                truth_map=lambda ts, aisle: ftr.truth_map(ts, aisle=aisle),
+                plan_opts=plan_opts, score_in_bin=score_in_bin)
         if windows is not None:
             windows.flush(args.fps * 3)
     except KeyboardInterrupt:

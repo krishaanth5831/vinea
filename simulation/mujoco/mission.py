@@ -554,6 +554,39 @@ class RobotSpheres:
         return data.xpos[self.body] + np.einsum("nij,nj->ni", mats, self.local)
 
 
+def crop_spheres(model, name):
+    """One crop body as (geom ids, bounding radii). See `CropObstacles`.
+
+    Visual-only geoms are skipped — a truss's rachis and pedicels carry
+    `contype=0`, they are decoration and the arm is allowed through them. What
+    is left is what the physics would collide with, which is the right set to
+    keep the arm off.
+
+    Capsules are covered by the sphere around them (radius + half-length)
+    rather than measured exactly. That is conservative, which is the safe
+    direction for a clearance model, and it costs nothing on a loose fruit,
+    where the only geom is a sphere and this returns its exact radius.
+    """
+    import mujoco
+
+    bid = model.body(name).id
+    gids, radii = [], []
+    for gid in range(model.body_geomadr[bid],
+                     model.body_geomadr[bid] + model.body_geomnum[bid]):
+        if model.geom_contype[gid] == 0 and model.geom_conaffinity[gid] == 0:
+            continue
+        size = model.geom_size[gid]
+        if model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_SPHERE:
+            r = float(size[0])
+        elif model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_CAPSULE:
+            r = float(size[0] + size[1])
+        else:
+            r = float(np.linalg.norm(size))
+        gids.append(gid)
+        radii.append(r)
+    return np.asarray(gids, dtype=int), np.asarray(radii, dtype=float)
+
+
 class CropObstacles:
     """What the arm must not touch, kept as exact primitives.
 
@@ -569,8 +602,47 @@ class CropObstacles:
         # the floor, and protecting it is actively wrong: the crate is where the
         # arm is *going*, so counting harvested fruit as obstacles makes the
         # planner refuse every pick after the first one in a sequence.
-        self.fruit = [(n, model.body(n).id, FRUIT_R)
-                      for n in row.names if n != target and row.attached(n)]
+        #
+        # ⚠️ **Each crop item is its own geometry, not one ball at its origin.**
+        # This read `data.xpos[body]` with a fixed `FRUIT_R`, which is exactly
+        # right for a loose tomato — the body *is* one 66 mm sphere at the
+        # origin, so `crop_spheres` returns precisely that and every Week 1-4
+        # number is untouched.
+        #
+        # It is wrong for anything else, and a truss is the anything else. A
+        # truss body's origin is its **grasp point**, at the top of the stem,
+        # with six tomatoes and 238 mm of rachis hanging *below* it — so the
+        # planner was verifying routes against a 66 mm ball floating where the
+        # cluster is not, and was blind to the whole cluster. On a dense row
+        # (`truss.MIN_TRUSS_SEP` is 350 mm) that is the difference between a
+        # route that clears and a route that drives through the neighbour: at
+        # 12 trusses a row, 5 of 7 picks failed with the planner reporting
+        # every one of them clear.
+        #
+        # Reading the body's own collidable geoms is not a convention, it is the
+        # model, so it stays right for a crop nobody has written yet.
+        #
+        # ⚠️ **Stacked into one array, not one array per fruit, for the reason
+        # `plant_row.Row.update` gives about its own `efc` scan.** This is
+        # evaluated for every previewed pose on every candidate route and again
+        # every control cycle by the `Guard`, so the cost is multiplied by
+        # thousands. Seven spheres a truss written as a per-fruit loop measured
+        # 2.86 ms against the one-ball model's 0.70 ms — a 4x tax on planning,
+        # paid on a 48-truss house. One (robot x crop) distance matrix and a
+        # slice per fruit gives the same numbers back for a fraction of it.
+        self.fruit = []          # (name, start, stop) into the stacked arrays
+        gids, radii = [], []
+        for n in row.names:
+            if n == target or not row.attached(n):
+                continue
+            g, r = crop_spheres(model, n)
+            if not len(g):
+                continue
+            self.fruit.append((n, len(gids), len(gids) + len(g)))
+            gids.extend(g.tolist())
+            radii.extend(r.tolist())
+        self.gids = np.asarray(gids, dtype=int)
+        self.radii = np.asarray(radii, dtype=float)
 
         self.capsules, self.boxes = [], []
         for name in ("row_support_bar",):
@@ -593,8 +665,23 @@ class CropObstacles:
         Yields (name, distances) so the caller can apply a different required
         clearance per obstacle — which is exactly what a learned lesson does.
         """
-        for name, bid, R in self.fruit:
-            yield name, np.linalg.norm(centres - data.xpos[bid], axis=1) - radii - R
+        if len(self.gids):
+            # One (robot spheres x every crop sphere) matrix, then the nearest
+            # sphere of each fruit. Still one yield per crop item, so a caller
+            # applying a per-obstacle keepout gets one number per fruit exactly
+            # as it always did — see the note in `__init__` about why this is
+            # not written as a loop of small arrays.
+            # |a-b| via |a|^2 - 2a.b + |b|^2, so the whole matrix is one matmul
+            # rather than a (robot x crop x 3) temporary. Clipped before the
+            # root because cancellation can make a coincident pair very
+            # slightly negative.
+            c = data.geom_xpos[self.gids]
+            d2 = (np.einsum("ij,ij->i", centres, centres)[:, None]
+                  - 2.0 * centres @ c.T
+                  + np.einsum("ij,ij->i", c, c)[None, :])
+            gap = np.sqrt(np.maximum(d2, 0.0)) - self.radii[None, :]
+            for name, lo, hi in self.fruit:
+                yield name, gap[:, lo:hi].min(axis=1) - radii
 
         for name, gid, R, half in self.capsules:
             c = data.geom_xpos[gid]
@@ -802,7 +889,8 @@ class Planner:
 
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
                  park_q=None, speed=DEFAULT_SPEED, prefix="", others=(),
-                 pin=(), frame=None):
+                 pin=(), frame=None, bin_drop_up=BIN_DROP_UP,
+                 carry_axis=None):
         import mink
 
         self.model = model
@@ -811,6 +899,55 @@ class Planner:
         self.lessons = lessons
         self.clearance = clearance
         self.park_q = park_q
+        # ⚠️ **How high above the crate the `release` leg holds the *tool*, and
+        # it is a property of the crop rather than of the crate.** `BIN_DROP_UP`
+        # is 0.28 m because a loose tomato is a 66 mm sphere sitting in the
+        # pads: the thing being carried ends 33 mm below the tool, so 0.28 m of
+        # tool height is 0.25 m of fruit clearance over a 0.12 m crate wall.
+        #
+        # A truss is not 33 mm below the tool. It is a 0.24 m cluster hanging
+        # off the collar the pads are holding, so the same 0.28 m puts the
+        # bottom fruit *below the crate floor* and the `carry` leg drags the
+        # whole cluster through the crate wall on the way in. Measured on seed
+        # 7: the truss was struck out of the pads 0.5 s into `carry` and was on
+        # the floor 700 mm from the tool by `release`.
+        #
+        # So the release height is a parameter. `farm.trussrun` passes
+        # `truss.CRATE_DROP_UP`, which is derived from the rachis rather than
+        # chosen; every Week 1-4 caller takes the default and is unchanged.
+        self.bin_drop_up = float(bin_drop_up)
+        # ⚠️ **Which way the tool points from `turn` to `withdraw`, and it is a
+        # property of what is being carried.** `DOWNWARD` is right for a loose
+        # tomato: the fruit is a sphere sitting at the pinch point, so turning
+        # the wrist barely moves it, and pointing the tool down means the
+        # release drops the fruit into the crate rather than lobbing it.
+        #
+        # A truss is held by a stem with a quarter-metre of cluster hanging off
+        # it, and 0.80 kg of that swings through 90° when the wrist turns. The
+        # moment goes into the pinch: measured on seed 7, the pad forces went
+        # from a 40 N hold to 53 N / 180 N during `turn`, and the cluster was
+        # levered out of the pads 0.6 s into `carry` and thrown 460 mm. Nothing
+        # was wrong with the grip — it was being pried open.
+        #
+        # It is also unnecessary. A truss held by the stem already hangs
+        # straight down under its own weight, so opening the pads over the
+        # crate drops it in with the wrist left exactly where it gripped.
+        # `farm.trussrun` passes `"into_row"`; the `turn` and `ready` legs then
+        # find themselves already on-axis and fall through in one cycle, which
+        # is why the leg list does not change shape.
+        #
+        # `None` is Weeks 1-4 and is `DOWNWARD`. `"into_row"` is resolved per
+        # arm in `_legs` — see the note there. Anything else is taken as a
+        # world-frame vector.
+        if carry_axis is None:
+            self.carry_axis = DOWNWARD
+        elif isinstance(carry_axis, str):
+            if carry_axis != "into_row":
+                raise ValueError(f"carry_axis must be None, 'into_row' or a "
+                                 f"vector, not {carry_axis!r}")
+            self.carry_axis = carry_axis
+        else:
+            self.carry_axis = np.asarray(carry_axis, dtype=float)
         # ⚠️ Which arm's world to plan in. `None` is the Week 1-4 world and is
         # what every single-armed caller gets, unchanged. `farm.armframe.frame`
         # builds the trolley-mounted one. See `ArmFrame` — this parameter is
@@ -912,12 +1049,19 @@ class Planner:
         """
         fr = self.frame
         INTO_ROW, PARK = fr.into_row, fr.park
+        # ⚠️ `"into_row"` resolves **per arm**, which a vector could not.
+        # Arm b's row is on the other side of the aisle (`armframe.MIRROR`), so
+        # a caller that wants "keep facing my row" must not be able to say it as
+        # `[1, 0, 0]` — that is arm a's row and would have arm b carry the truss
+        # while facing away from it.
+        CARRY = (INTO_ROW if isinstance(self.carry_axis, str)
+                 else self.carry_axis)
         sx = route.stage_x
         start = self.data.site(self.tool_site).xpos.copy()
         lane_z = self._lane_z(route, target)
         pull_to = target + route.pull_vector()
         out_z = float(pull_to[2])
-        over_bin = fr.bin_pos + np.array([0, 0, BIN_DROP_UP])
+        over_bin = fr.bin_pos + np.array([0, 0, self.bin_drop_up])
 
         legs = [
             # 0. Settle. The weld overshoots for ~50 ms on startup and the peak
@@ -973,11 +1117,11 @@ class Planner:
             #    hit. Asking for the turn and the carry at once makes the solver
             #    trade one against the other over a half-metre move and it takes
             #    a bad route — measured, 325 mm past the crate.
-            Leg("turn", "turn", np.array([sx, target[1], out_z]), DOWNWARD,
+            Leg("turn", "turn", np.array([sx, target[1], out_z]), CARRY,
                 orientation_cost=TURN_COST, tilt_stop=TURN_DONE_DEG,
                 seconds=TIP_MAX_S, contact_ok=True),
-            Leg("carry", "move", over_bin, DOWNWARD, contact_ok=True),
-            Leg("release", "release", over_bin, DOWNWARD, seconds=0.8),
+            Leg("carry", "move", over_bin, CARRY, contact_ok=True),
+            Leg("release", "release", over_bin, CARRY, seconds=0.8),
 
             # 9. ⚠️ The leg this whole module exists for. The old cycle drove
             #    from over the crate straight back to the arm's home posture,
@@ -985,7 +1129,7 @@ class Planner:
             #    corner through the canopy and stripped t3 on 8 of 10 picks.
             #    Withdraw to the staging plane first. Wrist stays down: turning
             #    it while translating is the same solver trade as step 8.
-            Leg("withdraw", "move", np.array([sx, PARK[1], PARK[2]]), DOWNWARD),
+            Leg("withdraw", "move", np.array([sx, PARK[1], PARK[2]]), CARRY),
             # 10. Only now turn back to the row-facing pose, ready for the next
             #     fruit. In place, out at the staging plane, hitting nothing.
             Leg("ready", "turn", np.array([sx, PARK[1], PARK[2]]), INTO_ROW,

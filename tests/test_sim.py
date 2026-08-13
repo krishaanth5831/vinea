@@ -519,6 +519,133 @@ def _cluster_cv_rule():
             f"{err * 1000:.0f} mm")
 
 
+@check("the truss blade will not cut before the gripper has hold of the stem")
+def _blade_waits_for_the_grip():
+    """`truss.Cutter`'s three conditions, each one a truss that went on the floor.
+
+    ⚠️ **This is the check that the earlier gates would have failed**, which is
+    the only reason it earns a place in a file that deliberately holds four
+    assertions per mechanism. Cutting the peduncle is irreversible and it is the
+    single moment 0.80 kg becomes the gripper's problem: fire it early and the
+    cluster is released into a gripper that has not closed. Both earlier
+    versions did, and both *sometimes* got away with it — the closing pads
+    scooped the truss and the shift scored a `clean` pick — so the failure does
+    not reliably show up in an outcome count.
+
+    Checked on the mechanism rather than through a pick, so it costs
+    milliseconds: hand the cutter a scene, and confirm it refuses while any one
+    of proximity, two-sided pad load and finger stall is missing.
+    """
+    import mujoco
+    from farm import truss as ft
+    from plant_row import Row
+    from reach import Gripper
+
+    ts = ft.spawn(n_per_row=2, seed=3)
+    model = ft.build(aisle=0, arms=("a",), trusses=ts, seed=3)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    row = Row(model, data, names=[t.name for t in ts],
+              snap_n=ft.TRUSS_SNAP_N, homes={t.name: t.pos for t in ts})
+    name = ts[0].name
+    cut = ft.Cutter(model, data, row, name, Gripper(model, data))
+
+    # Nothing has happened yet: the tool is parked, the pads are open.
+    cut.tick()
+    assert not cut.cut, "the blade cut with the arm parked and the pads open"
+
+    # The commanded closure is the gate that shipped, and on its own it is not
+    # a grip — the pads take most of a second to arrive and are 44 mm apart
+    # around a 20 mm collar when the command passes half stroke.
+    Gripper(model, data).close()
+    mujoco.mj_forward(model, data)
+    cut.tick()
+    assert not cut.cut, (
+        "the blade cut on the gripper *command* — the pads have not moved yet, "
+        "and 0.80 kg is about to be released into an open gripper")
+    assert row.attached(name), "the weld went inactive anyway"
+
+    # And the pad-force gate on its own: force with the fingers still
+    # travelling is one pad sweeping the truss across, not a hold.
+    assert cut.finger_speed() >= 0.0
+    assert min(cut.pad_load()) == 0.0, \
+        "the pads report load on a collar nothing is touching"
+    return (f"refused on parked, on command-only and on no-contact; gate is "
+            f"{ft.CUT_HOLD_N:.0f} N on both pads with the fingers under "
+            f"{ft.CUT_STALL_V}")
+
+
+@check("a truss is carried and crated by its own geometry, not a tomato's")
+def _truss_carry_geometry():
+    """The three loose-fruit assumptions a hanging cluster breaks.
+
+    ⚠️ Each one scored a *successful* pick as a failure or a failure as a
+    success, which is why they are asserted rather than commented:
+
+    1. the release height is `mission.BIN_DROP_UP` — a loose fruit ends 33 mm
+       below the tool, a truss ends 271 mm below it, so the loose number drags
+       the cluster through the crate wall
+    2. `fr5.crate_contains` reads the body origin — for a truss that is the
+       grasp point, a quarter-metre above the fruit lying in the crate
+    3. `mission.CropObstacles` modelled a crop body as one ball at that same
+       origin, so the planner could not see a neighbouring cluster at all
+    """
+    import mujoco
+    import mission
+    from farm import crop as fcrop, trolley, truss as ft
+    from mission import BIN_WALL, crop_spheres
+
+    # 1. the tool has to be high enough that the bottom fruit clears the rim
+    hang = ft.RACHIS_LEN + ft.FRUIT_R
+    assert mission.BIN_DROP_UP - hang < BIN_WALL, (
+        "the loose release height already clears a hanging cluster — this "
+        "check no longer describes the bug it was written for")
+    assert ft.CRATE_DROP_UP - hang >= BIN_WALL, (
+        f"a truss released at {ft.CRATE_DROP_UP:.3f} m puts its bottom fruit "
+        f"{(ft.CRATE_DROP_UP - hang) * 1000:.0f} mm over a {BIN_WALL * 1000:.0f} "
+        f"mm wall — it will be swept through the crate on the carry")
+
+    # 2. and 3. want a scene
+    ts = ft.spawn(n_per_row=2, seed=3)
+    model = ft.build(aisle=0, arms=("a",), trusses=ts, seed=3)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    gids, radii = crop_spheres(model, ts[0].name)
+    assert len(gids) == ft.FRUIT_PER_TRUSS + 1, (
+        f"the planner sees a truss as {len(gids)} sphere(s), not the collar "
+        f"plus {ft.FRUIT_PER_TRUSS} fruit — it is blind to the cluster")
+
+    # The same call on a loose fruit must return exactly what Weeks 1-4 used,
+    # or this change moved numbers it had no business touching.
+    lt = fcrop.spawn(n_per_row=2, seed=3)
+    lmodel = trolley.build(aisle=0, arms=("a",), trusses=lt, seed=3)
+    lg, lr = crop_spheres(lmodel, lt[0].name)
+    from plant_row import FRUIT_R
+    assert len(lg) == 1 and abs(lr[0] - FRUIT_R) < 1e-9, (
+        f"a loose fruit now reads as {len(lg)} sphere(s) of {lr} — Weeks 1-4 "
+        f"clearances were all measured against one of exactly {FRUIT_R}")
+
+    # 3. the crate, asked about the fruit rather than the grasp point
+    bin_pos = np.array(trolley.crate_pos(model, data, "a"), dtype=float)
+    name = ts[0].name
+    # Stand the cluster in the crate: fruit on the floor, origin far above it.
+    row_qadr = model.joint(model.body(name).jntadr[0]).qposadr[0]
+    data.qpos[row_qadr:row_qadr + 3] = bin_pos + [0, 0, ft.RACHIS_LEN + 0.04]
+    data.eq_active[model.equality(f"peduncle_{name}").id] = 0
+    mujoco.mj_forward(model, data)
+    from fr5 import crate_contains
+    from mission import BIN_HALF
+    assert not crate_contains(data.body(name).xpos, bin_pos, BIN_HALF,
+                              BIN_WALL), \
+        "the one-point crate test now passes for a standing truss — re-read it"
+    assert ft.in_crate(model, data, name, bin_pos), (
+        "a truss standing in the crate does not score as crated")
+    return (f"release {ft.CRATE_DROP_UP:.3f} m clears a {hang * 1000:.0f} mm "
+            f"cluster; planner sees {len(gids)} spheres per truss and "
+            f"{len(lg)} per loose fruit; a standing truss crates")
+
+
 def main():
     print("Vinea simulation tests")
     print("=" * 72)

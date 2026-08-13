@@ -1052,7 +1052,8 @@ def assign(itinerary, state, verbose=True):
 def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         use_truth=False, max_stops=None, on_tick=None, stride=None,
         verbose=True, scout_cls=DuoScout, crop_version=None, truth=None,
-        after_reset=None, snap_n=None, on_pick=None, truth_map=None):
+        after_reset=None, snap_n=None, on_pick=None, truth_map=None,
+        plan_opts=None, score_in_bin=None):
     """Map, plan, travel, pick, crate — one full row, both arms, concurrently.
 
     The scene is passed in rather than built here: a `mujoco.Renderer` binds to
@@ -1428,10 +1429,18 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                 # globals are touched, which is why the other arm can be
                 # mid-mission while this runs. See `mission.ArmFrame`.
                 fr = armframe.frame(model, data, tag)
+                # ⚠️ Anything the *crop* changes about the route, rather than
+                # the machine. A truss is carried differently from a loose
+                # tomato — it hangs a quarter-metre below the tool and must not
+                # be turned over — so `farm.two_arm_farm_truss` supplies
+                # `bin_drop_up` and `carry_axis` here. Left None this is the
+                # loose-fruit two-arm run, unchanged. See `mission.Planner`.
+                extra = {} if plan_opts is None else dict(
+                    plan_opts(model, data, tag, fr))
                 planner = Planner(model, data, row, lessons=None,
                                   clearance=0.040, park_q=parks[tag],
                                   speed=speed, prefix=prefix, others=others,
-                                  pin=tuple(pin), frame=fr)
+                                  pin=tuple(pin), frame=fr, **extra)
                 m = planner.plan(name)
                 me.route(m)
                 if m.ok:
@@ -1535,6 +1544,17 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                 me.run = None
                 me.waiting_on = ""
             res = run_.result
+            # ⚠️ `week2_pick` scores the crate against `data.body(name).xpos`,
+            # which for a loose tomato is the middle of the tomato and for a
+            # truss is the grasp point at the top of the collar — a quarter of a
+            # metre above the fruit once the cluster is lying in the crate, so
+            # the height test fails on every correctly crated truss. A crop that
+            # needs a different question asked supplies it here; see
+            # `farm.truss.in_crate`.
+            if score_in_bin is not None:
+                res["in_bin"] = bool(score_in_bin(model, data, name,
+                                                  armframe.frame(model, data,
+                                                                 tag)))
 
             rec = {"stop": si, "stage": fruit.stage, "row": fruit.row,
                    "seen": True, "fruit": name,

@@ -56,6 +56,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from farm import crop as fcrop  # noqa: E402
 from farm import house, trolley  # noqa: E402
+# BIN_HALF and BIN_WALL are the crate's own geometry and are the two names in
+# `mission` that `farm.armframe` does *not* rebind per arm — see its `_HOLDERS`
+# note. Importing them by value is therefore safe here, where importing
+# `BIN_POS` by value would not be.
+from mission import BIN_HALF, BIN_WALL  # noqa: E402
 from plant_row import PEDUNCLE_SOLREF, STEM_LEN, STEM_R  # noqa: E402
 
 # --- the cluster -------------------------------------------------------------
@@ -467,13 +472,93 @@ def build(aisle=0, arms=("a",), crate=True, wrist_cam=False, deck_cam=False,
 
 # --- the blade ---------------------------------------------------------------
 
-# How closed the pads have to be, on Robotiq's 0-255 scale, before the blade
-# will cut. Well past the point where the pads have met a 20 mm stem, so the cut
-# cannot happen while the gripper is still travelling.
-CUT_CLOSED = 0.55 * 255.0
+# What the pads have to be pushing on the collar, per pad, before the blade will
+# cut. **Both** pads, measured off the contacts, in newtons.
+#
+# ⚠️ **This replaces a commanded-closure gate, and that gate was the reason the
+# truss went on the floor.** The first version cut at `ctrl >= 0.55 * 255` on
+# the stated grounds that the pads had met a 20 mm stem by then. They have not.
+# Closing the 2F85 on nothing and reading the gap between the pad centres:
+#
+#     ctrl      0     80    120    140    180    200    220    255
+#     gap mm   93.2   68.5  54.9   47.9   33.5   26.2   18.8    8.8
+#
+# The pads touch each other at 8.8 mm of centre separation, so a 20 mm collar is
+# held at ~29 mm of it — ctrl ≈ 200. At the 140 the blade was firing at, the
+# pads are 44 mm apart around a 20 mm stem: 12 mm of air on each side. Measured
+# through the real mission on seed 7, the pad *forces* on the collar during the
+# grip ramp are
+#
+#     ctrl      121    138     155     172     206     240
+#     pad L N   0.00   9.56   35.48   48.71   50.20   53.61
+#     pad R N   0.00   0.00   24.85   32.83   35.33   39.40
+#
+# — so at ctrl 140 exactly one pad is touching, and it is *pushing the truss
+# sideways*. The weld was released there, into a gripper that had not got hold
+# of anything, and 0.80 kg fell. Sometimes the closing pads scooped it on the
+# way past and the run scored `clean` anyway, which is worse than failing: the
+# shift report's own "the fruit was flung and happened to land in the crate"
+# line was that.
+#
+# 5 N is one-eighth of the ~43 N the weaker pad settles at, and two orders of
+# magnitude above the 0.05 N of a graze, so it is a hold and not a touch.
+CUT_HOLD_N = 5.0
+
+# How slowly the fingers have to be moving before the blade will cut — the
+# gripper's own tendon velocity, in the actuator's units.
+#
+# ⚠️ **Force on both pads is not on its own a grip, and seed 23 is the proof.**
+# The pads sweep in on an arc, and the first one to arrive *pushes the truss
+# across into the second*, so both pads read load while they are still 55 mm
+# apart and closing at full ramp speed. Cutting there dropped the cluster: the
+# weld let go, and the only thing left holding 0.80 kg was a pair of pads still
+# travelling, which squeezed it out sideways. Measured, per control cycle:
+#
+#     seed 23   pads first both loaded   19 / 29 N   gap 55.0 mm   |v| 0.52
+#               fingers stalled          32 / 47 N   gap 47.3 mm   |v| 0.02
+#     seed  7   pads first both loaded   33 / 23 N   gap 51.5 mm   |v| 0.28
+#               fingers stalled          50 / 35 N   gap 45.6 mm   |v| 0.05
+#
+# The velocity separates them by more than an order of magnitude, because it is
+# asking the one question that matters: have the pads *arrived*. A 2F85 that has
+# taken up on a stem has stopped; one that is still on its way has not, whatever
+# it is bouncing off on the way past. Both trusses stall at a 46 mm pad gap,
+# which is what a 20 mm collar between these pads measures.
+#
+# 0.05 is a tenth of the ~0.5 the fingers travel at under the 1.5 s grip ramp,
+# and three times the ~0.015 they settle to. A much slower ramp would narrow
+# that margin — this is a stall test, and it assumes the fingers were moving.
+CUT_STALL_V = 0.05
 
 # How near the tool has to be to the collar for the cut to be *this* truss's.
 CUT_REACH = 0.06
+
+# How high above the crate the tool holds the truss before opening the pads.
+#
+# ⚠️ **Derived, not chosen, and `mission.BIN_DROP_UP`'s 0.28 m is a loose
+# fruit's number.** A tomato in the pads ends 33 mm below the tool; a truss
+# hangs its whole rachis below the collar, so the bottom of the cluster is
+# `RACHIS_LEN + FRUIT_R` = 271 mm down. At 0.28 m the bottom fruit sits 11 mm
+# *below the crate floor* and the `carry` leg sweeps the cluster straight
+# through the crate wall — measured, that knocked the truss out of the pads
+# every time and `in_bin` came back False on picks the grip had not failed.
+#
+# So: clear the wall by the cluster's own length plus a margin. The margin is
+# `mission.BIN_DROP_UP`'s own clearance over a loose fruit, kept the same rather
+# than re-chosen.
+CRATE_CLEAR = 0.04
+CRATE_DROP_UP = RACHIS_LEN + FRUIT_R + BIN_WALL + CRATE_CLEAR      # 0.431 m
+
+# How far a crate may be heaped above its rim and still be "the crate".
+#
+# ⚠️ Two trusses fill this one level — 320 mm across, 120 mm deep, against a
+# cluster about 100 mm thick lying down — so a rim-height test calls every
+# truss from the third on a miss, and reads as a machine that cannot crate
+# rather than a crate that is full. Two clusters' worth of heap is the working
+# allowance; past that the crate wants swapping, which this sim does not model.
+# See `in_crate`, which spends it, and `drop_height`, which carries the tool
+# over it.
+CRATE_HEAP = 2 * (2 * FRUIT_R + FRUIT_DY)                          # 0.212 m
 
 
 class Cutter:
@@ -502,34 +587,190 @@ class Cutter:
     ⚠️ It cuts on **grip and proximity together**, never on grip alone. A pass
     that only checked the pads would sever whichever truss the arm happened to
     be near when it closed on another one.
+
+    ⚠️ **And "grip" means the pads have arrived and taken up on the stem, which
+    is three measurements and not one.** The blade fires when
+
+        the tool is within `CUT_REACH` of the collar     — it is this truss
+        both pads carry `CUT_HOLD_N` on the collar       — it is between them
+        the fingers have stopped, `CUT_STALL_V`          — they have arrived
+
+    and every clause has a dropped truss behind it. Cutting on the *commanded*
+    closure fired with the pads 44 mm apart around a 20 mm collar. Cutting on
+    pad force alone fired while the pads were still travelling and shoving the
+    cluster from one side to the other. Both put 0.80 kg on the floor; both
+    sometimes got away with it, which is worse, because a scooped truss lands in
+    the crate and the shift scores it `clean`.
     """
 
     def __init__(self, model, data, row, name, gripper, reach=CUT_REACH,
-                 closed=CUT_CLOSED, tool_site="tool0"):
+                 hold_n=CUT_HOLD_N, stall_v=CUT_STALL_V, tool_site="tool0",
+                 prefix=""):
+        import mujoco
+
+        from carrytrace import LEFT_PADS, RIGHT_PADS
+
+        self.mj = mujoco
         self.model, self.data, self.row = model, data, row
         self.name = name
         self.gripper = gripper
-        self.reach, self.closed = reach, closed
-        self.site = model.site(tool_site).id
+        self.reach, self.hold_n, self.stall_v = reach, hold_n, stall_v
+        self.site = model.site(prefix + tool_site).id
         self.eq = row.eq_id[name]
         self.bid = model.body(name).id
+        # The collar is the truss's `{name}_geom` — see `add_trusses`, which
+        # gives it that name precisely so the pad-force recorders find it.
+        self.collar = model.geom(f"{name}_geom").id
+        self.left = [model.geom(prefix + n).id for n in LEFT_PADS]
+        self.right = [model.geom(prefix + n).id for n in RIGHT_PADS]
+        self._buf = np.zeros(6)
         self.cut_at = None       # seconds, when the blade went through
+        self.hold_at = None      # (left N, right N) the blade cut on
+
+    def finger_speed(self):
+        """How fast the tendon is still travelling. Zero means arrived."""
+        return float(abs(self.data.actuator_velocity[self.gripper.index]))
 
     @property
     def cut(self):
         return self.cut_at is not None
 
+    def pad_load(self):
+        """Normal force each pad is putting on the collar, in newtons.
+
+        Left and right separately, because the failure being guarded against is
+        exactly one pad touching: a single loaded pad is not a grip, it is the
+        gripper shoving the truss sideways on its way past.
+        """
+        f = [0.0, 0.0]
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if self.collar not in (g1, g2):
+                continue
+            other = g2 if g1 == self.collar else g1
+            if other in self.left:
+                side = 0
+            elif other in self.right:
+                side = 1
+            else:
+                continue
+            self.mj.mj_contactForce(self.model, self.data, i, self._buf)
+            f[side] += abs(float(self._buf[0]))
+        return f
+
     def tick(self, t=None):
         """Call every control cycle. Cheap, and idempotent once it has fired."""
         if self.cut:
             return
-        if float(self.data.ctrl[self.gripper.index]) < self.closed:
-            return
         tool = self.data.site_xpos[self.site]
         if float(np.linalg.norm(self.data.xpos[self.bid] - tool)) > self.reach:
             return
+        load = self.pad_load()
+        if min(load) < self.hold_n:
+            return
+        if self.finger_speed() > self.stall_v:
+            return
         self.data.eq_active[self.eq] = 0
         self.cut_at = float(self.data.time)
+        self.hold_at = tuple(load)
+
+
+# --- did it land in the crate ------------------------------------------------
+
+def in_crate(model, data, name, bin_pos, half=BIN_HALF, wall=BIN_WALL,
+             need=0.5):
+    """Is this truss in the crate? Scored on the **fruit**, not the body origin.
+
+    ⚠️ **`fr5.crate_contains` reads one point, and for a truss that point is in
+    the wrong place.** It is handed `data.body(name).xpos`, which for a loose
+    tomato is the middle of the tomato and for a truss is the *grasp point* —
+    the top of the collar, by construction (see `add_trusses`). A truss standing
+    in the crate has its fruit on the crate floor and that origin 274 mm above
+    them, so `pos[2] < crate_z + BIN_WALL` is false and a perfectly crated truss
+    scored `in_bin: False`. Measured: it fails for every upright landing, and
+    for a cluster lying flat it depends on which way the rachis happens to point
+    — the origin is 238 mm from the fruit and the crate is 320 mm across.
+
+    So ask the question of the thing that is actually in the crate. A truss
+    counts when at least `need` of its fruit are inside, which is the same
+    commercial unit the rest of this module works in: a cluster half out of the
+    crate is not crated, and one fruit poking over the rim is not a miss.
+
+    ⚠️ **"Inside" is the footprint and the floor, not the rim, because two
+    trusses fill this crate to the rim and the third is not a failure.** The
+    crate is 320 mm across and 120 mm deep; a cluster lying in it is about
+    100 mm thick, and measured on seed 13 the *first* truss settled with its
+    top fruit at z 0.391 against a rim at 0.386. Scored against the rim, every
+    truss from the third on is a miss however neatly it lands — which says the
+    machine cannot crate, when what is true is that the crate is full. A real
+    TOV crate is heaped and swapped, and this sim has no crate swap.
+
+    So the height test is "resting above the crate floor" rather than "below
+    the rim", bounded by `CRATE_HEAP` so a cluster still in the gripper or
+    perched on the crate wall cannot pass. The footprint test is what keeps a
+    truss on the floor beside the crate out: its fruit sit at z 0.033, well
+    below a crate floor at 0.266, and off to one side of it.
+    """
+    bin_pos = np.asarray(bin_pos, dtype=float)
+    inside = 0
+    total = 0
+    for p in fruit_geom_pos(model, data, name):
+        total += 1
+        if (abs(p[0] - bin_pos[0]) < half and abs(p[1] - bin_pos[1]) < half
+                and bin_pos[2] < p[2] < bin_pos[2] + wall + CRATE_HEAP):
+            inside += 1
+    return total > 0 and inside >= need * total
+
+
+def fruit_geom_pos(model, data, name):
+    """Where this truss's fruit are right now, in world coordinates."""
+    out = []
+    for k in range(FRUIT_PER_TRUSS):
+        try:
+            gid = model.geom(f"{name}_f{k}").id
+        except KeyError:
+            break
+        out.append(data.geom_xpos[gid])
+    return out
+
+
+def crate_top(model, data, names, bin_pos, half=BIN_HALF):
+    """How high the crate is filled, in world z. The rim if it is empty.
+
+    Only fruit standing over the crate footprint count — a truss that ended up
+    on the floor beside the crate is not in the way of the next one.
+    """
+    bin_pos = np.asarray(bin_pos, dtype=float)
+    top = float(bin_pos[2] + BIN_WALL)
+    for n in names:
+        for p in fruit_geom_pos(model, data, n):
+            if (abs(p[0] - bin_pos[0]) < half
+                    and abs(p[1] - bin_pos[1]) < half):
+                top = max(top, float(p[2]) + FRUIT_R)
+    return top
+
+
+def drop_height(model, data, names, bin_pos):
+    """How far above the crate to hold the *tool* for the next release.
+
+    ⚠️ **`CRATE_DROP_UP` clears an empty crate, and by the second truss of a
+    stop the crate is not empty.** Measured on seed 11: the first cluster
+    settled with its top fruit at z 0.391 against a rim at 0.386 — a couple of
+    millimetres proud of it — and the second truss was carried in at a height
+    chosen for the rim, struck it at 0.389, and was knocked out of the pads.
+    Every pick after the first at a stop had the same 40 mm of clearance
+    against a crate that was filling up.
+
+    So the height is read off the crate rather than assumed: clear whatever is
+    actually in it by a whole cluster plus `CRATE_CLEAR`. It grows as the crate
+    fills, which is correct and is also the honest failure mode — a crate
+    filled past the arm's reach makes the planner refuse the pick rather than
+    quietly throwing trusses at it.
+    """
+    bin_pos = np.asarray(bin_pos, dtype=float)
+    fill = crate_top(model, data, names, bin_pos) - float(bin_pos[2])
+    return max(CRATE_DROP_UP, fill + RACHIS_LEN + FRUIT_R + CRATE_CLEAR)
 
 
 # --- the cluster decision, from what the camera saw --------------------------
