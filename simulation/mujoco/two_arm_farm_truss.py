@@ -195,10 +195,27 @@ def main():
     # `trolley._crate_local`.
     _names = [t.name for t in trusses]
 
+    # ⚠️ The grasp settings are **per arm**, because the failure they fix is
+    # arm b's alone. Measured, first robot-to-truss contact of each pick: arm
+    # a's pad hits the collar and grips; arm b's hits the top tomato 30 mm
+    # before the tool arrives and sweeps the cluster 850 mm down the row. See
+    # `truss.MIRRORED_GRASP_ROLL` for why the two arms cannot be given the
+    # same answer.
     def plan_opts(model_, data_, tag, fr):
-        return {"bin_drop_up": ft.drop_height(model_, data_, _names,
+        opts = {"bin_drop_up": ft.drop_height(model_, data_, _names,
                                               fr.bin_pos),
                 "carry_axis": "into_row"}
+        # ⚠️ **Only the mirrored arm, and that is the finding rather than a
+        # shortcut.** Arm a's free wrist roll lifts its pad over the cluster's
+        # top fruit; arm b's +y pad cannot be lifted at any roll, so it grasps
+        # level and takes its clearance from the collar instead. Asking both
+        # arms for the same thing was tried twice and both times cost picks —
+        # see `truss.MIRRORED_GRASP_ROLL`, which carries the numbers.
+        if fr.roll_sign < 0:
+            opts["grasp_roll"] = ft.MIRRORED_GRASP_ROLL
+            opts["grasp_offset"] = ft.MIRRORED_GRASP_OFFSET
+            opts["roll_cost"] = ft.ROLL_COST
+        return opts
 
     def score_in_bin(model_, data_, name, fr):
         return ft.in_crate(model_, data_, name, fr.bin_pos)

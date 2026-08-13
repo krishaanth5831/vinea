@@ -225,6 +225,31 @@ class ArmFrame:
         """Sign of "out of the canopy" along x. See `Route.pull_vector`."""
         return -float(self.into_row[0])
 
+    @property
+    def roll_sign(self):
+        """Which way a commanded roll tips the pads, in **world** terms.
+
+        ⚠️ **The same commanded roll tilts the two arms' pads opposite ways,
+        and that is a property of the frame rather than a bug in either arm.**
+        `reach.approach_rotation` builds its first axis as `cross([0,0,1],
+        approach)`, so an arm reaching along +x gets `x = +y` and an arm
+        reaching along -x gets `x = -y`. Rolling by +theta rotates that axis
+        toward world up in both cases — which lifts the **+y** pad on the first
+        arm and drops it on the second.
+
+        Measured, as the height of the +y pad above the -y pad:
+
+            commanded roll   -45     0    +45    +90
+            arm a            +1 mm  +3   +65    +93
+            arm b            -7 mm  -7   -64    -92
+
+        Antisymmetric to within a millimetre. It costs nothing on a loose
+        tomato, where the roll is free and the fruit is a sphere at the pinch
+        point. On a truss it decides whether the pad on the cluster's fruit side
+        rides over that fruit or through it — see `farm.truss.GRASP_ROLL`.
+        """
+        return 1.0 if float(self.into_row[0]) >= 0 else -1.0
+
 
 WORLD = ArmFrame(park=PARK, stage_x=STAGE_X, bin_pos=BIN_POS, row_x=ROW_X,
                  into_row=INTO_ROW)
@@ -890,7 +915,8 @@ class Planner:
     def __init__(self, model, data, row, lessons=None, clearance=CLEARANCE,
                  park_q=None, speed=DEFAULT_SPEED, prefix="", others=(),
                  pin=(), frame=None, bin_drop_up=BIN_DROP_UP,
-                 carry_axis=None):
+                 carry_axis=None, grasp_roll=None,
+                 roll_cost=ROLL_COST_PINNED, grasp_offset=None):
         import mink
 
         self.model = model
@@ -939,6 +965,55 @@ class Planner:
         # `None` is Weeks 1-4 and is `DOWNWARD`. `"into_row"` is resolved per
         # arm in `_legs` — see the note there. Anything else is taken as a
         # world-frame vector.
+        # ⚠️ **The wrist roll, and on a truss it is not arbitrary.**
+        # `reach.Reacher.roll_cost` leaves it free by default and that note is
+        # right about why: `approach_rotation` has to return *some* full frame,
+        # the roll it picks is arbitrary, and charging the solver for missing an
+        # arbitrary target wastes a DOF. On a sphere it genuinely does not
+        # matter.
+        #
+        # On a truss it decides the pick. The 2F85 travels in **open**, at a
+        # 93 mm span, so each pad rides ~46 mm off the tool axis — and
+        # `farm.truss.fruit_offsets` always puts fruit 0 at +40 mm in y, 48 mm
+        # below the grasp point, with a 33 mm radius. Whether the pad on that
+        # side rides over the fruit or through it is the roll.
+        #
+        # ⚠️ **And the two arms cannot reach the same rolls**, which is the
+        # thing that took three attempts to see. Measured as the height of the
+        # +y pad above the -y pad, driving each arm to a truss collar:
+        #
+        #     commanded roll   -90   -45     0   +45   +90
+        #     arm a  +y pad     -0    +1    +3   +65   +93
+        #     arm b  +y pad     -7    -7    -7   -64   -92
+        #
+        # Arm a can lift the pad clear and, left free, does. Arm b's +y pad
+        # **never goes positive at any roll** — its best is roughly level. So
+        # this is not one roll mirrored between the arms (that was tried, and
+        # it made the two-arm run worse); it is each arm using the best roll it
+        # can actually reach, which is why `grasp_roll` is applied as given and
+        # the caller picks it per arm.
+        #
+        #     arm a   gr_right_pad1  hit COLLAR   tool  8 mm out   -> gripped
+        #     arm b   b_gr_left_pad1 hit fruit0   tool 34 mm out   -> shoved
+        #
+        # ⚠️ Asking is not getting: `ROLL_COST_PINNED` is 0.08 against a
+        # position cost of 1.0, enough to bias a roll the null space does not
+        # care about and not enough to hold one — at 0.08 a commanded roll came
+        # back as the free-roll answer. Hence `roll_cost` is a parameter too.
+        #
+        # `None` is Weeks 1-4 and every single-armed truss run: free roll.
+        self.grasp_roll = None if grasp_roll is None else float(grasp_roll)
+        self.roll_cost = float(roll_cost)
+        # ⚠️ **Where to aim on the target, relative to the body origin.**
+        # Zero for a loose tomato: the body *is* the tomato. A truss's origin
+        # is the middle of a 45 mm collar whose lower end is 15 mm from the
+        # top fruit's crown, and the gripper travels in **open** at a 93 mm
+        # span — so on the arm that cannot roll its pad clear, aiming a little
+        # higher up the collar is what buys the clearance instead. Measured to
+        # be worth it only in company with a level roll; on its own it cost a
+        # working seed a pick.
+        self.grasp_offset = (np.zeros(3) if grasp_offset is None
+                             else np.asarray(grasp_offset, dtype=float))
         if carry_axis is None:
             self.carry_axis = DOWNWARD
         elif isinstance(carry_axis, str):
@@ -1186,11 +1261,12 @@ class Planner:
         # A chosen roll applies to every leg that faces the row, so the wrist
         # arrives already rotated rather than turning inside the canopy — the
         # same argument as turning for the crate out at the staging plane.
-        if abs(route.roll) > 1e-6:
+        if self.grasp_roll is not None or abs(route.roll) > 1e-6:
             for leg in legs:
                 if leg.approach is not None and np.allclose(leg.approach, INTO_ROW):
-                    leg.roll = route.roll
-                    leg.roll_cost = ROLL_COST_PINNED
+                    leg.roll = (route.roll if self.grasp_roll is None
+                                else route.roll + self.grasp_roll)
+                    leg.roll_cost = self.roll_cost
         return legs
 
     def _lane_z(self, route: Route, target) -> float:
@@ -1373,7 +1449,7 @@ class Planner:
         staging plane is both the fastest route and the one the row is laid out
         for — and widened only when the check says the direct one is blocked.
         """
-        target = self.row.pos(name)
+        target = self.row.pos(name) + self.grasp_offset
         base = Route(stage_x=self.frame.stage_x, frame=self.frame)
         applied = []
         if self.lessons is not None:

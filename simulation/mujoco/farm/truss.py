@@ -533,6 +533,47 @@ CUT_STALL_V = 0.05
 # How near the tool has to be to the collar for the cut to be *this* truss's.
 CUT_REACH = 0.06
 
+# How the *mirrored* arm has to grasp a truss. See `mission.ArmFrame.roll_sign`.
+#
+# ⚠️ **The 2F85 travels in OPEN, at a 93 mm span**, so each pad rides ~46 mm off
+# the tool axis on the way in — and `fruit_offsets` always puts fruit 0 at
+# +40 mm in y, 48 mm below the grasp point, with a 33 mm radius. Whether the pad
+# on that side rides over the fruit or through it is the wrist roll.
+#
+# ⚠️ **And the two arms cannot reach the same rolls.** Measured as the height of
+# the +y pad above the -y pad, driving each arm to a truss collar:
+#
+#     commanded roll   -90   -45     0   +45   +90
+#     arm a  +y pad     -0    +1    +3   +65   +93     can lift it clear
+#     arm b  +y pad     -7    -7    -7   -64   -92     never lifts at all
+#
+# Arm a, left free, rolls to ~43 deg and lifts its pad over fruit 0 — which is
+# why every single-armed run crates and why this module asks nothing of it. Arm
+# b is bolted round 180 deg (`trolley.ARM_YAW`) and its +y pad never goes
+# positive at any roll, so it cannot copy arm a. Measured, that is the whole
+# two-arm failure:
+#
+#     arm a   gr_right_pad1  hit COLLAR   tool  8 mm out   -> gripped
+#     arm b   b_gr_left_pad1 hit fruit0   tool 34 mm out   -> shoved 850 mm
+#
+# So arm b grasps **level** — the best roll it can reach — and takes its
+# clearance from aiming a little higher up the collar instead. The collar runs
+# +/- 22.5 mm about the grasp point and the fruit's crown is 15 mm below its
+# lower end, so 15 mm of lift keeps both pads on clean stem with 7 mm to spare.
+#
+# ⚠️ **Neither half works alone and both were measured.** Level roll on its own
+# still put arm b's pad into fruit 0; the offset on its own cost a working seed
+# a pick; the same roll mirrored onto both arms made the two-arm run worse than
+# doing nothing. Together, on the mirrored arm only, the blade goes from 2/4 to
+# 4/4 with no grasp failures.
+#
+# `roll_cost` is 0.5 against `mission.ROLL_COST_PINNED`'s 0.08, because 0.08
+# does not hold a roll: at that cost a commanded roll came back as the free-roll
+# answer. Position cost is 1.0 and still dominates, so the tool goes where sent.
+MIRRORED_GRASP_ROLL = 0.0
+MIRRORED_GRASP_OFFSET = np.array([0.0, 0.0, 0.015])
+ROLL_COST = 0.5
+
 # How high above the crate the tool holds the truss before opening the pads.
 #
 # ⚠️ **Derived, not chosen, and `mission.BIN_DROP_UP`'s 0.28 m is a loose

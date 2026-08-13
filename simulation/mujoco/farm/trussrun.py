@@ -377,6 +377,13 @@ def run(seed=None, aisle=0, n_per_row=6, speed=0.4, use_truth=False,
                 # down as gripped, and the release drops it straight in. See
                 # `Planner.carry_axis`, which carries the measurement.
                 drop_up = ft.drop_height(model, data, names, fr.bin_pos)
+                # ⚠️ **The roll is left free here on purpose.** This is arm
+                # a, whose wrist rolls to ~43 deg on its own and lifts the pad
+                # clear of the cluster's top fruit — which is why every
+                # single-armed seed crates. It is the *mirrored* arm that
+                # cannot do that and needs help; see
+                # `truss.MIRRORED_GRASP_ROLL` and `two_arm_farm_truss`.
+                # Pinning a roll here was measured to cost picks.
                 planner = Planner(model, data, row, lessons=None,
                                   clearance=0.040, park_q=park_q, speed=speed,
                                   frame=fr, bin_drop_up=drop_up,
