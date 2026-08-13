@@ -293,6 +293,82 @@ def _prefix_addresses_arm_b():
             f"{apart * 1000:.0f} mm apart; default still arm A")
 
 
+@check("the scouting camera rides the trolley in every rendered frame")
+def _scout_head_rides_the_trolley():
+    """The deck cam teleporting across `farm/watch.py`'s panel.
+
+    The head is a world-parented mocap body, so it does not move when the
+    trolley does — `ScoutHead.follow` is what puts it back on the mast, and the
+    only caller was `Scout.look`, once per survey frame. Between two of those
+    the trolley drives a whole `SCOUT_STRIDE`, so the panel held still and then
+    jumped 0.50 m; during HARVEST, and under `--truth`, nothing called `follow`
+    at all and the camera stayed behind for the entire shift.
+
+    Three assertions. The middle one is the fix itself: the camera holds a
+    fixed offset from the drive joint wherever the trolley is. The two either
+    side of it are what keep that honest, and both are two-sided in the way
+    `_reset_home_free_body` is.
+
+    **`mocap_pos` alone must not move `cam_xpos`.** That is the trap the first
+    attempt at this fell into — `follow` returns happily, `mj_kinematics` walks
+    the body tree, and the camera stays exactly one frame behind because
+    `cam_xpos` is `mj_camlight`'s job. It reads as a working panel.
+
+    **A mocap body must not start riding its mast on its own.** If MuJoCo ever
+    makes it, this is the only thing here that will say the seat has stopped
+    being load-bearing.
+    """
+    import mujoco
+    from farm import trolley, watch
+    from farm.scout import ScoutHead
+
+    model = trolley.build(aisle=0, arms=("a",), crate=False, leafy=False,
+                          deck_cam=True)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    head = ScoutHead(model, data, aisle=0)
+    drive = trolley.Drive(model, data)
+    jadr = model.joint(trolley.DRIVE_JOINT).qposadr[0]
+
+    def lead():
+        """How far ahead of the drive joint the lens currently is."""
+        return float(data.cam("scout").xpos[1]) - float(data.qpos[jadr])
+
+    # `follow` writes `mocap_pos` and nothing else. Until the camera frames are
+    # recomputed the lens has not moved — the half of this that is easy to miss.
+    drive.park_at(1.5)
+    mujoco.mj_forward(model, data)
+    before = np.array(data.cam("scout").xpos, float)
+    head.follow(data)
+    unmoved = float(np.linalg.norm(data.cam("scout").xpos - before))
+    assert unmoved < 1e-9, (
+        "writing mocap_pos now moves cam_xpos on its own — the "
+        "mj_kinematics/mj_camlight pair in farm.watch.seat_scout_head may have "
+        "become unnecessary, re-read it before trusting this")
+
+    offsets, stale = [], []
+    for y in (-2.0, 0.0, 2.5, -3.4):
+        drive.park_at(y)
+        mujoco.mj_forward(model, data)
+        stale.append(abs(lead()))   # where the panel framed it before the fix
+        watch.seat_scout_head(head, model, data)
+        offsets.append(lead())
+
+    spread = max(offsets) - min(offsets)
+    assert spread < 1e-9, (
+        f"the camera slid {spread * 1000:.1f} mm along its own mast between "
+        f"trolley positions — it is not seated on the drive joint")
+
+    drift = max(stale) - min(stale)
+    assert drift > 0.5, (
+        "the scout head now follows the trolley without being told to — "
+        "MuJoCo started moving mocap bodies, so re-read farm.scout.add_deck_camera")
+    return (f"camera holds {offsets[0]:+.3f} m from the drive joint across "
+            f"4 positions (spread {spread * 1e6:.1f} um); unseated it drifts "
+            f"{drift * 1000:.0f} mm")
+
+
 def main():
     print("Vinea simulation tests")
     print("=" * 72)
