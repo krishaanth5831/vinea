@@ -196,6 +196,22 @@ CONCURRENT_TOWARD_M = 0.30
 PLAN_RETRIES = 6
 PLAN_RETRY_CYCLES = 10
 
+# How many times the harvest will re-survey **in a row** without working a stop
+# in between, before it goes and works the plan it has.
+#
+# ⚠️ **This is a liveness bound, not a policy.** `run` takes the crop version
+# before the survey starts, so a fruit hung *while the trolley is surveying*
+# correctly makes the resulting plan stale — and somebody hanging tomatoes
+# steadily during a survey would make every plan stale in turn and the machine
+# would drive the aisle for ever without picking anything. Which is a hang with
+# extra steps, and the demo cannot hang.
+#
+# Three, and then it works what it has and says so on the window. Nothing is
+# lost by that: the fruit that arrived is still in the pool, still welded, still
+# inside the running `Guard`'s frozen obstacle membership, and still there for
+# the next survey. What is given up is only its place in *this* itinerary.
+REPLANS_IN_A_ROW = 3
+
 # How long an arm will hold folded waiting for the deck to clear, in control
 # cycles. 6000 is 60 s of simulated time — longer than the 20-25 s pick it is
 # waiting on, with room for the other arm to be on its second fruit. Bounded so
@@ -575,9 +591,11 @@ class DuoState:
         self.contested = []        # (loser, owner, sighting), logged not hidden
         self.picked_by = {}        # truss name -> tag, the second contention gate
         self.machine = None        # live `Machine`, for the cycle counters
+        self.scout = None          # live `DuoScout`, published by `run`
         self.cycles = 0
         self.concurrent_cycles = 0
         self.open_cycles = 0
+        self.replans = 0           # times the crop changed under a checked plan
         left, right = house.serves(aisle)
         rows = {"a": right, "b": left}
         self.state = {t: ArmState(tag=t, row=rows[t]) for t in self.arms}
@@ -595,6 +613,18 @@ class DuoState:
         Anything that wants "is this arm working" should ask `flying`.
         """
         return next(iter(self.flying)) if len(self.flying) == 1 else None
+
+    def truth_points(self):
+        """Where the fruit *actually* are, for the faint markers on the map.
+
+        ⚠️ Read through a method rather than off `self.trusses` directly because
+        a `crop.Truss` carries the position it was **spawned** at, and on a
+        scene where fruit are placed by hand into a compiled pool that is the
+        parking bay behind the house, not the plant. `farm.mousereach` replaces
+        this with one that reads the live placed set. The default is the
+        spawned crop, which is exactly right when nothing moves fruit.
+        """
+        return [t.pos for t in self.trusses]
 
     @property
     def stats(self):
@@ -1021,12 +1051,75 @@ def assign(itinerary, state, verbose=True):
 
 def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         use_truth=False, max_stops=None, on_tick=None, stride=None,
-        verbose=True, scout_cls=DuoScout):
+        verbose=True, scout_cls=DuoScout, crop_version=None, truth=None,
+        after_reset=None, snap_n=None, on_pick=None, truth_map=None,
+        plan_opts=None, score_in_bin=None):
     """Map, plan, travel, pick, crate — one full row, both arms, concurrently.
 
     The scene is passed in rather than built here: a `mujoco.Renderer` binds to
     one `MjModel`, so a viewer that wants panels for the whole run has to own the
     model before the run starts. Same reason `farm.run` takes `scene=`.
+
+    --- the crop is allowed to change underneath this ------------------------
+
+    `crop_version` is a zero-argument callable returning an int that ticks
+    whenever the set of fruit changes — `week4_place.Crop.version`, which is
+    what `farm.mousereach` hands it. Left `None` **nothing below changes at
+    all**: the harvest is the same `for` loop over the same itinerary it always
+    was, the scout is closed at the same point, and no version is ever read.
+
+    ⚠️ **A changed crop voids every checked plan rather than weakening it.** The
+    planner's guarantee is that the route it verified clears every fruit it is
+    not picking by `CLEARANCE`. Hang a new tomato after that check and the
+    guarantee does not degrade — the route was never checked against that fruit
+    at all. `week4_place`'s docstring is where this is argued; the difference
+    here is that the *route* is void too, not only the pick: a fruit two stops
+    further down the aisle changes which stops exist.
+
+    ⚠️ **Noticed between picks, never mid-leg — exactly as `week4_place` does
+    it.** A leg is the unit a route was verified in, and an arm holding a
+    detached tomato cannot stow (`park_arm` is a teleport and teleporting with
+    fruit in the gripper drags it through the scene), so there is no safe point
+    to abandon a mission mid-flight. What covers the gap is that `Guard` is
+    built on a `ClearanceModel` whose membership is frozen over the **whole
+    pool**, parked fruit included with their welds live — so a fruit placed
+    during a flight is already in the running guard's obstacle set and is seen
+    from the cycle it appears. The *plan* is stale; the *guard* is not.
+
+    `truth` is the list drawn as ground truth on the map, defaulting to
+    `trusses`. They differ only when `trusses` is a compile-time pool most of
+    which is parked out of the scene and is not crop at all.
+
+    ⚠️ `after_reset(row)` is called once, immediately after the `reset_park`
+    below, and it exists because that call is `mj_resetData` underneath. A reset
+    puts every fruit back at the pose the model was **compiled** with, which is
+    correct for a spawned crop (it was compiled where it was spawned) and
+    destroys a hand-placed one (it was compiled in a parking bay). The hook is
+    handed the `Row` this function built so the crop and the harvest share one,
+    rather than two views of the same `eq_active` disagreeing about `home`.
+
+    --- growing a second crop through the same engine -------------------------
+
+    Three parameters exist so `two_arm_farm_truss.py` can run a **truss** crop
+    here rather than fork this function. Left `None` every one of them is
+    exactly the loose-fruit behaviour, unchanged, and no caller that predates
+    them reads differently.
+
+    `snap_n` is the force the plant lets go at, handed to `Row`. A truss weighs
+    0.8 kg against a loose fruit's 0.12, and `plant_row.SNAP_N` is below the
+    cluster's own static load — see `farm.truss.TRUSS_SNAP_N`, which carries the
+    published figure and the measurement of what happens without it.
+
+    `on_pick(tag, name, gripper, prefix)` is called as each mission starts and
+    may return a zero-argument callable, which is then run **once per control
+    cycle for the life of that mission** and dropped when it ends. It is how
+    `farm.truss.Cutter` gets a blade into this loop: a truss is severed at the
+    stem rather than pulled off it, and the cut has to happen on the cycle the
+    pads close rather than at some point a leg boundary could express.
+
+    `truth_map(trusses, aisle)` replaces the `use_truth` shortcut's map. The
+    built-in one reads `t.stage` off each fruit, and a truss has six of them —
+    so a crop whose unit is a cluster has to build its own.
     """
     import mujoco
 
@@ -1041,8 +1134,12 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     from week2_pick import MissionRun, anchor_posture, make_reacher
 
     arms = tuple(arms)
-    state.trusses = list(trusses)
+    state.trusses = list(trusses if truth is None else truth)
     names = [t.name for t in trusses]
+    # ⚠️ Read once per safe point, never cached across one. `version()` is the
+    # only channel through which anything outside this function may say "the
+    # world you planned against is not the world any more".
+    version = (lambda: 0) if crop_version is None else crop_version
 
     mujoco.mj_forward(model, data)
     parks = {t: armframe.park_posture(model, data, t, arms=arms) for t in arms}
@@ -1054,8 +1151,12 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         park_arm(model, data, parks[t], prefix=trolley.ARM_PREFIX[t])
     mujoco.mj_forward(model, data)
 
-    row = Row(model, data, names=names, homes={t.name: t.pos for t in trusses})
+    row = Row(model, data, names=names, homes={t.name: t.pos for t in trusses},
+              **({} if snap_n is None else {"snap_n": snap_n}))
     mujoco.mj_forward(model, data)
+    if after_reset is not None:
+        after_reset(row)
+        mujoco.mj_forward(model, data)
     drive = trolley.Drive(model, data)
     machine = Machine(model, data, row, on_tick=on_tick)
     state.machine = machine
@@ -1077,54 +1178,90 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     def unstow(tag):
         park_arm(model, data, parks[tag], prefix=trolley.ARM_PREFIX[tag])
 
-    # --- 1. map --------------------------------------------------------------
-    state.say("map", "driving the aisle, both heads scanning")
-    if verbose:
-        print(f"\n{'=' * 78}\n  1. MAP — two deck heads, one per arm, "
-              f"each on its own row")
+    # --- 1 and 2. map, then plan ---------------------------------------------
+    #
+    # ⚠️ **One function, called once on a normal run and again whenever the crop
+    # changes.** Mapping and planning are separable in principle and are not
+    # separable here: re-surveying without re-routing leaves an itinerary made
+    # of stops chosen for fruit the map no longer describes. The two are the
+    # same act — "work out what to do about what is out there" — and pulling
+    # them apart is how a stale route survives a fresh map.
     scout = scout_cls(model, data, arms=arms, aisle=aisle, stride=stride)
     for t in arms:
         state.state[t].head = scout.heads.get(t)
-    try:
-        if use_truth:
-            house_map = HouseMap(
+    # ⚠️ Published so a caller that can be interrupted mid-harvest — the demo
+    # viewer, whose R and Q keys unwind this function from inside `on_tick` —
+    # can release the two GL contexts on its way out. `SensorCamera.close`
+    # swallows a double close, so the normal path below still owns it.
+    state.scout = scout
+
+    def map_and_plan(why, first=True):
+        """Survey the aisle, route both arms, merge, assign. Returns the plan.
+
+        ⚠️ Returns the version the plan is *against*, read before the survey
+        starts rather than after it ends. A fruit hung while the trolley is
+        halfway down the aisle may or may not be in the map that survey
+        produces; taking the version first means such a plan is treated as
+        stale and redone, which is the safe direction to be wrong in.
+        """
+        at = version()
+        state.say("map" if first else "replan", why)
+        if verbose:
+            print(f"\n{'=' * 78}\n  1. MAP — two deck heads, one per arm, "
+                  f"each on its own row  ({why})")
+        if use_truth and truth_map is not None:
+            hm = truth_map(trusses, aisle)
+        elif use_truth:
+            hm = HouseMap(
                 sightings=[Sighting(pos=t.pos, stage=t.stage, hue=float("nan"),
                                     row=t.row, truth=t) for t in trusses],
                 aisle=aisle)
             if verbose:
                 print("\n  ⚠️ MAP SKIPPED — routing the operator's own answer")
         else:
-            house_map = scout.run(drive, state=state, on_tick=on_tick,
-                                  verbose=verbose)
-    finally:
-        scout.close()
-    state.house_map = house_map
-    if verbose:
-        print(f"\n{house_map.table()}")
+            hm = scout.run(drive, state=state, on_tick=on_tick, verbose=verbose)
+        state.house_map = hm
+        if verbose:
+            print(f"\n{hm.table()}")
 
-    # --- 2. plan -------------------------------------------------------------
-    state.say("plan", "one route per arm, merged into one itinerary")
-    for t in arms:
-        state.state[t].say("planning", "")
-    if verbose:
-        print(f"\n{'=' * 78}\n  2. PLAN — where to stop and who takes what")
-    routes = {t: route.plan(house_map, aisle=aisle, arm=t) for t in arms}
-    state.routes = routes
-    itinerary = merge(routes)
-    if max_stops:
-        itinerary = itinerary[:max_stops]
-    # ⚠️ Explicit, logged, and before a single arm moves. See `assign`.
-    itinerary = assign(itinerary, state, verbose=verbose)
-    state.itinerary = itinerary
-    routed = {id(f) for _y, per in itinerary for fl in per.values() for f in fl}
-    for s in house_map.sightings:
-        if s.ripe and id(s) not in routed:
-            state.skipped.add(id(s))
-    if verbose:
+        state.say("plan" if first else "replan",
+                  "one route per arm, merged into one itinerary")
         for t in arms:
-            print(f"\n  --- arm {t.upper()} on row r{state.state[t].row} ---")
-            print(routes[t].table())
-        print(f"\n  merged into {len(itinerary)} trolley stops")
+            state.state[t].say("planning", "")
+        if verbose:
+            print(f"\n{'=' * 78}\n  2. PLAN — where to stop and who takes what")
+        rts = {t: route.plan(hm, aisle=aisle, arm=t) for t in arms}
+        state.routes = rts
+        itin = merge(rts)
+        if max_stops:
+            itin = itin[:max_stops]
+        # ⚠️ Explicit, logged, and before a single arm moves. See `assign`.
+        itin = assign(itin, state, verbose=verbose)
+        state.itinerary = itin
+        routed = {id(f) for _y, per in itin for fl in per.values() for f in fl}
+        state.skipped = set()
+        for s in hm.sightings:
+            if s.ripe and id(s) not in routed:
+                state.skipped.add(id(s))
+        if verbose:
+            for t in arms:
+                print(f"\n  --- arm {t.upper()} on row r{state.state[t].row} ---")
+                print(rts[t].table())
+            print(f"\n  merged into {len(itin)} trolley stops")
+        return itin, at
+
+    try:
+        itinerary, planned_at = map_and_plan("driving the aisle, both heads "
+                                             "scanning")
+    finally:
+        # ⚠️ Closed here on every run that cannot replan, which is every run
+        # that predates `crop_version` — so the two `SensorCamera` GL contexts
+        # are released at exactly the point they always were. A run that *can*
+        # replan has to keep them: the scout is the thing that would do the
+        # re-survey, and rebuilding it mid-harvest would allocate a second pair
+        # of 1280x960 RGB+depth buffers against the ones the panels already own.
+        if crop_version is None:
+            scout.close()
 
     # --- 3. travel and pick --------------------------------------------------
     if verbose:
@@ -1292,10 +1429,18 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                 # globals are touched, which is why the other arm can be
                 # mid-mission while this runs. See `mission.ArmFrame`.
                 fr = armframe.frame(model, data, tag)
+                # ⚠️ Anything the *crop* changes about the route, rather than
+                # the machine. A truss is carried differently from a loose
+                # tomato — it hangs a quarter-metre below the tool and must not
+                # be turned over — so `farm.two_arm_farm_truss` supplies
+                # `bin_drop_up` and `carry_axis` here. Left None this is the
+                # loose-fruit two-arm run, unchanged. See `mission.Planner`.
+                extra = {} if plan_opts is None else dict(
+                    plan_opts(model, data, tag, fr))
                 planner = Planner(model, data, row, lessons=None,
                                   clearance=0.040, park_q=parks[tag],
                                   speed=speed, prefix=prefix, others=others,
-                                  pin=tuple(pin), frame=fr)
+                                  pin=tuple(pin), frame=fr, **extra)
                 m = planner.plan(name)
                 me.route(m)
                 if m.ok:
@@ -1369,6 +1514,16 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
                               gate=lambda leg, _t=tag: centre.claim(_t, leg))
             me.run = run_
             machine.runs[tag] = run_
+            # ⚠️ Registered on the machine's per-cycle watchers, not on this
+            # arm's loop, for the same reason the black box is: the machine is
+            # what steps physics, so a hook that must fire on the cycle a
+            # condition becomes true has to live where the cycles are counted.
+            # Dropped in the `finally` alongside the recorder, so an aborted
+            # mission does not leave a blade watching an arm that has stopped.
+            watcher = None if on_pick is None else on_pick(tag, name, gripper,
+                                                           prefix)
+            if watcher is not None:
+                machine.watchers.append(watcher)
             try:
                 while run_.command():
                     me.follow_leg()
@@ -1383,10 +1538,23 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             finally:
                 machine.boxes.pop(tag, None)
                 machine.runs.pop(tag, None)
+                if watcher is not None and watcher in machine.watchers:
+                    machine.watchers.remove(watcher)
                 centre.release(tag)
                 me.run = None
                 me.waiting_on = ""
             res = run_.result
+            # ⚠️ `week2_pick` scores the crate against `data.body(name).xpos`,
+            # which for a loose tomato is the middle of the tomato and for a
+            # truss is the grasp point at the top of the collar — a quarter of a
+            # metre above the fruit once the cluster is lying in the crate, so
+            # the height test fails on every correctly crated truss. A crop that
+            # needs a different question asked supplies it here; see
+            # `farm.truss.in_crate`.
+            if score_in_bin is not None:
+                res["in_bin"] = bool(score_in_bin(model, data, name,
+                                                  armframe.frame(model, data,
+                                                                 tag)))
 
             rec = {"stop": si, "stage": fruit.stage, "row": fruit.row,
                    "seen": True, "fruit": name,
@@ -1434,7 +1602,53 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
         mujoco.mj_forward(model, data)
         me.say("idle-waiting", "done at this stop, waiting for the other arm")
 
-    for si, (y, per_arm) in enumerate(itinerary, 1):
+    # ⚠️ A `while` rather than a `for`, and with `crop_version=None` it is the
+    # same loop over the same list — `version()` is a constant, the branch below
+    # never fires, and `k` walks 1..len(itinerary) exactly as `enumerate` did.
+    # It is a `while` so that the list it is walking is allowed to be replaced.
+    k = 0
+    replans = 0
+    in_a_row = 0
+    while k < len(itinerary):
+        if version() != planned_at and in_a_row < REPLANS_IN_A_ROW:
+            # ⚠️ **Surfaced, not swallowed.** Somebody watching has just hung a
+            # tomato and is about to see the trolley drive back up the aisle
+            # without picking anything. Unlabelled that reads as a stutter or a
+            # fault; labelled it is the machine doing the one thing a plan-and-
+            # verify architecture has to do when the world moves.
+            replans += 1
+            in_a_row += 1
+            if verbose:
+                print(f"\n  ⚠️ CROP CHANGED to v{version()} — every checked "
+                      f"plan is void, not weakened. Re-surveying.")
+            for t in arms:
+                stow(t)
+            mujoco.mj_forward(model, data)
+            itinerary, planned_at = map_and_plan(
+                f"crop changed - replanning (v{version()})", first=False)
+            for t in arms:
+                state.state[t].stop_n = len(itinerary)
+            k = 0
+            # ⚠️ Restarted rather than resumed, and it costs a drive back up the
+            # aisle. Resuming would mean keeping stops chosen against the old
+            # map; a fruit hung behind the trolley is exactly the case a resume
+            # would silently drop. Fruit already crated are detached, so they
+            # are not in `standing` and the fresh survey cannot re-route them —
+            # a picked tomato is in a crate at the trolley's own x and falls
+            # outside `scout`'s row gate.
+            continue
+        if version() != planned_at and verbose and in_a_row >= REPLANS_IN_A_ROW:
+            print(f"\n  ⚠️ crop still changing after {in_a_row} re-surveys — "
+                  f"working the plan there is. See REPLANS_IN_A_ROW.")
+        if version() != planned_at:
+            state.say("replan", f"crop still changing after {in_a_row} "
+                                f"re-surveys - working the plan there is")
+        y, per_arm = itinerary[k]
+        si = k + 1
+        k += 1
+        # A stop was actually worked, so the next change gets the full budget
+        # again. The bound is on *consecutive* replans, not on the run.
+        in_a_row = 0
         state.stop_i = si
         state.say("travel", f"driving to stop {si}/{len(itinerary)}, y={y:+.2f}")
         for t in arms:
@@ -1475,6 +1689,8 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
             park_arm(model, data, parks[t], prefix=trolley.ARM_PREFIX[t])
         mujoco.mj_forward(model, data)
 
+    if crop_version is not None:
+        scout.close()
     for t in arms:
         unstow(t)
     mujoco.mj_forward(model, data)
@@ -1485,6 +1701,7 @@ def run(model, data, trusses, state, arms=("a", "b"), aisle=0, speed=0.5,
     state.cycles = machine.cycles
     state.concurrent_cycles = machine.concurrent_cycles
     state.open_cycles = machine.open_cycles
+    state.replans = replans
     return state
 
 

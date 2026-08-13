@@ -32,6 +32,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fr5 import (  # noqa: E402
     TOOL_SITE, add_mocap_target, build_fr5_spec, exit_without_teardown,
+    reset_home,
 )
 
 # The target sweeps a circle in front of the arm — roughly where a truss of
@@ -155,7 +156,16 @@ def main():
     data = mujoco.MjData(model)
     config, tasks = make_ik(model)
 
-    mujoco.mj_resetDataKeyframe(model, data, 0)
+    # Not mj_resetDataKeyframe. The `home` keyframe stores a flat six-number
+    # vector — everything that existed when it was written — and MuJoCo pads a
+    # short keyframe with **zeros**, not each body's spawn pose. This scene has
+    # no free body today, so the two are identical here; add one and it is
+    # teleported to the world origin on reset, silently. Measured: a tomato
+    # spawned at [0.55, 0.15, 0.50] comes back at [0, 0, 0], 758 mm away.
+    # `reset_home` reads qpos0, which the compiler built from where each body
+    # was actually declared, so it is right for bodies added long after the
+    # keyframe was written.
+    reset_home(model, data)
     config.update(data.qpos[: model.nq].copy())
     tasks[1].set_target_from_configuration(config)
 

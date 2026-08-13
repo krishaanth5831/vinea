@@ -35,7 +35,12 @@ from pathlib import Path
 
 import numpy as np
 
+# Both directories: this one for `vinea_gripper`, and the parent for everything
+# these files were written beside before they were parked into a subfolder.
+# Without the parent, running this as a script dies on `import fr5` — it only
+# ever worked because parked/ used to *be* simulation/mujoco/.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fr5 import (  # noqa: E402
     TOOL_SITE,
     add_crate,
@@ -47,7 +52,13 @@ from fr5 import (  # noqa: E402
 from plant_row import FRUIT_R, ROW_X, Row, add_row  # noqa: E402
 from reach import CTRL_DT, DEFAULT_SPEED, Reacher, hold  # noqa: E402
 from vinea_gripper import Blade, add_vinea_gripper  # noqa: E402
-from week2_pick import (  # noqa: E402
+# ⚠️ These moved out of `week2_pick` into `mission.py` when the planner landed
+# on 2026-08-02, which is revival step 1 in this folder's README and the reason
+# this file would not import. Eleven of the thirteen are in `mission`; the two
+# that are not — SETTLE_S and TURN_MAX_S — belong to the *pre-planner* cycle
+# and now live in `legacy_cycle.py`, which is where this file's own state
+# machine still belongs too.
+from mission import (  # noqa: E402
     BIN_DROP_UP,
     BIN_HALF,
     BIN_POS,
@@ -56,11 +67,10 @@ from week2_pick import (  # noqa: E402
     INTO_ROW,
     ORIENTATION_COST,
     ROLL_COST,
-    SETTLE_S,
     STAGE_X,
     TURN_COST,
-    TURN_MAX_S,
 )
+from legacy_cycle import SETTLE_S, TURN_MAX_S  # noqa: E402
 
 # Reach to the cradling point, measured the same way as MAX_REACH_GRIPPER:
 # 20k random joint configurations, largest distance from the shoulder. It is
@@ -127,8 +137,19 @@ def make_reacher(model, data, speed=DEFAULT_SPEED):
                    approach=INTO_ROW, mocap=None)
 
 
-def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
-    """One cradle-and-cut pick."""
+def pick_one(reacher, blade, row, name, on_tick=None, verbose=True,
+             est=None, on_leg=None):
+    """One cradle-and-cut pick.
+
+    `est` is where the robot *believes* the fruit is — pass a position to fly
+    the cycle against an estimate instead of ground truth, which is what a
+    camera hands it and what bug 40 needs. `None` reads the true position and
+    is what every measurement taken before this parameter existed did.
+
+    `on_leg(name)` fires as each state begins, for an instrument that needs to
+    know which leg it is recording. Unlike the Robotiq cycle this one is not a
+    `mission.Leg` list, so there is nothing else to ask.
+    """
     data = reacher.data
     fruit = data.body(name)
     t0 = [0.0]
@@ -139,6 +160,10 @@ def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
         if on_tick is not None:
             on_tick(_t)
 
+    def leg(state):
+        if on_leg is not None:
+            on_leg(state)
+
     def say(state, note=""):
         if verbose:
             p = data.site(TOOL_SITE).xpos
@@ -146,6 +171,7 @@ def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
                   f"   {note}")
 
     def go(state, target, note=""):
+        leg(state)
         r = reacher.drive_to(target, on_tick=tick)
         arrived = (f"arm {r['arm_mm']:.1f} mm · {r['axis_deg']:.1f}°"
                    if r["reached"] else
@@ -154,12 +180,18 @@ def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
         return r
 
     blade.retract()
+    leg("settle_in")
     park = data.site(TOOL_SITE).xpos.copy()
     for _ in range(int(SETTLE_S / CTRL_DT)):
         reacher.step(park)
         tick()
     row.reset()
-    target = row.pos(name)
+    # ⚠️ Everything downstream aims at `target`. When it is an estimate, the
+    # arm is wrong about where the fruit is by exactly the error — which is the
+    # whole input bug 40 needs, and the reason this is a parameter rather than
+    # a jitter applied to the fruit: jittering the fruit moves the thing, this
+    # moves the *belief*, and only the second one is a perception error.
+    target = row.pos(name) if est is None else np.asarray(est, dtype=float)
 
     # Same three-move entry as the Robotiq cycle: the row is still in the way
     # and drive_to still has no path planner.
@@ -175,6 +207,7 @@ def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
     say("cradle", f"stem carrying {row.force(name):.2f} N")
 
     # The cut. Geometry moves; the actual detachment is one line.
+    leg("cut")
     blade.cut()
     cut = False
     for _ in range(int(CUT_S / CTRL_DT)):
@@ -186,6 +219,7 @@ def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
     say("cut", f"blade at {blade.travel * 1000:.0f} mm — "
                f"{'peduncle severed' if cut else 'NOT SEVERED'}")
 
+    leg("cradle_settle")
     hold(reacher, target, SETTLE_CRADLE_S, tick)
 
     # Lift a little, so the fruit clears the cut stem, then back out level.
@@ -211,10 +245,12 @@ def pick_one(reacher, blade, row, name, on_tick=None, verbose=True):
     # swing while the arm is still ~200 mm out, and the tip loop that follows
     # translates *and* rotates — so a cradle that has not arrived yet empties
     # itself somewhere between the row and the crate.
+    leg("settle")
     hold(reacher, over_bin, CARRY_SETTLE_S, tick)
     say("settle", f"{np.linalg.norm(data.site(TOOL_SITE).xpos - over_bin) * 1000:.0f} mm "
                   f"from the release point")
 
+    leg("tip")
     reacher.approach = DOWNWARD
     reacher.set_orientation_cost(TURN_COST)
     tipped = 0.0
