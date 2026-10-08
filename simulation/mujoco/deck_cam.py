@@ -1428,6 +1428,7 @@ def _assert_inert(args):
     silent — every clearance number in the README would simply be a different
     number, with nothing to say it had moved.
     """
+    from fr5 import WRIST_LINK
     from greenhouse import build_scene
 
     def probe(**kw):
@@ -1476,7 +1477,11 @@ def _assert_inert(args):
     print(f"  mocap bodies     {base.nmocap} -> {both.nmocap}  "
           f"(the head is the new one, appended last so the stems keep "
           f"indices 0..{base.nmocap - 1})")
-    i = both.body("wrist3_link").id
+    # Arm A's wrist, named explicitly. `greenhouse.build_scene` builds one arm
+    # and this check is about what the *housings* weigh, not about which arm
+    # carries them — but the bare name is the shape of entries 55 and 58, so it
+    # says which arm it means rather than relying on there being only one.
+    i = both.body(WRIST_LINK).id
     print(f"  wrist3_link      {both.body_mass[i]:.6f} kg, inertia "
           f"{both.body_inertia[i].round(8)}")
     print(f"  deck_head        {both.body('deck_head').mass[0]:.6f} kg")
@@ -1670,9 +1675,17 @@ def vs_sweep(args):
 
     from camera import SensorCamera, stage
     from detect import HSVDetector, estimate
+    from fr5 import tool_pos
     from mission import STAGE_X
     from reach import CTRL_DT
     from week4_place import (MARGINAL_HALF_Y, MARGINAL_Z, Crop, auto_layout)
+
+    # Which arm is doing the sweeping. `_scene()` builds one, so this is "" and
+    # the measurement is unchanged — but the distance accumulated below is the
+    # headline of this whole function ("the wrist sweep spends 24 arm-seconds"),
+    # and read off the wrong arm it would be a number for an arm that never
+    # moved. Entry 58.
+    prefix = getattr(args, "arm", "") or ""
 
     model, names = _scene()
     data, q, row = _fresh(model, names)
@@ -1721,12 +1734,12 @@ def vs_sweep(args):
     found, ticks, path = {}, [0], []
     try:
         for y, z in poses:
-            before = data.site("tool0").xpos.copy()
+            before = tool_pos(data, prefix).copy()
             stage(model, data, q, np.array([STAGE_X, y, z]), row=row,
                   speed=args.speed, reset=None,
                   on_tick=lambda _t=None: ticks.__setitem__(0, ticks[0] + 1))
             path.append(float(np.linalg.norm(
-                data.site("tool0").xpos - before)))
+                tool_pos(data, prefix) - before)))
             rgb, depth = wrist.both(data)
             R, C = wrist.pose(data)
             for d in (estimate(x, depth, wrist.intr, R, C)

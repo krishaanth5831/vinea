@@ -89,6 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # allowed to drift apart is how a panel starts lying.
 from carrytrace import HELD as HOLDING_LEGS  # noqa: E402
 from deck_cam import DECK_NAME, DeckSurvey  # noqa: E402
+from fr5 import tool_id  # noqa: E402
 from week4_place import (Crop, GUARANTEED_HALF_Y, GUARANTEED_Z,  # noqa: E402
                          MAX_FRUIT, PLACE_BOARD, auto_layout, check,
                          harvest_placed, park_spot, pool_trusses, random_seed)
@@ -280,8 +281,13 @@ class Thoughts:
         "settle": "holding still to let contact settle",
     }
 
-    def __init__(self, model, data, crop, ov):
+    def __init__(self, model, data, crop, ov, prefix=""):
         self.model, self.data, self.crop, self.ov = model, data, crop, ov
+        # Which arm this panel is narrating. "" is the unprefixed Week 1-4 arm
+        # and every caller today leaves it there, so nothing measured before
+        # this parameter existed can move. See fr5.tool_pos: without it the
+        # panel would caption arm A's tool position as arm B's.
+        self.prefix = prefix
         self.phase = "SELECT"
         self.target = None
         self.queue = []
@@ -292,7 +298,7 @@ class Thoughts:
         self.err_mm = None
         self.refused = None
         self.results = []
-        self.tool_site = model.site("tool0").id
+        self.tool_site = tool_id(model, prefix)
         # None means "no deck camera in this run", which the panel says out
         # loud rather than showing an empty ordering line.
         self.survey_n = None

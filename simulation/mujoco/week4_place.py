@@ -247,6 +247,26 @@ def nearest(y, z, placed):
     return best, best_d
 
 
+def nearest_world(pos, placed):
+    """(name, metres) of the closest already-placed fruit, in full 3D.
+
+    ⚠️ `nearest` above measures in the board's own (y, z) because every fruit on
+    a bolted arm's board shares one x, so the two are the same number. They stop
+    being the same number the moment fruit hang on more than one row — which is
+    what `farm.mousereach` does — and a 2D distance there would call two fruit
+    1.6 m apart on opposite sides of the aisle "touching". Kept as a second
+    function rather than a widened `nearest` so nothing Weeks 1-4 measured can
+    move: `check` still calls the 2D one and gets the identical answer.
+    """
+    pos = np.asarray(pos, float)
+    best, best_d = None, float("inf")
+    for name, p in placed.items():
+        d = float(np.linalg.norm(np.asarray(p, float) - pos))
+        if d < best_d:
+            best, best_d = name, d
+    return best, best_d
+
+
 def check(y, z, placed):
     """(ok, reason, zone). Refusing says why — a silent refusal teaches nothing.
 
@@ -278,6 +298,43 @@ def check(y, z, placed):
         return True, (f"{d * 1000:.0f} mm from {name} — tight, expect a "
                       f"fallback route"), zn
     return True, "", zn
+
+
+class BoltedBoard:
+    """Where fruit may hang in front of an arm bolted to the floor.
+
+    ⚠️ **The rule half of `Crop`, split out so the state-machine half can be
+    reused on a scene this file knows nothing about.** `Crop` is a pool of
+    compiled trusses, a placed set, a version counter and the park/show/place
+    bookkeeping that keeps a later-placed fruit inside `CropObstacles`' frozen
+    membership. None of that is about *where* fruit may go — that is `zone`,
+    `TOUCHING` and `MAX_FRUIT`, and on a trolley whose base moves it is a
+    different answer entirely (`farm.mousereach.RailBand`).
+
+    Splitting it is not tidiness. The alternative was a second copy of the
+    placement state machine on the farm scene, and a duplicated state machine is
+    already bug 7 in this repo's log.
+
+    This class is the Week 1-4 answer and it is the default, so every existing
+    caller of `Crop(model, data, row, names)` gets exactly what it got before.
+    """
+
+    limit = MAX_FRUIT
+
+    #: A click in this scene names a point on the board, so x is the row's.
+    def world(self, y, z):
+        return np.array([ROW_X, float(y), float(z)])
+
+    def check(self, pos, placed):
+        """(ok, why, zone) for a world position. Delegates to `check`."""
+        return check(float(pos[1]), float(pos[2]), placed)
+
+    def describe(self):
+        return (f"board  |y| <= {MARGINAL_HALF_Y}  z "
+                f"{MARGINAL_Z[0]}-{MARGINAL_Z[1]}  (18/21 clean)")
+
+
+BOLTED = BoltedBoard()
 
 
 # Lattice pitches `auto_layout` will try, widest first. The first two are the
@@ -384,13 +441,25 @@ class Crop:
     guarantee no longer covers the world it is about to be flown in.
     """
 
-    def __init__(self, model, data, row, names):
+    def __init__(self, model, data, row, names, rules=None, park=None):
         self.model = model
         self.data = data
         self.row = row
         self.pool = list(names)
+        # ⚠️ The *rule* is injected; the state machine below is not. See
+        # `BoltedBoard`. `None` is the Week 1-4 board, so every existing caller
+        # is unchanged.
+        self.rules = BOLTED if rules is None else rules
+        # Where an unplaced truss waits. Also injectable, because "behind the
+        # arm at x = -1.5" is behind the arm of *this* scene; a house has rows
+        # there. `park_spot`'s reasoning is unchanged either way: parked, welds
+        # live, invisible.
+        self.park = park_spot if park is None else park
         self.placed = {}        # name -> np.array([x, y, z])
         self.zones = {}
+        # Harvested. Neither placed nor available, and — critically — not to be
+        # moved. See `retire`.
+        self.retired = set()
         self.version = 0
         # Every geom belonging to each truss — the fruit, its stem, and the
         # hanger drawn from the support bar down to it. Kept so an unplaced
@@ -421,34 +490,124 @@ class Crop:
         for gid, rgba in zip(self._geoms[name], self._rgba0[name]):
             self.model.geom_rgba[gid] = rgba if visible else [0, 0, 0, 0]
 
-    def park_all(self):
+    def restore(self):
+        """Put every truss back where this object says it is. Places, or parks.
+
+        ⚠️ **The answer to `mj_resetData`.** `mission.reset_park` is a reset
+        underneath, so it returns every fruit to the pose the model was
+        *compiled* with — and for a hand-placed crop that pose is the parking
+        bay, not anywhere a person put anything. This file gets away with it by
+        resetting before the crop is built (see `main`); a scene whose harvest
+        *starts* with a reset cannot, so it calls this straight afterwards. See
+        `farm.mousereach`.
+
+        ⚠️ Welds go back ON for everything, placed or parked, and that is not
+        housekeeping. `CropObstacles.__init__` freezes its membership from
+        `row.attached()`, and a `Guard` built on it inherits that frozen list —
+        so a fruit that is parked with its weld off is invisible to the running
+        safety net, and the arm will drive straight through it the moment it is
+        placed. Positions are read live; the list is not.
+        """
         import mujoco
 
         for i, n in enumerate(self.pool):
-            self.row.place(n, park_spot(i))
-            # ⚠️ Weld ON. See the module docstring: this is what keeps a
-            # later-placed fruit inside CropObstacles' frozen membership.
+            if n in self.retired:
+                continue
+            self.row.place(n, self.placed.get(n, self.park(i)))
             self.data.eq_active[self.row.eq_id[n]] = 1
-            # Parked but not placed: hidden, so the reserve is not 24 tomatoes
-            # and their stems floating in shot behind the arm.
+            # Parked but not placed: hidden, so the reserve is not two dozen
+            # tomatoes and their stems floating in shot behind the machine.
             self._show(n, n in self.placed)
         mujoco.mj_forward(self.model, self.data)
 
+    def park_all(self):
+        """Every truss to its parking spot. `restore` with nothing placed.
+
+        Kept as its own name because that is what the two callers mean —
+        `__init__` and `clear`, both of which run with `placed` empty, so the
+        two functions do the identical thing and always have.
+        """
+        self.restore()
+
+    def recolour(self, name, rgba):
+        """Repaint one truss's fruit. Ripeness, as a thing you can hand someone.
+
+        ⚠️ **Updates the remembered colour as well as the live one.** `_show`
+        restores from `_rgba0`, so repainting only `model.geom_rgba` gives a
+        fruit that reverts to its compiled colour the next time it is hidden and
+        revealed — which on this scene is every reset. Nothing about the physics
+        changes either way; mass, friction and the weld are all untouched.
+
+        ⚠️ And the change is **real**, not a label: `geom_rgba` is what the
+        renderer draws and therefore what the deck cameras see, so a fruit
+        repainted green is one the HSV classifier has to band green from the
+        pixels. That is the whole point of letting somebody choose — the robot
+        is not told what they picked.
+        """
+        rgba = np.asarray(rgba, float)
+        for i, gid in enumerate(self._geoms[name]):
+            if self.model.geom(gid).name == f"{name}_geom":
+                self._rgba0[name][i] = rgba.copy()
+                self.model.geom_rgba[gid] = rgba
+
+    def retire(self, name):
+        """Take a harvested truss out of the crop **without moving it**.
+
+        ⚠️ Two things must not happen to a tomato that is sitting in a crate,
+        and `restore` would do both. It would teleport it back onto the plant,
+        because `placed` still says that is where it hangs — and it would set
+        `eq_active` back to 1, re-welding a detached fruit to a stem several
+        metres away, which is `Row.settle`'s bug with the whole scene between
+        the two ends of the constraint. So a harvested truss leaves the crop
+        entirely and is left exactly where the arm put it.
+
+        Bumps the version for the same reason placing does: a plan checked
+        against a crop that contained this fruit was checked against a world
+        that no longer exists. Wrong in the cautious direction, which is the
+        only direction to be wrong in here.
+        """
+        self.placed.pop(name, None)
+        self.zones.pop(name, None)
+        self.retired.add(name)
+        self.version += 1
+
     def free(self):
-        return [n for n in self.pool if n not in self.placed]
+        return [n for n in self.pool
+                if n not in self.placed and n not in self.retired]
 
     def clear(self):
-        """Un-place everything and park it again. Bumps the version."""
+        """Un-place everything and park it again. Bumps the version.
+
+        Retired trusses come back — a clear is "start over", and the crates
+        emptying is part of starting over.
+        """
         self.placed.clear()
         self.zones.clear()
+        self.retired.clear()
         self.park_all()
         self.version += 1
 
     def place(self, y, z, quiet=False):
-        """(name, reason). name is None if the placement was refused."""
+        """(name, reason). name is None if the placement was refused.
+
+        The board's own coordinates. `place_world` is the general one; this is
+        kept because every Week 1-4 caller speaks (y, z) and because on the
+        bolted board that *is* the whole coordinate system.
+        """
+        return self.place_world(self.rules.world(y, z), quiet=quiet)
+
+    def place_world(self, pos, quiet=False):
+        """(name, reason) for a world position. The rule decides; this books it.
+
+        ⚠️ Everything below the `check` is scene-independent, and that is the
+        point of the split: the pool, the version bump, the weld left active and
+        the alpha reveal are the same bookkeeping whether the arm is bolted to a
+        floor or riding a rail. Only `self.rules.check` knows which scene it is.
+        """
         import mujoco
 
-        ok, why, zn = check(y, z, self.placed)
+        pos = np.asarray(pos, float)
+        ok, why, zn = self.rules.check(pos, self.placed)
         if not ok:
             if not quiet:
                 print(f"    refused: {why}")
@@ -457,7 +616,6 @@ class Crop:
         if not free:
             return None, "pool exhausted"
         name = free[0]
-        pos = np.array([ROW_X, y, z])
         self.row.place(name, pos)
         self.data.eq_active[self.row.eq_id[name]] = 1
         self._show(name, True)
@@ -471,7 +629,7 @@ class Crop:
             # the point of dropping the spacing rule. Saying "this is 90 mm from
             # p03 and the order is what solves it" is worth more than refusing.
             note = f"  ⚠️ {why}" if why else ""
-            print(f"    placed {name} at y{y:+.3f} z{z:.3f}  [{zn}]  "
+            print(f"    placed {name} at y{pos[1]:+.3f} z{pos[2]:.3f}  [{zn}]  "
                   f"(crop v{self.version}){note}")
         return name, zn
 

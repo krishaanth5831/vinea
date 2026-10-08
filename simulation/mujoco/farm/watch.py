@@ -229,6 +229,55 @@ class Thoughts:
         return out
 
 
+def seat_scout_head(head, model, data):
+    """Put the scouting head back on its mast before this frame is rendered.
+
+    ⚠️ **The head does not ride the trolley on its own.** It is a world-parented
+    mocap body (see `farm.scout.add_deck_camera`), so `ScoutHead.follow` is the
+    only thing that keeps it over the machine. `Scout.look` calls it once per
+    survey frame, which is everything the *map* needs and nowhere near what a
+    *viewer* needs: between two survey frames the trolley drives a whole
+    `SCOUT_STRIDE` while the head stays where it was, and the next `look` then
+    snaps it 0.50 m down the aisle in a single frame. Measured over a two-stop
+    shift at 25 fps that was 13 jumps of exactly 0.50 m, against a real
+    per-frame travel of 14 mm — a panel teleporting rather than driving.
+
+    It is worse once scouting ends. Nothing calls `follow` during HARVEST at
+    all, and `--truth` skips the scouting pass entirely, so without this the
+    head sits at its compile pose for the whole shift while the machine drives
+    away from it and the panel shows an empty aisle.
+
+    Seating it here, once per composed frame, covers all three. This is a write
+    the scout itself would make and cannot disagree with: the seat is a pure
+    function of the drive joint, so the pose at *capture* time is unchanged and
+    the map is untouched. The head carries no mass and no collidable geom, so
+    moving it every frame is free of the simulation as well.
+
+    ⚠️ `mj_kinematics` **and `mj_camlight`**, not `mj_forward`. Writing
+    `mocap_pos` does not move `cam_xpos` by itself, so something has to run —
+    but this is called from inside `week2_pick.execute`'s control loop, where
+    recomputing frames is welcome and recomputing contacts and forces is not.
+
+    ⚠️ **`mj_kinematics` alone is not enough, and it fails quietly.** It walks
+    the body tree; `cam_xpos` is `mj_camlight`'s job, and `mj_fwdPosition` calls
+    the two in that order. Seating the head with only the first leaves the
+    camera exactly **one composed frame behind** the mast — the mocap write does
+    land, but not until the next `mj_step` propagates it. One frame of lag is
+    the 14 mm above, which reads as a fixed panel rather than as a bug, and it
+    is why `tests/test_sim.py` measures the offset instead of trusting the call.
+
+    `head=None` is the `articulated=False` scene, whose camera is bolted to the
+    trolley and rides it for free.
+    """
+    import mujoco
+
+    if head is None:
+        return
+    head.follow(data)
+    mujoco.mj_kinematics(model, data)
+    mujoco.mj_camlight(model, data)
+
+
 def _panel(w, h, lines, title=None):
     import cv2
 
@@ -282,7 +331,7 @@ def main():
     thoughts = Thoughts()
     mp = MapPanel()
     state = {"model": None, "data": None, "renderers": {}, "picked": set(),
-             "truth": None, "sink": None, "n": 0}
+             "truth": None, "sink": None, "n": 0, "head": None}
 
     every = max(1, int(round((1.0 / args.fps) / CTRL_DT)))
 
@@ -295,6 +344,8 @@ def main():
         model, data = state["model"], state["data"]
         rs = state["renderers"]
         out = {}
+
+        seat_scout_head(state["head"], model, data)
         for name in ("scout", "aisle", "house", "wrist"):
             rs[name].update_scene(data, camera=name)
             out[name] = cv2.cvtColor(rs[name].render(), cv2.COLOR_RGB2BGR)
@@ -365,6 +416,21 @@ def main():
     mujoco.mj_forward(model, data)
     state["model"], state["data"] = model, data
     state["renderers"] = build_renderers(model)
+
+    # The viewer's own handle on the head, held for the whole shift because the
+    # `Scout` that owns one exists only for the scouting pass. See
+    # `seat_scout_head` for what it is for.
+    #
+    # ⚠️ `data` is left out on purpose. `ScoutHead.__init__` *aims* when it is
+    # given one, and this handle must never touch the pan angle: the scout
+    # commands where the head looks and this only keeps it on top of the mast.
+    # Passing `data` here would swing the head home mid-pass.
+    from farm.scout import ScoutHead
+
+    try:
+        state["head"] = ScoutHead(model, aisle=args.aisle)
+    except RuntimeError:
+        state["head"] = None
 
     sink = Sink(live=args.out is None, out=args.out, fps=args.fps,
                 title="vinea - a shift in the greenhouse")

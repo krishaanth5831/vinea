@@ -12,6 +12,8 @@ Everything below is in `simulation/mujoco/` and runs on one laptop. No ROS, no h
 
 📖 **[COMMANDS.md](COMMANDS.md) lists every command with what you actually see** — which open a window, which you can click in, which only print numbers, which record silently.
 
+It harvests **two crops**, and they are two different jobs rather than one with a flag: loose fruit (Weeks 1–5, everything down to [Week 5](#week-5--a-whole-house-scout-it-plan-it-harvest-it)) and **tomatoes-on-the-vine** — six fruit on one stem, cut as a cluster and graded whole ([Week 5b](#week-5b--the-same-house-grown-as-trusses)).
+
 ```bash
 ./.venv/bin/python scripts/phase0_smoketest.py          # 6 checks, toolchain health
 ```
@@ -392,6 +394,34 @@ Arm-vs-arm clearance is mandatory in both the planner's preview and the runtime 
 
 **Making the arms concurrent found six more** (entries 63–68), and the pattern in them is worth as much as the fixes. Two were the deck camera moving by one mechanism while its own mast moved by another — one rigid assembly, two transports — which presented as a *teleport* and as a *pole leaving its camera behind* and was a single defect. Two were the planner's preview disagreeing with the executor about things that live in the **null space**: the posture it prefers and the joint speed it may use. Those had been invisible for as long as there was one arm, because the tool goes to the same place either way and the crop only cares where the tool is — it took a second arm, whose elbow is what you collide with, to make the null space observable. One was a `numpy` mask that was **39% of the entire simulation** and had never been profiled because a plausible story about camera cadences had been written down as a comment. And one was the third instance of a bare unprefixed joint name, found the same way as the first two: by making something run that had never run.
 
+## Week 5b — the same house, grown as trusses
+
+Everything above harvests **loose** fruit: one tomato per stem, one ripeness decision per tomato. Dutch glasshouses sell two products, and the other one is **tomato-on-the-vine** — six fruit on a shared rachis, cut as a cluster and sold as one graded item. That is a different job for the robot, not a re-skin.
+
+```bash
+./.venv/bin/python simulation/mujoco/farm/watch_truss.py            # the shift, six panels
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --truth       # text only, no perception
+./.venv/bin/python simulation/mujoco/farm/truss.py --sweep          # where the threshold comes from
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py          # two arms, two windows
+```
+
+⚠️ **Separate scripts, not a flag.** The loose commands above are untouched and produce the numbers they always did. See [COMMANDS.md](COMMANDS.md) for every flag.
+
+| | loose | truss |
+|---|---|---|
+| unit of work | one tomato, 0.12 kg | one cluster of 6, **0.80 kg** |
+| ripeness decision | is *this fruit* red? | is **enough** of this cluster red? |
+| how it detaches | pulled until the stem snaps | **cut** at the stem |
+| detach threshold | `plant_row.SNAP_N` 12 N, assumed | `truss.TRUSS_SNAP_N` 75 N, from published data |
+
+**The cluster decision is the interesting part.** A loose picker asks "is this tomato red?" and the answer is about the thing it is holding. A truss picker takes six fruit with one cut and the truss is graded and sold whole, so one green fruit downgrades the item — the question becomes "is *enough* of this cluster red?", and that threshold is a commercial choice the machine has to be told. It was measured rather than guessed: `truss.py --sweep` says **3 of 6 is the loosest threshold that is zero-downgrade on every seed tried**, and it still brings in 84–91% of all the red fruit in the house.
+
+**The crop is what broke the assumptions, and that was the point of building it.** A 0.8 kg cluster snaps its own stem at the loose crop's 12 N threshold before the gripper arrives; give it a stem strong enough and pull-to-snap throws the cluster out of the pads at 75 N. So it is cut, not pulled. Then four more assumptions turned out to be a loose tomato's — the blade fired on the gripper *command* rather than on a grip, the wrist turned 0.80 kg over on a quarter-metre lever during the carry, the release height dragged the cluster through the crate wall, and the crate test read the truss's **grasp point** (a quarter-metre above the fruit) so correctly crated trusses scored as misses. A fifth was in the planner: it modelled every crop body as one 66 mm ball at its origin and was blind to the six tomatoes hanging below each truss.
+
+All five are fixed and each is written up with its measurement in [COMMANDS.md](COMMANDS.md). Single-arm, `--truth`, seeds 5/7/11/23/41: **7 of 7 trusses cut and crated, clean on every one**, where before they were dropped or crated by luck. The loose pipeline is untouched by all of it — `tests/board_walk.py` still crates 42/42.
+
+⚠️ **Two gaps left, both stated rather than papered over.** On a **dense** row (`-n 12`, 5–7 picks a stop) it is 7 of 12, up from 4 of 12 — and what fails there is `grasp_failed` during `grip`, not the carry: the glasshouse canopy is in neither the planner's obstacle set nor the guard's, and a 0.24 m cluster on a crowded row catches leaves a 66 mm tomato slips past. And the **two-arm** truss sim now crates where it previously crated nothing, but gets 1 of 3; instrumenting the blade shows the two failures are a carry loss inside `farm/duo.py`'s executor and a mirrored-arm arrival failure, neither of them the blade or the truss model.
+
 ## What this does not prove
 
 Worth saying before anyone else says it:
@@ -452,6 +482,8 @@ simulation/mujoco/
   week4_run.py        the throughput campaign across crop densities
   legacy_cycle.py     the unplanned cycle, kept as the baseline to beat
   week1_*.py          the Week 1 demos
+  two_arm_farm.py     both arms on one trolley, two live windows
+  two_arm_farm_truss.py   the same machine, on trusses
   farm/               Week 5: the whole house, kept separate from weeks 1-4
     house.py          four rows at real Venlo dimensions, pipe rails and all
     trolley.py        the pipe-rail trolley the arm rides, room for a 2nd arm
@@ -461,6 +493,12 @@ simulation/mujoco/
     run.py            a whole shift: scout, plan, harvest into the crate
     watch.py          all of it in six panels, including the live map
     armframe.py       makes the world-frame planner work for a moving arm
+    duo.py            two arms in one physics loop, and the deck interlock
+    decks.py          one survey head per arm, each over its own row
+    throughput.py     kg/hr from numbers already measured, with provenance
+    truss.py          Week 5b: the truss crop, the cluster CV, and the blade
+    trussrun.py       a truss shift: scout, judge the cluster, cut, crate
+    watch_truss.py    the truss shift in six panels, the map drawn as clusters
   parked/             the cradle-and-blade gripper — early, not abandoned
 simulation/lessons.json   what it has learned so far
 third_party/          Fairino URDF, MuJoCo Menagerie — never edited
@@ -477,6 +515,7 @@ Every module runs standalone and prints the numbers it stands on:
 ./.venv/bin/python simulation/mujoco/incident.py     # the old cycle, with the black box on
 ./.venv/bin/python simulation/mujoco/lessons.py      # real failures -> constraints
 ./.venv/bin/python simulation/mujoco/greenhouse.py   # render the house from three cameras
+./.venv/bin/python simulation/mujoco/farm/truss.py --sweep   # the cluster threshold, measured
 ```
 
 A bare run harvests the whole row and leaves the window open when it finishes; `--trials N` is the jittered repeatability measurement instead. Captures are named after the script that produced them — `week2_pick.py` writes `week2_pick.mp4` — so a video in the repo root always says which code made it.

@@ -55,6 +55,26 @@ If you want to see the robot do something interesting, in order:
 
 Run this after any machine rebuild. If it is not 6/6, nothing below is trustworthy.
 
+```bash
+# 📝 the mechanisms every demo below is built on — a pick, the weld, the tool
+#    frame, the reset. About a second; run it before every commit.
+./.venv/bin/python tests/test_sim.py
+```
+
+The smoke test says the *machine* works. This one says the *repo* does. Neither asserts a headline number — 42/42, 10/10 and the rest live in the build log with their assumptions written next to them, and pinning them into an assertion would turn every honest change to the physics into a failing build.
+
+```bash
+# 📝 does every point on the mousereach board still crate? ~40 s, 42 picks.
+#    Nightly, or before a commit that moves the gripper, the gaps or the crate.
+./.venv/bin/python tests/board_walk.py                  # expect 42/42
+./.venv/bin/python tests/board_walk.py --grid 11 9      # denser, ~72 s
+
+# 📝 have Week 1's two pick cycles changed? 158 lines of waypoints, diffed.
+./.venv/bin/python tests/baseline.py
+```
+
+`board_walk.py` is the guard on the claim `week1_mousereach.py` prints in its own banner — *every point on the board is pickable*. That claim was measured once, against one gripper, one `APPROACH_GAP`, one `RETRACT_GAP` and one crate position, and nothing checked it since. ⚠️ **If it fails, do not move the board.** A failing point is the claim being wrong; shrinking the board to cover it is what Bug Log 42 records the cost of. To watch a failure, the script prints the `week1_mousereach.py --click Y Z` that reproduces it in a window.
+
 ---
 
 ## Week 1 — the arm, the gripper, reaching a point
@@ -595,6 +615,42 @@ Everything above works one row from a base bolted to the floor. `simulation/mujo
 
 `python 2armfarm.py` runs the same thing — it is a shim that execs the real module. ⚠️ A module name starting with a digit is not a legal Python identifier, so `2armfarm.py` can be *run* but never *imported*; all the code lives in `two_arm_farm.py` and nothing but the shim refers to the digit name.
 
+#### 🪟🪟 `mousereach` — hand somebody the mouse
+
+```bash
+# 🪟🪟 THE DEMO. Click a band to hang a tomato, SPACE to send the machine.
+python 2armfarm.py mousereach
+./.venv/bin/python simulation/mujoco/two_arm_farm.py mousereach
+
+# 🎬 the same, live AND recording — --record shows the windows and writes the
+#    mp4s; --out is the batch recorder and shows nothing
+python 2armfarm.py mousereach --record demo
+
+# 📝 the reproducible version: hang an exact set, no mouse, no window
+./.venv/bin/python simulation/mujoco/two_arm_farm.py mousereach --headless \
+    --script "a:+1.20:mid:red,b:-0.35:low:green"
+```
+
+| key | |
+|---|---|
+| click a band | hang a tomato there |
+| `T` / `1` `2` `3` `4` | red / turning / breaker / green — **only red gets picked** |
+| `Z` | hang height, low / mid / high inside the measured band |
+| `SPACE` | survey, route, drive, pick |
+| `A` `C` | auto-fill · clear |
+| `R` | reset the scene without restarting the process |
+| `Q` / Esc / QUIT | quit |
+
+**Clicking is in THE MAP, the top-left panel of the MISSION window**, and nowhere else. That panel is the only view whose world↔pixel mapping is linear and pose-independent — the aisle shot is a perspective camera that lags a trolley travelling eight metres, so the same click would mean different things at different times, and the two deck cams are panning while you aim at them.
+
+**The reachable region is a band down each row, not a board.** Week 4's green board is the envelope of an arm bolted to a floor; on the trolley it is that same envelope **swept along the rail**, once per arm, on opposite sides of the aisle. Both bands are drawn, in each arm's own colour, and which arm gets a fruit is decided by which side of the aisle you hang it on.
+
+⚠️ **A click outside a band is refused at click time, with the reason, before the tomato exists** — and the cursor says what it would do *before* the button goes down. The worst thing this demo can do in front of a grower is accept a placement and discover eight metres later that nothing can reach it.
+
+⚠️ **Placement hands the router nothing.** `use_truth` is off; the deck cameras still have to find the fruit, band its colour and estimate where it is. Every run prints, per fruit, how far the estimate the arm was sent to was from where the tomato actually hung — a column of zeros there would mean the demo had become a puppet show.
+
+⚠️ **Adding a fruit mid-run voids every checked plan**, exactly as `week4_place.py` does it: the crop version ticks, the itinerary is thrown away, the aisle is re-surveyed and re-routed, and the window says `replan  crop changed - replanning` rather than letting it look like a stutter. It is noticed between picks and never mid-leg — a leg is the unit a route was verified in, and an arm holding a detached tomato cannot stow. What covers the gap is that the running `Guard`'s obstacle membership is frozen over the **whole pool**, parked fruit included with their welds live, so a fruit hung during a flight is in the guard's set from the cycle it appears.
+
 **What you actually see: two OpenCV windows.**
 
 ```
@@ -683,6 +739,188 @@ The pick phase is where the run spends its time and it is 59% faster. The *overa
 **The map panel is the new thing.** All four rows top-down, every fruit as a dot coloured by the ripeness the robot believes it has, ripe ones ringed, route stops numbered, the trolley drawn to scale with a line to whatever it is currently reaching for, and picked fruit crossed out as the row empties.
 
 ⚠️ **It is drawn from `HouseMap`, not from the simulator.** Where the robot is wrong, the map is wrong — which is the only way to watch a perception failure happen rather than read about it afterwards. Ground truth is drawn faintly underneath so the gap is visible.
+
+---
+
+## Week 5b — the same house, grown as trusses
+
+Everything above harvests **loose** fruit: one tomato per stem, one ripeness decision per tomato. These are the same three sims on **tomatoes-on-the-vine** — six fruit on a shared rachis, 0.80 kg a cluster, cut at the stem and crated whole.
+
+⚠️ **Separate scripts, not a flag.** The loose commands above are untouched and produce the numbers they always did. Nothing in `crop.py`, `run.py` or `two_arm_farm.py` changed.
+
+| | loose | truss |
+|---|---|---|
+| unit of work | one tomato, 0.12 kg | one cluster of 6, 0.80 kg |
+| ripeness decision | is *this fruit* red? | is **enough** of this cluster red? |
+| how it detaches | pulled until the stem snaps | **cut** at the stem |
+| detach threshold | `plant_row.SNAP_N` 12 N, assumed | `truss.TRUSS_SNAP_N` 75 N, from published data |
+
+### 🪟 `farm/watch_truss.py` — six panels, one arm, the map drawn as clusters
+
+```bash
+# 🎬 a whole truss shift — scout, judge each cluster, cut, crate
+./.venv/bin/python simulation/mujoco/farm/watch_truss.py
+
+# 🎬 skip the mapping pass and route the real crop
+./.venv/bin/python simulation/mujoco/farm/watch_truss.py --truth
+
+# 🎬 short: two stops only
+./.venv/bin/python simulation/mujoco/farm/watch_truss.py --truth --stops 2
+
+# 🎬 cut trusses that are only a third red, instead of the shipped half
+./.venv/bin/python simulation/mujoco/farm/watch_truss.py --threshold 0.33
+
+# 🎬 record instead of showing
+./.venv/bin/python simulation/mujoco/farm/watch_truss.py --out truss_watch.mp4
+```
+
+Same six-panel layout as `farm/watch.py`. **The map panel is what differs**: every mark is a *truss*, drawn as its six fruit in their real positions and each in its own stage colour, with the red count (`4/6`) printed under it and a green ring on the clusters the rule says to cut. The verdict and the evidence for it are in the same picture.
+
+### 🪟🪟 `two_arm_farm_truss.py` — two arms, two deck heads, a house of trusses
+
+```bash
+# 🎬 the full two-arm truss run, two windows
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py
+
+# 🎬 same house every time
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py --seed 7
+
+# 📝 no windows at all
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py --headless
+
+# 📝 skip the mapping pass, cap the stops
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py --truth --stops 2
+
+# 🖼 render every panel once and exit
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py --shot
+
+# 🎬 record both windows
+./.venv/bin/python simulation/mujoco/two_arm_farm_truss.py --out trussarm
+```
+
+`python 2armfarmtruss.py` runs the same thing — the same kind of shim as `2armfarm.py`, and it carries the same warning about digit-leading module names.
+
+⚠️ **KNOWN GAP, narrowed but not closed, and it is in this sim only.** The two-arm truss run now **crates** — the carry fixes above apply here too, via `duo.run(plan_opts=…, score_in_bin=…)` — but on `--truth --stops 2 --seed 7` it gets 1 of 3, against the single-arm sims' 7 of 7 on the same crop. It used to get **0** of 3 with "nothing reaches the crate", so what is left is a smaller and much better-described problem.
+
+**The blade is no longer a suspect, with numbers.** Instrumenting `truss.Cutter` over that run, per pick — best pad load seen while in reach, and the finger speed at the moment the gate was satisfied:
+
+| truss | arm | cut | cycles in reach | best pad L/R | stall | outcome |
+|---|---|---|---|---|---|---|
+| c010 | arm1 | **yes** | 171 | 30.3 / 44.8 N | 0.034 | **clean, crated** |
+| c011 | arm1 | **yes** | 194 | 54.1 / 41.4 N | 0.047 | `grasp_failed` |
+| c007 | arm2 | no | **16** | **0.0 / 0.0 N** | — | `grasp_failed` |
+
+So the two failures are **two different things, and neither is the blade or the truss model**:
+
+* **c011** was cut on a genuine 54 N / 41 N grip and then lost *before `extract`* — a carry-side failure inside `duo`'s executor path
+* **c007** was never gripped at all: arm2's tool was within `CUT_REACH` of the collar for 16 control cycles out of 1524 and **the pads never touched it once**. That is a reach/arrival failure on the mirrored arm, upstream of anything the blade could do about it
+
+The difference remains that `duo` drives `week2_pick.MissionRun` through `Machine` while the single-arm path uses `week2_pick.execute`. One concrete asymmetry, still open: `execute` calls `CarryTrace.tick` every control cycle and `Machine.drive` does not, so `peak_n` and `peak_held_ms` from a two-arm run are not trustworthy either. Those are the two threads to pull next, and they are now separable.
+
+⚠️ **The concurrency engine is not forked.** `farm/duo.py` gained five optional hooks (`snap_n`, `on_pick`, `truth_map`, `plan_opts`, `score_in_bin`) and both two-arm sims run through it, so the deck-centre interlock and the arm-vs-arm clearance have exactly one implementation. Pass none of them and it is byte-for-byte the loose behaviour.
+
+### 📝 `farm/truss.py` — the crop, and the threshold measurement
+
+```bash
+# 📝 what spawned: fruit per stage, and red-per-truss, which is what the rule judges
+./.venv/bin/python simulation/mujoco/farm/truss.py --stats
+
+# 📝 THE MEASUREMENT — what each ripeness threshold would take, and what it costs
+./.venv/bin/python simulation/mujoco/farm/truss.py --sweep
+
+# 📝 a bigger house, so the table is not read off a dozen trusses
+./.venv/bin/python simulation/mujoco/farm/truss.py --sweep --seed 5 -n 40
+
+# 🪟 a window with the crop in it
+./.venv/bin/python simulation/mujoco/farm/truss.py
+
+# 🖼 stills
+./.venv/bin/python simulation/mujoco/farm/truss.py --shot
+```
+
+`--sweep` is where `truss.RIPE_FRACTION` comes from, and it is worth running before quoting the default. Over 62 trusses on seed 5:
+
+| take at | trusses | red taken | of all red | unripe | green | downgraded | red left |
+|---|---|---|---|---|---|---|---|
+| 1 of 6 | 39 | 145 | 100% | 89 | 6 | 6 | 0 |
+| 2 of 6 | 36 | 142 | 98% | 74 | 3 | 3 | 3 |
+| **3 of 6** | **28** | **126** | **87%** | **42** | **0** | **0** | **19** |
+| 4 of 6 | 21 | 105 | 72% | 21 | 0 | 0 | 40 |
+| 6 of 6 | 7 | 42 | 29% | 0 | 0 | 0 | 103 |
+
+⚠️ **Read `downgraded`, not `green`.** TOV is graded and sold one truss at a time, so a green fruit's cost is borne by the whole cluster it was cut with — one truss with three green fruit is one downgraded item, not three. **3 of 6 is the loosest threshold that is zero-downgrade on every seed tried** (5, 11, 23, 41) and it still brings in 84–91% of all the red fruit in the house. Tightening past it gives up another 15 points of capture and cannot improve on zero.
+
+⚠️ **`unripe` is mostly not a cost.** Commercial practice harvests just after breaker and the fruit colours in transit, so breaker and turning tomatoes cut with the truss are the normal product. Green is the mistake.
+
+### 📝 `farm/trussrun.py` — the shift with no windows, and the CV score
+
+```bash
+# 📝 a whole truss shift, text only
+./.venv/bin/python simulation/mujoco/farm/trussrun.py
+
+# 📝 skip scouting; isolates gripping and routing from perception
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --truth --stops 2
+
+# 📝 override the cluster threshold for one run
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --threshold 0.33
+
+# 📝 score the cluster CV against the real trusses, then stop
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --recall
+
+# 📝 the same house every time — what the carry numbers below were read off
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --truth --seed 7
+
+# 📝 a dense row: 12 trusses a row instead of 6, so a stop has 5–7 picks in it
+#    and the crate fills up during the shift
+./.venv/bin/python simulation/mujoco/farm/trussrun.py --truth --seed 13 -n 12
+```
+
+`--recall` is the honest look at the perception. On seed 7: **0 phantom clusters**, grasp point median 23 mm out, and the take/leave verdict agreed with ground truth on **13 of 14** trusses — but only 3 of 14 clusters came back with all six fruit, the rest occluded by their own neighbours.
+
+⚠️ **The rule survives losing fruit because it reads a fraction — but it does not survive losing them *unevenly*, and they are lost unevenly.** `farm/scout.py`'s own measurements make the green band the weak one (green fruit sit 6 hue from a stem, 13 from a leaf). So the fruit this pipeline drops are disproportionately unripe, which inflates the measured red fraction and makes the rule **more eager than the truth would justify** — the one direction a truss picker can least afford. Do not read the 13/14 as "the counting does not matter".
+
+### What the truss variant found that the loose crop could not
+
+⚠️ **A 0.8 kg cluster breaks its own stem at the loose crop's snap threshold.** `plant_row.SNAP_N` is 12 N and says of itself, at length, that it is assumed rather than measured. A truss hangs at **7.85 N** before anything touches it, against a grasp transient `plant_row` measures at 6.0–8.6 N — so every truss snapped during the approach and was on the floor before the gripper closed. `truss.TRUSS_SNAP_N` is 75 N instead, from published tensile tests of the tomato abscission zone (40.3 N at 5–6 mm, 44.8 N at 6–7 mm, 72.0 N at 7–8 mm, ~1.5 MPa), scaled to the thicker stem a six-fruit truss hangs on. That is 9.6× the cluster's static weight — the same margin `plant_row`'s 12 N gives its 1.18 N fruit.
+
+⚠️ **And then pull-to-snap fails anyway, which is why there is a blade.** With the stem strong enough to survive the approach, the arm loads it to 75 N and the release throws the cluster out of the pads: measured at 75.2 N and 81.4 N on two trusses, both `grasp_failed`, both 730–830 mm from the tool by `extract`. The grip was never the problem — holding to 75 N of pull *is* the grip working. `truss.Cutter` severs the peduncle once the pads have closed, with no stored load; peak force drops from 75 N to 18 N and the pick comes out clean. This is `plant_row.SNAP_N`'s own note about the Vinea cradle-and-blade design — "it severs rather than pulls" — built for the crop that needs it.
+
+### The carry is a different job too, and five things assumed it was not
+
+The blade above fixed the *detach*. Everything after it still ran on a loose tomato's geometry, and a truss is not one: it is a 0.24 m cluster hanging below the point the pads are holding. **Five defects, each measured, each one either dropping the cluster or mis-scoring a pick that worked.** Reproduce the whole set with `farm/trussrun.py --truth --seed 7`.
+
+**1. The blade fired on the gripper *command*, not on a grip.** The gate was `ctrl >= 0.55 × 255` on the stated grounds that the pads had met the 20 mm collar by then. Closing the 2F85 on nothing and measuring the gap between the pad centres:
+
+| ctrl | 0 | 80 | 120 | **140** | 180 | 200 | 220 | 255 |
+|---|---|---|---|---|---|---|---|---|
+| pad gap mm | 93.2 | 68.5 | 54.9 | **47.9** | 33.5 | 26.2 | 18.8 | 8.8 |
+
+The pads meet each other at 8.8 mm, so a 20 mm collar is held at ~29 mm — `ctrl ≈ 200`. At the 140 the blade was firing at, **the pads are 44 mm apart around a 20 mm stem** and the pad forces show exactly one of them touching (9.6 N / 0.0 N). The weld was released there, into a gripper that had not closed, and 0.80 kg fell.
+
+⚠️ **It sometimes got away with it, which is worse than failing.** The closing pads would scoop the falling truss and it would land in the crate — the shift report's own *"the fruit was flung and happened to land in the crate, so the clean rate is partly luck"* line was this bug.
+
+**2. Force on both pads is not a grip either.** The obvious fix — cut when both pads are loaded — still dropped trusses, because the pads sweep in on an arc and the first to arrive *pushes the cluster across into the second*. Both read load while still 55 mm apart and closing at full speed. Per control cycle:
+
+| | pads first both loaded | fingers stalled |
+|---|---|---|
+| seed 23 | 19 / 29 N, gap 55.0 mm, \|v\| **0.52** | 32 / 47 N, gap 47.3 mm, \|v\| **0.02** |
+| seed 7 | 33 / 23 N, gap 51.5 mm, \|v\| **0.28** | 50 / 35 N, gap 45.6 mm, \|v\| **0.05** |
+
+So the blade now asks three questions and cuts only on all three — the tool is within `CUT_REACH` of *this* collar, both pads carry `CUT_HOLD_N`, and the fingers have **stopped** (`CUT_STALL_V`). The stall is the one that separates a hold from a sweep, by more than an order of magnitude.
+
+**3. The wrist turned the cluster over.** The `turn` leg points the tool `DOWNWARD` before carrying, which is right for a sphere sitting in the pads and wrong for 0.80 kg hanging on a quarter-metre lever: pad forces went from a 40 N hold to **53 N / 180 N** during the turn and the cluster was levered out 0.6 s into `carry` and thrown 460 mm. It is also unnecessary — a truss held by the stem already hangs straight down, so `mission.Planner(carry_axis="into_row")` leaves the wrist where it gripped and the release drops the cluster straight in.
+
+**4. The crate was a loose fruit's crate, twice over.** `mission.BIN_DROP_UP` is 0.28 m because a tomato ends 33 mm below the tool; a truss ends **271 mm** below it, so the bottom fruit sat *below the crate floor* and `carry` swept the cluster through the crate wall. `truss.CRATE_DROP_UP` derives the height from the rachis instead — and `truss.drop_height` raises it as the crate fills, because the crate is 120 mm deep and the *first* truss settles with its top fruit at z 0.391 against a rim at 0.386, so the second was carried in at a height chosen for an empty crate and struck the first.
+
+**And a pick that worked was scored as a miss.** `fr5.crate_contains` reads one point — `data.body(name).xpos` — which for a loose tomato is the middle of the tomato and for a truss is the **grasp point**, a quarter of a metre above the fruit lying in the crate. Every correctly crated truss failed the height test. `truss.in_crate` asks the crate about the tomatoes instead.
+
+**5. And the planner could not see a cluster at all.** `mission.CropObstacles` modelled every crop body as one 66 mm ball at its origin — for a truss, a ball floating at the top of the stem with six tomatoes and 238 mm of rachis hanging below it, in none of the planner's or the guard's obstacle sets. It now reads the body's own collidable geoms, which returns **exactly one sphere of `FRUIT_R`** for a loose fruit (so every Week 1–4 clearance is untouched) and seven for a truss. Stacked into one distance matrix it is also **faster than the wrong model it replaced** — 0.49 ms against 0.70 ms on a 48-truss house, agreeing with the direct norm to 1.8e-15 m.
+
+**Result on the single-arm sims**, `--truth`, seeds 5/7/11/23/41: **7 of 7 trusses cut and crated, `clean` on every one, and `grasp instability` fires on none of them** — against a before-state where the same runs dropped the cluster or crated it by luck.
+
+⚠️ **A dense row is still weak, and that is a different problem.** At `-n 12` — 5–7 picks in one stop, and the crate filling during the shift — seed 13 goes 2/5 → **4/5** and seed 3 goes 2/7 → **3/7**: **7 of 12 against 4 of 12 before**, which is better and is not good.
+
+What is left there is mostly **`grasp_failed`, not `carry_dropped`** — the cluster is lost during `grip`, before any of the carry geometry above is in play. Tracing the contacts on seed 13's one failure, the truss is struck by unnamed geoms during `grip` and is on the floor by `close`: those are glasshouse **leaves**. `mission.CropObstacles` covers the crop bodies, the support bar and the back panel, and the canopy is in none of them, so neither the planner's preview nor the runtime guard knows a leaf exists. A 66 mm tomato mostly gets away with that; a 0.24 m cluster on a crowded row does not. It is a pre-existing limit the loose crop shares, it is upstream of the blade, and it is the next thing to fix — not the carry.
 
 ### 📝 The pieces, each runnable on its own
 
@@ -827,6 +1065,19 @@ Each head also sits **0.60 m** from its own row against the shared head's 0.70 m
 | turning | 14 | yes — **98.2%** (52/57 → 56/57) |
 | breaker | 29 | yes — 100% |
 | green | 49 | **no** — a stem is 55, a leaf is 62. Banded right when found, but **most are never found at all** |
+
+⚠️ **That table is the *shared* scouting head, and there are now two different cameras.** `farm/scout.py --recall` drives `scout.Scout`: one head on the aisle centreline, 0.70 m from both rows, one look per stop. `farm.decks` — what `two_arm_farm.py` and `mousereach` use — is one head per arm over its own plate, **0.60 m**, three pan poses, never crossing the aisle. Re-measured with `duo.DuoScout` + `scout.score`, four houses (seeds 7/11/23/41), both worked rows, 96 fruit:
+
+| stage | in house | mapped | recall | banded right |
+|---|---|---|---|---|
+| green | 42 | 31 | **74%** | 100% |
+| breaker | 16 | 16 | 100% | 94% |
+| turning | 14 | 13 | 93% | 85% |
+| red | 24 | 24 | 100% | **92%** ← the one that gets picked |
+
+Both are true of their own camera; keep them labelled. `farm.overlay.RECALL` holds the deck figures and the deck panels print them, because quoting the shared head's numbers on a panel showing a different lens would be a measurement of a camera that is not in the frame. Note **red is only 92% correctly banded at deck range** — about one ripe fruit in twelve is called something else and walked past, which is a worse headline than the green number and had not been measured before.
+
+⚠️ **Touching fruit are dropped, not merged, at deck range.** The recorded failure — four in a 70 mm cluster fusing into one detection 48 mm off — was measured on the Week 4 chassis mast at 1.3 m. On `farm.decks` at 0.60 m, head-on: one fruit → 1 detection (37×36 px); a pair at 100 mm → 2, the far one misbanded `turning`; a pair at **70 mm → 0**; four at 71 mm pitch → **0**. The fused contour fails `scout.RIPE_CIRCULARITY` and the cluster is dropped entirely. Across a whole survey the pair returns as **three** sightings for two fruit (and a 200 mm control as **four**), because `scout._fuse` cannot merge what arrives more than `FUSE_M` apart — so at this range the map's problem is phantoms, not fusion.
 
 ⚠️ **`stage_of` used to average the whole bounding box while its docstring claimed it averaged "its own pixels".** A tomato's projection is round and its box is square, so ~21% of what it sampled was corner, and the saturation floor does not reject a *breaker* tomato one truss behind — which is exactly what pulls a red fruit's mean hue up into `turning`, so the map calls it unripe and the harvest walks past it. Sampling the **inscribed disc** fixes it. No band moved; the function now reads the pixels it always claimed to. Eight houses, 156 matched fruit: red 96.2% → **98.7%**, turning 91.2% → **98.2%**, green and breaker 100% either way.
 

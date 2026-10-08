@@ -443,6 +443,28 @@ class Row:
         return self.data.body(f"stem_{name}").xpos.copy()
 
 
+def print_clearances(model, data, row, prefix=""):
+    """How far each fruit sits from the named arm's tool, at the current pose.
+
+    This is entry 23's check, kept as code: the "1-in-6 grasp failure" was a
+    fixture bug, a truss spawned 72 mm from the home posture and *inside* the
+    open gripper, so the arm knocked it off the plant before the pick began.
+    A row that fails this is a scene bug and reads exactly like a control bug.
+
+    ⚠️ `prefix` names which arm. It defaults to `""` — the unprefixed Week 1-4
+    arm — so this row scene is unaffected. Without it, running the check on a
+    two-armed scene measures every clearance against arm A while reporting it
+    under whichever arm the caller had in mind. See `fr5.tool_pos`.
+    """
+    from fr5 import tool_pos
+
+    tool = tool_pos(data, prefix)
+    print(f"\n  clearance from home {prefix}tool0 {tool.round(3)}:")
+    for n in row.names:
+        d = float(np.linalg.norm(data.body(n).xpos - tool)) * 1000
+        print(f"    {n}: {d:5.0f} mm   {'ok' if d > 200 else 'TOO CLOSE'}")
+
+
 def main():
     """Verify the two numbers Step 2 stands on, before anything uses them."""
     import os
@@ -490,11 +512,7 @@ def main():
         print(f"    {n}: {f:.2f} N   {ok}")
 
     # --- how far is each fruit from the arm's home posture? -----------------
-    tool = data.site("tool0").xpos
-    print(f"\n  clearance from home tool0 {tool.round(3)}:")
-    for n in row.names:
-        d = float(np.linalg.norm(data.body(n).xpos - tool)) * 1000
-        print(f"    {n}: {d:5.0f} mm   {'ok' if d > 200 else 'TOO CLOSE'}")
+    print_clearances(model, data, row)
 
     # --- does it snap, and only when pulled? --------------------------------
     #

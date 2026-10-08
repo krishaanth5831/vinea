@@ -704,7 +704,15 @@ def main():
     if args.calib:
         from camera import Intrinsics, calibration_error, _report
         from camera import stage as _stage
+        from fr5 import tool_pos
         from mission import STAGE_X
+
+        # ⚠️ Not named in bug log entry 58, which lists five modules. This is a
+        # sixth, and the entry's own repro grep does not find it — the grep
+        # matches double quotes and this site uses single ones. Same shape,
+        # same failure: the 0.39 mm gate's pose captions would read arm A's
+        # tool under arm B's label. "" is the unprefixed Week 1-4 arm.
+        prefix = getattr(args, "arm", "") or ""
 
         sensor = SensorCamera(model, args.camera)
         print(f"\n{'=' * 78}\n  STEP 3 — deprojection against ground truth, "
@@ -722,8 +730,8 @@ def main():
                     mujoco.mj_forward(model, data)
                 else:
                     _stage(model, data, park, target, row)
-                ok &= _report(f"{label} — tool0 at "
-                              f"{data.site('tool0').xpos.round(3)}",
+                ok &= _report(f"{label} — {prefix}tool0 at "
+                              f"{tool_pos(data, prefix).round(3)}",
                               calibration_error(model, data, args.camera,
                                                 sensor.intr, sensor=sensor))
         finally:

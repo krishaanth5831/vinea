@@ -63,7 +63,6 @@ from reach import (  # noqa: E402
     CTRL_DT,
     DEFAULT_SPEED,
     HOLD_S,
-    REACHED_MM,
     STANDOFF,
     Reacher,
     attempt,
@@ -221,7 +220,17 @@ def run_interactive(reacher, seed):
             for _ in range(ctrl_per_frame):
                 ik_err, arm_err = reacher.step(goal)
             elapsed += frame_s
-            held = held + frame_s if arm_err * 1000 < REACHED_MM else 0.0
+            # `reacher.reached_mm`, not the module constant. Arriving is a
+            # property of the arm that is loaded, not of the file: a P+D
+            # position servo cannot null a constant gravity load, so hanging
+            # the 1.05 kg gripper on the flange leaves a steady-state offset it
+            # never removes. Measured over ten targets with a 2F85 on, that
+            # offset runs 3.70-6.05 mm — it *straddles* this constant's 5 mm,
+            # so the loop would sit reporting nothing at 5 of the 10 while the
+            # arm was visibly parked on the target. `drive_to` was already
+            # right; only this loop, which re-implements the same test by hand,
+            # was reading past the answer the Reacher already has. Entry 14.
+            held = held + frame_s if arm_err * 1000 < reacher.reached_mm else 0.0
 
             if not reported and held >= HOLD_S:
                 print(describe(attempt(goal, True, ik_err, arm_err, elapsed)))

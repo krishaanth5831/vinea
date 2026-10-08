@@ -1,0 +1,9 @@
+  approach  tool [+0.55 +0.15 +0.62]   arm 5.1 mm   67% of reach
+  descend   tool [+0.55 +0.15 +0.48]   arm 4.6 mm
+  close     tool [+0.55 +0.15 +0.48]   fingers commanded to 255
+  lift      tool [+0.55 +0.15 +0.68]   arm 5.6 mm
+  check     tool [+0.55 +0.15 +0.68]   holding the tomato
+  carry     tool [+0.30 -0.50 +0.30]   arm 5.1 mm
+  release   tool [+0.30 -0.50 +0.30]   fingers opened
+  home      tool [+0.67 -0.10 +0.47]   arm 5.9 mm
+  result grasped=True in_bin=True tomato=[0.327953, -0.61877, 0.048633]
