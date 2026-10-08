@@ -108,7 +108,139 @@ top and bottom.
 
 - Fix the SO-101 base mid-aisle, 370 mm from either end, centred on y = ±200. Mark
   it on the table, and mark where the feet sit.
-- ⚠️ Per the vault recording notes, the front (birdseye) camera clamps to the
-  **table**, not to this frame — the frame gets bumped.
+- ⚠️ Per the vault recording notes, the front (birdseye) camera mounts to the
+  **table**, not to this frame — the frame gets bumped. The printed mast below
+  does exactly that.
 - The structure works for cutting trusses (the vault plan) as well as plucking
   single fruit.
+
+## Birdseye camera mast
+
+A printed pole for the overview camera, an InnoMaker U20CAM-1080P (`birdseye` in
+lerobot). It screws to the table outside the end frame, and you can adjust its
+height, pan and tilt. It is the second feature in the same Onshape Part Studio,
+*Birdseye Camera Mast*; the source is `birdseye_mast.fs` here.
+
+Every adjustment locks in fixed steps. Per the vault notes, a front camera that
+shifts between sessions silently spoils the dataset, so nothing relies on friction:
+
+| Adjustment | Locked by | Step | Read it on |
+|---|---|---|---|
+| Height | M4 bolt through the outer tube and one of the slider's 16 holes | 10 mm | the slider mark level with the tube's top edge (20 to 170) |
+| Pan | serrated faces, 36 teeth, clamped by a knob | 10° | the yoke tick above a pointer line on the slider (long tick every 30°; the dot marks the pointer that faces the arm) |
+| Tilt | serrated faces, clamped by a knob | 10° | the cradle tick under the line on the upright's top (long ticks at 0, 30, 60 and 90° down) |
+
+**Lens height** (tilt 0) = 273 mm + mark + 160 mm per riser:
+
+- no riser: 293 to 443 mm
+- one riser: 453 to 603 mm
+- two risers: 613 to 763 mm
+
+Each range continues the one before it.
+
+### Where it goes
+
+These positions are checked in the model:
+
+- **Base:** at x = −120 mm, so 120 mm outside the end frame's centre line. Its
+  centre is 49 mm short of the aisle centre (y = 151 for the +Y aisle), because
+  the camera sits 49 mm to the side of the pole and so lines up with the aisle.
+- **Orientation:** the "ARM ▶" on the base points along the rows, into the house.
+- **Default setting:** mark 150, pan 0, tilt 20° down, which puts the lens at
+  423 mm. From there the camera sees all of the following through the end-frame
+  opening, with at least 10° to spare, and no greenhouse member blocks the line of
+  sight:
+  - all four corners of the pick zone (x 300 to 420, z 100 to 350) on both vine rows
+  - the arm's base
+
+  The check uses an 80° × 60° field, narrower than the lens's 103° horizontal,
+  because lerobot records at 640 × 480 and that mode may crop the sensor.
+- **Arm clearance:** as set, the mast is at least 49 mm outside the SO-101's reach
+  sphere. The head stays at least 10 mm outside at every height, pan and tilt.
+- **Higher views:** with one riser, 523 mm is still clear. At 563 mm the crop tie
+  hides 2 of the zone's corners, and at 603 mm it hides 4. Above about 550 mm,
+  use the risers only for setups without the greenhouse.
+
+### Parts (print these)
+
+| STL | Qty | Size (mm) | Notes |
+|---|---|---|---|
+| `gh_cam_fit_coupon.stl` | 1 | 183 × 38 × 34 | **Print first**: see Fit below |
+| `gh_cam_base_x1.stl` | 1 | 110 × 110 × 40 | 4 countersunk holes for 4 mm wood screws |
+| `gh_cam_outer_tube_x1.stl` | 1 | 240 × 34 × 34 | "TOP" end up |
+| `gh_cam_slider_x1.stl` | 1 | 240 × 29 × 29 | height holes and marks, serrated top |
+| `gh_cam_yoke_x1.stl` | 1 | 47 × 38 × 30 | pan and tilt serrations, pan scale |
+| `gh_cam_cradle_x1.stl` | 1 | 45 × 44 × 38 | camera plate, tilt scale |
+| `gh_cam_knob_x4.stl` | 4, plus 2 per riser | Ø 21 × 8 | hex pocket takes an M4 nut or hex bolt head |
+| `gh_cam_riser_optional.stl` | 0 to 2 | 160 × 34 × 34 | each adds 160 mm |
+| `gh_cam_collar_optional.stl` | 1 per riser | 40 × 40 × 60 | joins a riser to the tube above it |
+
+The basic kit is about 0.3 kg of PLA, roughly 7 to 9 h of printing.
+
+- **Settings:** the same as the house: 0.2 mm layers, 4 walls, 15 % infill.
+- **Orientation:** the STLs are already in print orientation and need no supports.
+  - The tubes and slider lie flat.
+  - The collar stands up.
+  - The yoke lies on its side, so both serrated faces print vertical.
+- **Rounding:** every edge is rounded except the serration teeth, which need crisp
+  flanks.
+
+### Hardware
+
+| Joint | Parts |
+|---|---|
+| Pan | M4 × 25 hex-head bolt pressed head-first into a knob; M4 nut in the slot at the slider's top |
+| Tilt | M4 × 20 hex-head bolt pressed into a knob; M4 nut in the slot on the upright's front face |
+| Height lock | M4 × 45 bolt and washer; knob with an M4 nut pressed in |
+| Base | M4 × 50 bolt and washer; knob with nut |
+| Each collar | 2 × M4 × 50 bolts and washers; 2 knobs with nuts |
+| Camera | 4 × M2 × 12 screws, 4 M2 nuts in the traps behind the plate |
+| Table | 4 × 4 mm countersunk wood screws, about 20 mm long, or clamp the plate's edge |
+
+### Fit (print the coupon first)
+
+- **Slider stubs:** 1 / 2 / 3 dots = 0.15 / 0.25 / 0.35 mm of clearance per side.
+  - Push each one through the tube ring. The right one slides by hand and doesn't rattle.
+  - The default is the 2-dot stub. If yours is a different one, set *Slider clearance*
+    in Onshape and re-export the slider.
+- **Board template:** lay the camera on it and check that its four holes line up.
+  - The 28 mm spacing comes from InnoMaker's photos. The 32 mm board and 2.2 mm
+    holes come from their manual.
+  - If the holes don't line up, change *Board hole spacing* before you print the cradle.
+
+### Assembly
+
+1. **Base:** screw it to the table where the model has it, with "ARM ▶" along the
+   aisle toward the arm. Tape-mark its outline.
+2. **Outer tube:** put it in the base socket "TOP" end up. Fit the M4 × 50 bolt
+   and a knob through the base and the tube.
+3. **Yoke onto the slider:**
+   - Slide an M4 nut into the slider's top slot, from the face with the numbers.
+   - Seat the yoke on the serrated top.
+   - Bolt it on with the M4 × 25 knob.
+4. **Camera onto the cradle:**
+   - Fix the board with M2 × 12 screws from the front, nuts in the traps behind.
+   - Put the cable connector at the plate's open bottom edge. The board sits on
+     6.5 mm standoffs, so the back parts and the connector clear the plate.
+5. **Cradle onto the yoke:** slide an M4 nut into the upright's front slot, then
+   bolt the cradle to the upright with the M4 × 20 knob.
+6. **Height:**
+   - Drop the slider into the outer tube.
+   - Push the M4 × 45 bolt through the tube's top hole and the slider hole for
+     the mark you want.
+   - Fit a knob on the other end.
+
+To change pan or tilt, loosen its knob a turn, move the head a tooth or more, and
+retighten. The serrations re-seat every 10°.
+
+**Cable:** the camera's USB lead is 1 m. From a 420 mm lens height, down the mast
+and across to a laptop, that will probably be short, so plan on a USB 2.0
+extension. Zip-tie the lead to the mast and leave a loop at the head, so height and
+tilt changes don't pull on the board's connector.
+
+**Recording:**
+- Write the setting down with each session, for example "mast mark 150, pan 0,
+  tilt 20". If any of it changes, it is a new camera pose (vault: re-record).
+- If the image comes out upside down, add `rotation: 180` to the birdseye camera
+  in the lerobot `--robot.cameras` dict.
+
