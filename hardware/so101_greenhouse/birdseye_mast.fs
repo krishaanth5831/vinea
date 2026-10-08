@@ -508,6 +508,25 @@ export const birdseyeCameraMast = defineFeature(function(context is Context, id 
                 cutKind(context, reg, qKind(reg, kA), "q3E" ~ i);
                 nameAs(context, qKind(reg, kA), "PRINT - cam coupon: slider stub " ~ (i + 1) ~ " dot" ~ (i > 0 ? "s" : ""), color(0.2, 0.55, 0.9));
             }
+            // three short sockets standing up the way the base socket and the collar print (bores
+            // printed as XY holes come out small); push the tube ring into each
+            const dsk = [-0.1, 0, 0.1];
+            for (var i = 0; i < 3; i += 1)
+            {
+                const kA = "q4A" ~ i;
+                const kC = "q4C" ~ i;
+                const sb = SB + 2 * dsk[i];
+                const x0 = cx + i * (sb + 2 * sockWall + 6);
+                const y0 = cy + 50;
+                box3(context, nid(reg, kA), [x0, y0, 0], [x0 + sb + 2 * sockWall, y0 + sb + 2 * sockWall, 15]);
+                box3(context, nid(reg, kC), [x0 + sockWall, y0 + sockWall, -1], [x0 + sockWall + sb, y0 + sockWall + sb, 16]);
+                finishPart(context, reg, kA, kC);
+                roundConvexEdges(context, reg, qKind(reg, kA), min(edgeR, 0.4));
+                for (var j = 0; j <= i; j += 1)
+                    zcyl(context, nid(reg, "q4E" ~ i), x0 + 8 + j * 4, y0 + sockWall / 2, 14.5, 16, 0.8);
+                cutKind(context, reg, qKind(reg, kA), "q4E" ~ i);
+                nameAs(context, qKind(reg, kA), "PRINT - cam coupon: socket ring " ~ (i + 1) ~ " dot" ~ (i > 0 ? "s" : ""), color(0.2, 0.55, 0.9));
+            }
         }
 
         // ============================================================ FIT: camera, view, reach

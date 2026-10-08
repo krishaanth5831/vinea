@@ -165,7 +165,7 @@ These positions are checked in the model:
 
 | STL | Qty | Size (mm) | Notes |
 |---|---|---|---|
-| `gh_cam_fit_coupon.stl` | 1 | 183 × 38 × 34 | **Print first**: see Fit below |
+| `gh_cam_fit_coupon.stl` | 1 | 183 × 91 × 34 | **Print first**: see Fit below |
 | `gh_cam_base_x1.stl` | 1 | 110 × 110 × 40 | 4 countersunk holes for 4 mm wood screws |
 | `gh_cam_outer_tube_x1.stl` | 1 | 240 × 34 × 34 | "TOP" end up |
 | `gh_cam_slider_x1.stl` | 1 | 240 × 29 × 29 | height holes and marks, serrated top |
@@ -203,6 +203,11 @@ The basic kit is about 0.3 kg of PLA, roughly 7 to 9 h of printing.
   - Push each one through the tube ring. The right one slides by hand and doesn't rattle.
   - The default is the 2-dot stub. If yours is a different one, set *Slider clearance*
     in Onshape and re-export the slider.
+- **Socket rings:** 1 / 2 / 3 dots = 0.05 / 0.15 / 0.25 mm of clearance per side.
+  - These test the base socket and the collars. They print standing, as those do.
+  - Push the tube ring into each. The right one takes it by hand without wobbling.
+  - The default is the 2-dot ring. If yours is a different one, set *Socket clearance*
+    and re-export the base and the collar.
 - **Board template:** lay the camera on it and check that its four holes line up.
   - The 28 mm spacing comes from InnoMaker's photos. The 32 mm board and 2.2 mm
     holes come from their manual.
@@ -225,7 +230,9 @@ The basic kit is about 0.3 kg of PLA, roughly 7 to 9 h of printing.
 5. **Cradle onto the yoke:** slide an M4 nut into the upright's front slot, then
    bolt the cradle to the upright with the M4 × 20 knob.
 6. **Height:**
-   - Drop the slider into the outer tube.
+   - Drop the slider into the outer tube with its dotted pointer on the same side as
+     the base's "ARM ▶". It also fits turned round, but then every pan reading is
+     180° off.
    - Push the M4 × 45 bolt through the tube's top hole and the slider hole for
      the mark you want.
    - Fit a knob on the other end.
