@@ -1,5 +1,9 @@
 #!/bin/bash
-# Vinea — Launch Gazebo Simulation
+# Vinea — Launch Gazebo Simulation (original June 2026 plan, NOT the simulation)
+#
+# ⚠️ Gazebo was dropped for MuJoCo and `vinea_bringup` has no launch file, so
+# this fails as it stands. The simulation is run with plain Python scripts in
+# simulation/mujoco/ — see the README. Kept for reference; see ros2/README.md.
 
 set -e
 

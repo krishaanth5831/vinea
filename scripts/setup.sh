@@ -1,6 +1,11 @@
 #!/bin/bash
-# Vinea — Environment Setup Script
-# Run once after cloning the repo
+# Vinea — ROS 2 workspace setup (original June 2026 plan, NOT the simulation)
+#
+# ⚠️ The MuJoCo simulation does not use ROS. To run it, follow "Setup" in the
+# README instead (a Python venv + requirements.txt). This script sources ROS 2
+# Humble and runs colcon from the repo root; the Vinea packages in ros2/ are
+# empty skeletons, so nothing of Vinea's own gets built. Kept for the hardware
+# phase; see ros2/README.md.
 
 set -e
 
