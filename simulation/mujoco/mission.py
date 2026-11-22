@@ -63,7 +63,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fr5 import GRIPPER_PREFIX, LINKS, TOOL_SITE  # noqa: E402
-from plant_row import FRUIT_R, ROW_X  # noqa: E402
+from plant_row import ROW_X  # noqa: E402
 from reach import DEFAULT_SPEED, approach_rotation  # noqa: E402
 
 # --- where things are --------------------------------------------------------

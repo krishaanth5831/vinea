@@ -49,7 +49,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fr5 import add_crate, build_fr5_spec, tool_pos  # noqa: E402
-from plant_row import ROW_X, SUPPORT_Z, add_row  # noqa: E402
+from plant_row import ROW_X, add_row  # noqa: E402
 
 # --- the one contact number that decides whether a pick survives -------------
 #

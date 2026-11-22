@@ -67,7 +67,6 @@ from incident import (  # noqa: E402
     PINNED,
     STEM_OVERLOAD,
     TOOL_STRIKE,
-    UNKNOWN,
 )
 
 STORE = Path(__file__).resolve().parents[2] / "simulation" / "lessons.json"

@@ -714,7 +714,7 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
     from camera import stage
     from carrytrace import CarryTrace
     from incident import Blackbox
-    from mission import (BIN_POS, CLEARANCE, GUARD_STOP, Guard, Planner,
+    from mission import (CLEARANCE, GUARD_STOP, Guard, Planner,
                          STAGE_X, park_arm)
     from outcomes import classify
     from reach import DEFAULT_SPEED, Gripper
@@ -922,7 +922,6 @@ def harvest_placed(model, data, row, crop, park_q, speed=None, clearance=None,
             add_at = None
             continue
 
-        t0 = _time.perf_counter()
         park_arm(model, data, park_q)
         mujoco.mj_forward(model, data)
 

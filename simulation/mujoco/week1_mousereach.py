@@ -78,7 +78,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fr5 import (  # noqa: E402
     MAX_REACH_GRIPPER,
-    TOOL_SITE,
     add_crate,
     add_plant_panel,
     build_fr5_spec,
@@ -86,7 +85,6 @@ from fr5 import (  # noqa: E402
     exit_without_teardown,
     panel_normal,
     reach_fraction,
-    reset_home,
 )
 from pickcycle import Plan, Pull, run_cycle  # noqa: E402
 from pickcycle import park_pose as pickcycle_park_pose  # noqa: E402

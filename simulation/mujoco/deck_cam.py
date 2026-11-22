@@ -411,8 +411,6 @@ class DeckHead:
     """
 
     def __init__(self, model, data=None, name=HEAD_BODY):
-        import mujoco
-
         self.model = model
         self.body = name
         try:
@@ -1356,7 +1354,6 @@ def plan_order(survey, start=None, improve=True, exact=None):
     # is what the optimiser was scored on — including a refused fruit still
     # counting against everything after it.
     s = _sequence_cost(order, positions, start)
-    here = start
     for w in s["steps"]:
         n = w["fruit"]
         others = {m for m in order if m != n}
@@ -1364,7 +1361,6 @@ def plan_order(survey, start=None, improve=True, exact=None):
         plan.steps.append(Step(fruit=n, pos=positions[n], risk=w["crowd"],
                                unblocks=unblocks, travel=w["travel"],
                                remaining=w["standing"], block=w["block"]))
-        here = positions[n]
     plan.total_risk = s["total_risk"]
     plan.worst_risk = s["worst_risk"]
     plan.travel_m = s["travel_m"]
@@ -1889,8 +1885,6 @@ def mounts(args):
 
 def sweep(args):
     """Where does the arm actually go? The measurement that sites the post."""
-    import mujoco
-
     from mission import robot_geoms
     from week4_place import Crop, auto_layout, harvest_placed
 

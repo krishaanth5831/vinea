@@ -35,8 +35,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from farm import crop as fcrop  # noqa: E402
-from farm import house, overlay, route, run as frun, trolley  # noqa: E402
+from farm import house, overlay, run as frun, trolley  # noqa: E402
 
 TILE_W, TILE_H = 560, 420
 

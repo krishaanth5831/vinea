@@ -382,7 +382,6 @@ def harvest(model, data, row, park_q, sensor, detector, speed=None,
     import mujoco
 
     from camera import stage
-    from detect import draw
     from incident import Blackbox
     from mission import (CLEARANCE, DEFAULT_SPEED, GUARD_STOP, Guard, Planner,
                          STAGE_X, reset_park)
@@ -702,7 +701,7 @@ def main():
     clearance = None if args.clearance is None else args.clearance / 1000.0
 
     if args.calib:
-        from camera import Intrinsics, calibration_error, _report
+        from camera import calibration_error, _report
         from camera import stage as _stage
         from fr5 import tool_pos
         from mission import STAGE_X

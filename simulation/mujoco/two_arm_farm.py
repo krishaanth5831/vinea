@@ -720,8 +720,6 @@ class Windows:
         return img
 
     def _wrist_panel(self, tag, fresh):
-        import cv2
-
         from farm.scout import StageDetector
 
         cam = self.wrist[tag]

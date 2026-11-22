@@ -38,14 +38,12 @@ one written down; the same trap applies here and the peak is the whole point.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from plant_row import FRUIT_R  # noqa: E402
 
 # The four pad geoms of the Robotiq 2F85, split by finger. Two geoms per pad:
 # Menagerie models each pad as a pair so the contact patch is not a single

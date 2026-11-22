@@ -55,7 +55,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from farm import crop as fcrop  # noqa: E402
-from farm import house, trolley  # noqa: E402
+from farm import house  # noqa: E402
 # BIN_HALF and BIN_WALL are the crate's own geometry and are the two names in
 # `mission` that `farm.armframe` does *not* rebind per arm — see its `_HOLDERS`
 # note. Importing them by value is therefore safe here, where importing

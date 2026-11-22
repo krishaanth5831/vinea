@@ -252,8 +252,6 @@ def close_on_fruit(solref=None, ramp_s=1.5, seed=7):
     read afterwards misses exactly the spike that mattered and reports the
     hanging weight instead — a snapped stem comes back as a placid 1.18 N.
     """
-    import mujoco
-
     from fr5 import TOOL_SITE
     from reach import Gripper, hold
     from week2_pick import anchor_posture, make_reacher
