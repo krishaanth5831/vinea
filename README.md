@@ -14,10 +14,10 @@ came out badly, are written up in [docs/results.md](docs/results.md).
 
 > **Status: complete research sim, not under active development.** The work
 > here ran as a four-week sprint in August 2026. Vinea's module work has since
-> moved to separate repos built on the SO-101 arm:
-> [B.L.U.S.H](https://github.com/krishaanth5831/B.L.U.S.H) (harvest),
-> [S.H.E.A.R](https://github.com/krishaanth5831/S.H.E.A.R) (deleafing) and
-> [H.O.I.S.T](https://github.com/krishaanth5831/H.O.I.S.T) (lowering).
+> moved to separate repos:
+> [B.L.U.S.H](https://github.com/krishaanth5831/B.L.U.S.H) (harvest, on the SO-101 arm),
+> [S.H.E.A.R](https://github.com/krishaanth5831/S.H.E.A.R) (deleafing, on the SO-101 arm) and
+> [H.O.I.S.T](https://github.com/krishaanth5831/H.O.I.S.T) (lowering and rehanging the crop).
 > Nothing in this repo has run on a real robot.
 
 ---
@@ -32,8 +32,8 @@ came out badly, are written up in [docs/results.md](docs/results.md).
   so a careless arm knocks fruit off the plant.
 - **Collision-aware picking.** Every pick is planned before the arm moves and
   checked against every fruit it is not picking. If no route keeps 40 mm of
-  clearance, the pick is refused instead of improvised. A runtime guard aborts
-  if the real motion gets closer than the plan said.
+  clearance, the pick is refused instead of improvised. A runtime guard measures
+  the same clearance every control cycle and abandons the pick under 15 mm.
 - **Failure attribution.** A contact "black box" records why a fruit fell, and
   turns repeat failures into constraints the planner reads next time
   (`simulation/lessons.json`).
@@ -92,9 +92,10 @@ git clone --filter=blob:none --sparse \
 git -C third_party/mujoco_menagerie sparse-checkout set robotiq_2f85
 ```
 
-Tested with `frcobot_ros2` at `867cb32` and `mujoco_menagerie` at `71f066a`. If
-a newer upstream breaks something, `git -C third_party/<repo> checkout <hash>`
-pins it back.
+Developed against `frcobot_ros2` at `867cb32` and `mujoco_menagerie` at
+`71f066a`; a fresh clone at `eb6d7ce` and `370c439` (November 2026) passed the
+same tests. If a newer upstream breaks something,
+`git -C third_party/<repo> checkout <hash>` pins it back.
 
 **3. (Optional) Fetch the YOLO weights.** Only needed for `--detector yolo` and
 for `detect.py`, which scores both detectors. This is the stock 5.6 MB

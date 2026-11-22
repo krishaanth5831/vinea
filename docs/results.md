@@ -2,7 +2,8 @@
 
 This is the long version of what the simulation does and what it measured,
 week by week, kept as it was written during the August 2026 sprint (with
-corrections recorded in place rather than quietly edited away). The
+corrections recorded in place rather than quietly edited away). One commercial
+design-target figure was taken out when it moved here. The
 [README](../README.md) is the short version: setup, the commands to run, and
 the project layout.
 

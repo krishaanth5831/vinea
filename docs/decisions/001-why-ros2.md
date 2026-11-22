@@ -1,14 +1,14 @@
 # ADR 001 — Why ROS 2
 
 **Date:** 2026-06-19
-**Status:** Superseded for the simulation (2026-07). Still the intended middleware for hardware.
+**Status:** Superseded for the simulation. Still the intended middleware for hardware.
 
 > **What changed.** The simulation moved to MuJoCo + `mink` and runs as plain
 > Python with no ROS in the loop: Gazebo was dropped, and MoveIt 2 has no
 > binaries for the ROS 2 release on the dev machine (Lyrical, Ubuntu 26.04).
 > The reasoning below still applies once there is real hardware with several
-> processes; the package skeletons wait in `ros2/`. The record is kept as
-> written on the day.
+> processes; the package skeletons wait in `ros2/`. The rest of the record is
+> as written on the day, apart from one reworded bullet under Reasons.
 
 ## Decision
 
