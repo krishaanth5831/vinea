@@ -213,7 +213,7 @@ def add_camera_housing(body, name, pos, xyaxes, kind="d435", stalk=None):
       * contype/conaffinity: the wrist housing hangs 90 mm off wrist3_link,
         which is precisely where `mission.ClearanceModel` measures gripper-to-
         fruit distance. A collidable box there would move CLEARANCE, the guard
-        stop, and every clearance figure in the README — and it would do it
+        stop, and every clearance figure in docs/results.md — and it would do it
         silently, because they are all measured rather than asserted.
       * mass: the FR5's links carry explicit <inertial> from the URDF, so
         MuJoCo ignores geom mass on those. Bodies created by this repo's own

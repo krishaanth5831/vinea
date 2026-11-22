@@ -1421,7 +1421,7 @@ def _assert_inert(args):
     90 mm off wrist3_link, exactly where `mission.ClearanceModel` measures
     gripper-to-fruit distance, and the arm's joint torque limits were checked
     against a payload that does not include a camera. Both failure modes are
-    silent — every clearance number in the README would simply be a different
+    silent — every clearance number in docs/results.md would simply be a different
     number, with nothing to say it had moved.
     """
     from fr5 import WRIST_LINK

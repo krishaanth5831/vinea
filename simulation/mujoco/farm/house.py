@@ -8,8 +8,8 @@ to *drive*, because everything that decides a route — how far apart the rows
 are, where the rails run, how long a bay is, which row you can reach from which
 aisle — was scenery there and is the problem here.
 
-⚠️ **This is a second scene, not a replacement.** Every number in the Week 1-4
-README was measured in `greenhouse.build_scene`, and rebuilding that scene under
+⚠️ **This is a second scene, not a replacement.** Every Week 1-4 number in
+docs/results.md was measured in `greenhouse.build_scene`, and rebuilding that scene under
 those numbers would invalidate them without a single test failing. `house.py`
 sits beside it and shares its plant-drawing code; `greenhouse.py` is untouched.
 
