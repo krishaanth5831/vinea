@@ -1,8 +1,8 @@
 # Commands — what each one does, and what you actually see
 
-Every command in the repo, Weeks 1–4, with what happens when you run it.
+Every command in the repo, Weeks 1–5b, with what happens when you run it.
 
-**Run everything from the repo root** (`~/Desktop/personal_projects/vinea`) and use `./.venv/bin/python` explicitly — the system Python has none of this installed.
+**Run everything from the repo root** and use `./.venv/bin/python` explicitly — the system Python has none of this installed.
 
 ---
 
@@ -571,7 +571,7 @@ z 0.28      X      g      g      u      u      X      g
 
 ⚠️ **`week4_run.py` appends.** Point `--out` at a fresh file or you mix two campaigns in one log. This has already happened once.
 
-⚠️ **`--deck` is a different campaign, not more samples of the same one.** It changes the pick order, which is a methodology change — the 57-attempt figure in the README was taken without it, on rows generated under the old 200 mm spacing minimum. Log it separately and compare the two, rather than pooling them.
+⚠️ **`--deck` is a different campaign, not more samples of the same one.** It changes the pick order, which is a methodology change — the 57-attempt figure in [docs/results.md](docs/results.md) was taken without it, on rows generated under the old 200 mm spacing minimum. Log it separately and compare the two, rather than pooling them.
 
 ---
 
@@ -1182,4 +1182,4 @@ Watching runs at wall-clock speed. Headless runs faster than real time, but only
 
 ---
 
-[README](README.md) · [Week 4 instructions](../k7_ideaverse_2.0/03%20Projects/Vinea/08%20Technical/) · captures are named after the script that produced them
+[README](README.md) · [results](docs/results.md) · captures are named after the script that produced them

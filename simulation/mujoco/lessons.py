@@ -67,7 +67,6 @@ from incident import (  # noqa: E402
     PINNED,
     STEM_OVERLOAD,
     TOOL_STRIKE,
-    UNKNOWN,
 )
 
 STORE = Path(__file__).resolve().parents[2] / "simulation" / "lessons.json"
@@ -287,8 +286,8 @@ def main():
     """Learn from what the *unplanned* cycle actually did, then plan with it.
 
     Everything here is measured, not staged: the incidents come from running
-    `legacy_cycle.py` with the black box attached, which is the same run the
-    README quotes.
+    `legacy_cycle.py` with the black box attached, which is the same run
+    docs/results.md quotes.
     """
     import os
     os.environ.setdefault("MUJOCO_GL", "egl")

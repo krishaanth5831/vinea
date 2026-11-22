@@ -83,10 +83,6 @@ def attribute(shift):
     _left, right = house.serves(shift.aisle)
     ripe = [t for t in shift.trusses if t.ripe and t.row == right]
 
-    mapped = []
-    if shift.house_map is not None:
-        mapped = [np.asarray(s.pos, float) for s in shift.house_map.sightings]
-
     routed = set()
     if shift.route is not None:
         for stop in shift.route.stops:

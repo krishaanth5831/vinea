@@ -20,14 +20,14 @@ Venlo-type high-wire tomato house:
 The fruit sit at z = 0.54-0.72, which is low on the plant, and that is correct
 rather than convenient: in high-wire tomato the ripe trusses are the *lowest*
 ones and the picker works the bottom of the canopy. The rest of the plant is
-out of this arm's band and the README says so instead of pretending otherwise.
+out of this arm's band and docs/results.md says so instead of pretending otherwise.
 
 ⚠️ **All of this is scenery, and deliberately so.** Every geom added here
 carries `contype=0, conaffinity=0` — it is drawn and it cannot be hit. The
 collision-relevant geometry is exactly what it was before: the fruit, the
 support bar and the row panel from `plant_row.py`, plus the floor and the
 crate. That is not laziness. Week 2's contact behaviour is tuned against those
-surfaces and those numbers are in the README; quietly adding a dozen collidable
+surfaces and those numbers are in docs/results.md; quietly adding a dozen collidable
 leaves would change every one of them and the change would be invisible in the
 diff. If a leaf ever needs to be a real obstacle it should be added to
 `plant_row` with the measurement to justify it, not smuggled in with the decor.
@@ -49,7 +49,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fr5 import add_crate, build_fr5_spec, tool_pos  # noqa: E402
-from plant_row import ROW_X, SUPPORT_Z, add_row  # noqa: E402
+from plant_row import ROW_X, add_row  # noqa: E402
 
 # --- the one contact number that decides whether a pick survives -------------
 #

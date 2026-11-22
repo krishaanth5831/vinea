@@ -76,7 +76,7 @@ BAND_ORDER = ("red", "turning", "breaker", "green")
 # --- the two measured failures, drawn on the frame ---------------------------
 #
 # ⚠️ **Measured on the cameras these numbers are drawn on, which is not the
-# camera README.md quotes.** Per-stage recall of the colour classifier, and the
+# camera docs/results.md quotes.** Per-stage recall of the colour classifier, and the
 # fraction of what it found that it then banded correctly:
 #
 #   (recall %, correctly-banded-when-found %)
@@ -113,7 +113,7 @@ RECALL = {
 }
 
 # ⚠️ **The other measured failure, and it is not the one this repo had written
-# down.** README.md records four fruit in a 70 mm cluster fusing into a single
+# down.** docs/results.md records four fruit in a 70 mm cluster fusing into a single
 # blob and coming back as ONE detection positioned 48 mm off. That was measured
 # on the Week 4 chassis mast at 1.3 m. Re-measured on `farm.decks` at its own
 # 0.60 m standoff, head-on at pan 0, on the panel these words are printed on:

@@ -59,14 +59,12 @@ from vinea_gripper import Blade, add_vinea_gripper  # noqa: E402
 # and now live in `legacy_cycle.py`, which is where this file's own state
 # machine still belongs too.
 from mission import (  # noqa: E402
-    BIN_DROP_UP,
     BIN_HALF,
     BIN_POS,
     BIN_WALL,
     DOWNWARD,
     INTO_ROW,
     ORIENTATION_COST,
-    ROLL_COST,
     STAGE_X,
     TURN_COST,
 )

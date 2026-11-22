@@ -57,7 +57,7 @@ def main():
     ap.add_argument("--speed", type=float, default=None)
     # ⚠️ **Off by default, and that is not an oversight.** The campaign's whole
     # value is that its 57 attempts are comparable with each other and with the
-    # figure in the README; turning the deck camera on changes the pick order,
+    # figure in docs/results.md; turning the deck camera on changes the pick order,
     # which is a methodology change, not a flag. Run it on to measure what the
     # ordering does to throughput across densities — but report it as its own
     # campaign rather than as more samples of the old one.

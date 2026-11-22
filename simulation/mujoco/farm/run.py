@@ -152,7 +152,6 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
                   trusses=list(trusses), aisle=aisle)
 
     # --- 1. scout ------------------------------------------------------------
-    t0 = _time.perf_counter()
     if use_truth:
         house_map = HouseMap(
             sightings=[Sighting(pos=t.pos, stage=t.stage, hue=float("nan"),
@@ -196,7 +195,6 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
         print(f"\n{'=' * 78}\n  3. HARVEST — {r.n_fruit} ripe fruit in "
               f"{len(r.stops)} stops")
     say("phase", phase="HARVEST")
-    odo0 = drive.travelled
 
     for si, stop in enumerate(r.stops, 1):
         say("stop", i=si, n=len(r.stops), y=stop.y, fruit=list(stop.fruit))
@@ -262,7 +260,6 @@ def run(seed=None, aisle=0, n_per_row=14, speed=0.4, use_truth=False,
 
             tick = trace.tick if on_tick is None else (
                 lambda t=None, _tr=trace: (_tr.tick(t), on_tick(t)))
-            f0 = _time.perf_counter()
             try:
                 with armframe.at_trolley(model, data):
                     res = execute(m, reacher, gripper, row, box=trace,

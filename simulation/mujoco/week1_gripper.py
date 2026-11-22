@@ -200,7 +200,7 @@ def run_pick(reacher, gripper, on_tick=None, verbose=True):
         # Left as None deliberately. Fixing it means choosing a transit point
         # for *this* scene — the row scene's does not belong to it — and that
         # is a tuned constant, which is not a thing to add overnight on a
-        # branch. The measurement is in BUGSWEEP.md; the decision is yours.
+        # branch. The measurement is in docs/bugsweep/BUGSWEEP.md; the decision is yours.
         transit=None,
         release=BIN_POS + np.array([0, 0, BIN_DROP_UP]),
         engage_label="descend",   # tool0 is between the fingertips, so driving

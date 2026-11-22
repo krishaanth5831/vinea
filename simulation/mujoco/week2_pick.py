@@ -73,7 +73,7 @@ from mission import (  # noqa: E402
     ORIENTATION_COST,
     Planner,
     ROLL_COST,
-    INTO_ROW,
+    INTO_ROW,  # noqa: F401 - unused here, but farm.armframe rebinds week2_pick.INTO_ROW per arm
     park_posture,
     reset_park,
 )
@@ -83,7 +83,6 @@ from reach import (  # noqa: E402
     DEFAULT_SPEED,
     Gripper,
     Reacher,
-    hold,
     hold_steps,
 )
 

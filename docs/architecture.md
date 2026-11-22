@@ -1,6 +1,11 @@
 # Vinea — System Architecture
 
-> **Status:** Placeholder — to be updated as simulation develops.
+> **Status: the original June 2026 plan, superseded.** This describes the
+> ROS 2 + Gazebo + MoveIt 2 layout the repo started with. None of it was built:
+> the simulation runs in MuJoCo with `mink` differential IK, as plain Python in
+> `simulation/mujoco/` (see the README's Project layout). The package skeletons
+> named below are in `ros2/` and are empty. Kept as the intended split for a
+> hardware phase.
 
 ## High-Level Overview
 
@@ -32,7 +37,7 @@
                 └──────────────┘
 ```
 
-## ROS 2 Packages
+## ROS 2 Packages (empty skeletons in `ros2/`)
 
 | Package | Role |
 |---|---|
@@ -48,7 +53,7 @@
 - **Gazebo Fortress** — physics simulation, greenhouse world
 - **RViz 2** — visualisation, debugging
 - **MoveIt 2** — motion planning
-- World file: `simulation/gazebo/worlds/greenhouse_row.world`
+- World file: `simulation/gazebo/worlds/greenhouse_row.world` (never created; the Gazebo folders were removed)
 
 ## Sensing Stack
 
@@ -56,4 +61,4 @@
 
 ## CV Pipeline
 
-> YOLOv8 (Ultralytics) for tomato detection. Models stored in `models/tomato_detector/`. Large model files (.pt, .onnx) are not committed — use download script.
+> Planned: YOLOv8 (Ultralytics) for tomato detection. What was built instead: `simulation/mujoco/detect.py` scores an HSV colour detector against a stock, un-fine-tuned `yolo11n` checkpoint (`models/weights/yolo11n.pt`, not committed — see the README's Setup).

@@ -229,7 +229,6 @@ def add_arm_deck_cameras(spec, aisle=0, arms=("a", "b"),
     from camera import _xyaxes_towards, add_camera_housing
 
     body = spec.body(body_name)
-    ax = house.aisle_x(aisle)
 
     for tag in arms:
         mount = _mount_local(tag)
