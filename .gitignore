@@ -78,3 +78,9 @@ twoarm_*.png
 
 # MuJoCo runtime log
 MUJOCO_LOG.TXT
+
+# Local tool state — per-machine, never part of the repo.
+.claude/settings.local.json
+.entire/
+# Output of the /brag launch-video skill (rendered video + composition).
+brag-output/
