@@ -1,40 +1,35 @@
-# Vinea — Concept
+# Vinea — Concept (as of June 2026)
+
+> This is the concept the repo was started on. The company's framing has moved
+> on since (see [getvinea.nl](https://getvinea.nl)), and the robot work now
+> lives in separate per-module repos. Kept for context on why the simulation
+> was built the way it was.
 
 ## The Problem
 
-Dutch greenhouse operators spend ~€1.6M/year per 5-hectare site on manual harvesting and scouting labour. Seasonal labour supply is structurally collapsing — 75% less available greenhouse labour reported recently. The only funded competitor (SAIA Agrobotics) requires a full greenhouse rebuild, leaving ~95% of the market with no viable automation option.
+Harvesting and scouting in Dutch commercial greenhouses are done by hand, and
+the seasonal labour that does them is getting harder to find every year.
+A robot that helps has to fit the greenhouse as it already is, because
+rebuilding a glasshouse around a machine is not an option for most growers.
 
 ## The Solution
 
-A modular autonomous robot that works inside **existing** greenhouse row infrastructure — no rebuild required.
+A modular autonomous robot that works inside **existing** greenhouse row
+infrastructure, with no rebuild required.
 
 Two swappable modules on one configurable base:
-- **Harvest module** — autonomous picking + de-leafing, CV-guided, crop-specific grippers (tomato first)
-- **Scout module** — daily plant health inspection, disease/pest detection 3–5 days before visible symptoms, grower dashboard alerts
+- **Harvest module** — autonomous picking and de-leafing, camera-guided,
+  crop-specific grippers (tomato first)
+- **Scout module** — routine plant-health inspection, aiming to catch disease
+  and pests before they are visible to a person walking the row
 
-Same chassis across all customers. Only the gripper, row-width adapter, and licensed module set vary.
+Same chassis across all customers. Only the gripper, the row-width adapter and
+the module set vary.
 
-## Why Now
+## Why simulation first
 
-Five forces converge in 2026:
-1. Seasonal labour pipeline is structurally breaking (not cyclical)
-2. RGB-D cameras dropped from $500 → $150, LiDAR from $10k → <$1k (2020–2024)
-3. SAIA's €10M raise proves investors will fund this thesis
-4. Dutch government infrastructure — HIC venture studio, €450M+ in agri-innovation funding
-5. Vertical farming collapse released agri-robotics talent and drove hardware costs down
-
-## Business Model
-
-**Robot-as-a-Service (RaaS)** — monthly subscription, no upfront purchase, 12-month minimum.
-One robot (€5,800/month) replaces 3–4 workers — cheaper than the labour it replaces from month one.
-
-## Target Market
-
-- **Beachhead:** Dutch tomato/cucumber/pepper operators, 3–10 ha, Westland/Lansingerland
-- **SAM (Netherlands):** €167–223M/year
-- **Long-term (Europe):** €1.3–2.5B/year
-
-## Status
-
-Pre-prototype. Simulation-first development in ROS 2 + Gazebo.
-The single most important thing to prove: **~450–600 fruit/hr throughput** to replace 3 workers.
+The single most important technical question was whether one arm on a moving
+base can pick fast enough, and cleanly enough, to be worth deploying. That can
+be answered in a physics simulator before any hardware is bought, which is what
+`simulation/mujoco/` does. The results, including the ones that came out badly,
+are in [results.md](results.md).
